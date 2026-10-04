@@ -1,12 +1,116 @@
 <!doctype html>
-<html lang="zh-TW">
+<html lang="en">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Hivemind - Worker 節點管理</title>
+    <meta name="theme-color" content="#ffffff" />
+    <title>Hivemind - Worker Console</title>
+    <style>
+      :root { color-scheme: light; font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: var(--background, #fff); color: var(--foreground, #171717); }
+      * { box-sizing: border-box; }
+      body { min-width: 320px; min-height: 100vh; margin: 0; background: var(--background, #fff); }
+      .fallback-shell { display: grid; min-height: 100vh; place-items: center; padding: 24px 16px; }
+      .fallback-content { width: min(680px, 100%); }
+      .fallback-brand { display: flex; gap: 11px; align-items: center; margin-bottom: 13px; }
+      .fallback-mark { position: relative; display: grid; flex: 0 0 38px; width: 38px; height: 38px; place-items: center; border: 1px solid var(--border, #e5e5e5); border-radius: 11px; background: var(--muted, #f5f5f5); }
+      .fallback-mark i { position: absolute; width: 6px; height: 6px; border-radius: 50%; background: var(--foreground, #262626); animation: fallback-pulse 1.25s ease-in-out infinite; }
+      .fallback-mark i:nth-child(1) { transform: translateY(-7px); }
+      .fallback-mark i:nth-child(2) { transform: translate(-6px, 5px); animation-delay: 160ms; opacity: .65; }
+      .fallback-mark i:nth-child(3) { transform: translate(6px, 5px); animation-delay: 320ms; opacity: .4; }
+      .fallback-eyebrow { margin: 0 0 3px; color: var(--muted-foreground, #737373); font-size: 10px; font-weight: 650; letter-spacing: .14em; text-transform: uppercase; }
+      .fallback-brand h1 { margin: 0; font-size: 17px; font-weight: 650; }
+      .fallback-panel { min-width: 0; padding: clamp(18px, 4vw, 26px); border: 1px solid var(--border, #e5e5e5); border-radius: 12px; background: var(--card, #fff); color: var(--card-foreground, #171717); box-shadow: 0 8px 30px rgb(0 0 0 / .045); }
+      .fallback-panel h2 { margin: 0 0 7px; font-size: clamp(20px, 4vw, 25px); letter-spacing: -.03em; line-height: 1.2; }
+      .fallback-panel p { margin: 0; color: var(--muted-foreground, #737373); font-size: 13px; line-height: 1.55; }
+      .fallback-dots { display: flex; gap: 7px; margin: 20px 0 16px; }
+      .fallback-dots i { width: 6px; height: 6px; border-radius: 50%; background: var(--foreground, #262626); animation: fallback-pulse 1.25s ease-in-out infinite; }
+      .fallback-dots i:nth-child(2) { animation-delay: 160ms; opacity: .65; }
+      .fallback-dots i:nth-child(3) { animation-delay: 320ms; opacity: .4; }
+      .fallback-steps { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 140px), 1fr)); gap: 7px; padding: 0; margin: 0; list-style: none; }
+      .fallback-steps li { min-width: 0; padding: 9px 10px; border: 1px solid var(--border, #e5e5e5); border-radius: 8px; color: var(--muted-foreground, #737373); background: var(--card, #fff); font-size: 11px; overflow-wrap: anywhere; }
+      .fallback-steps li:first-child { color: var(--secondary-foreground, #171717); background: var(--secondary, #f5f5f5); }
+      .fallback-skeleton { display: grid; gap: 8px; margin-top: 16px; }
+      .fallback-skeleton i { height: 10px; border-radius: 999px; background: linear-gradient(90deg, var(--muted, #f5f5f5), var(--border, #e5e5e5), var(--muted, #f5f5f5)); background-size: 200% 100%; animation: fallback-shimmer 1.8s ease-in-out infinite; }
+      .fallback-skeleton i:nth-child(1) { width: 72%; }
+      .fallback-skeleton i:nth-child(2) { width: 54%; }
+      .fallback-skeleton i:nth-child(3) { width: 84%; }
+      .fallback-recovery { display: flex; gap: 10px; align-items: center; justify-content: space-between; flex-wrap: wrap; margin-top: 16px; }
+      .fallback-recovery a { display: none; color: var(--foreground, #171717); font-size: 12px; text-underline-offset: 3px; }
+      .fallback-shell.recovery-state .fallback-recovery a { display: inline-flex; }
+      .fallback-shell.recovery-state .fallback-mark i,
+      .fallback-shell.recovery-state .fallback-dots i,
+      .fallback-shell.recovery-state .fallback-skeleton i { animation: none; }
+      .fallback-shell.recovery-state .fallback-dots,
+      .fallback-shell.recovery-state .fallback-skeleton { display: none; }
+      @keyframes fallback-pulse { 0%, 80%, 100% { opacity: .35; } 40% { opacity: 1; } }
+      @keyframes fallback-shimmer { 0% { background-position: 100% 0; } 100% { background-position: -100% 0; } }
+      @media (max-width: 380px) { .fallback-shell { padding-inline: 12px; } .fallback-steps { grid-template-columns: minmax(0, 1fr); } }
+      @media (prefers-reduced-motion: reduce) { .fallback-mark i, .fallback-dots i, .fallback-skeleton i { animation: none; } }
+    </style>
+    <script>
+      (() => {
+        try {
+          if (window.localStorage.getItem('hivemind.worker.theme') === 'dark') {
+            document.documentElement.classList.add('dark');
+          }
+        } catch {
+          // The default theme remains available when storage is blocked.
+        }
+      })();
+    </script>
   </head>
   <body>
-    <div id="root"></div>
+    <div id="root">
+      <main class="fallback-shell">
+        <div class="fallback-content">
+          <header class="fallback-brand">
+            <span class="fallback-mark" aria-hidden="true"><i></i><i></i><i></i></span>
+            <div>
+              <p class="fallback-eyebrow">Hivemind</p>
+              <h1>Worker console</h1>
+            </div>
+          </header>
+          <section class="fallback-panel" aria-live="polite" aria-busy="true">
+            <h2>Getting your worker ready</h2>
+            <p id="fallback-note">Starting the Worker console and checking local services.</p>
+            <div class="fallback-dots" aria-hidden="true"><i></i><i></i><i></i></div>
+            <ol class="fallback-steps" aria-label="Worker setup progress">
+              <li aria-current="step">Start Worker</li>
+              <li>Connect services</li>
+              <li>Check this computer</li>
+              <li>Prepare worker</li>
+            </ol>
+            <div class="fallback-skeleton" aria-hidden="true"><i></i><i></i><i></i></div>
+            <div class="fallback-recovery">
+              <span id="fallback-recovery-note" aria-live="off"></span>
+              <a href="./">Reload console</a>
+            </div>
+          </section>
+        </div>
+      </main>
+    </div>
+    <noscript><p style="padding: 20px; color: var(--foreground, #171717)">Enable JavaScript to open the Hivemind Worker console.</p></noscript>
+    <script>
+      (() => {
+        const shell = document.querySelector('.fallback-shell');
+        const panel = document.querySelector('.fallback-panel');
+        const note = document.getElementById('fallback-note');
+        const recovery = document.getElementById('fallback-recovery-note');
+        const showRecovery = (message) => {
+          if (!shell?.isConnected || !panel?.isConnected) return;
+          shell.classList.add('recovery-state');
+          panel.setAttribute('aria-busy', 'false');
+          if (note) note.textContent = message;
+          if (recovery) recovery.textContent = 'If it does not recover, reload the console.';
+        };
+        window.setTimeout(() => showRecovery('The console is still loading.'), 12000);
+        window.addEventListener('error', (event) => {
+          if (event.target && event.target.tagName === 'SCRIPT') {
+            showRecovery('The Worker console could not load.');
+          }
+        }, true);
+      })();
+    </script>
     <script type="module" src="/src/main.jsx"></script>
   </body>
 </html>

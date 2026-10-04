@@ -104,3 +104,11 @@ describe('worker UI durable secret policy', () => {
     assert.ok(appSource.includes('window.sessionStorage'));
   });
 });
+
+describe('worker UI logout click wiring', () => {
+  it('does not pass the React click event as a logout message', async () => {
+    const appSource = await readFile(new URL('./App.jsx', import.meta.url), 'utf8');
+    assert.match(appSource, /onClick=\{\(\) => logout\(\)\}/);
+    assert.doesNotMatch(appSource, /onClick=\{logout\}/);
+  });
+});

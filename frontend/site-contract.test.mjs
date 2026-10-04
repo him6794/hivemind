@@ -152,16 +152,26 @@ test('task observability is exposed by the trusted API and rendered by Master UI
     'utf8'
   );
   const masterUi = fs.readFileSync(new URL('./master-ui/src/App.jsx', import.meta.url), 'utf8');
+  const observability = fs.readFileSync(new URL('./master-ui/src/taskObservability.mjs', import.meta.url), 'utf8');
+  const fields = {
+    worker_id: 'workerId',
+    provider_user: 'providerUser',
+    dispatch_status: 'dispatchStatus',
+    usage_units: 'usageUnits',
+    max_cpt: 'chargeCapCpt',
+  };
 
-  for (const field of ['worker_id', 'provider_user', 'dispatch_status', 'usage_units', 'max_cpt']) {
+  for (const [field, property] of Object.entries(fields)) {
     assert.match(proto, new RegExp(`\\b${field}\\b`), `proto must expose ${field}`);
     assert.match(nodeManager, new RegExp(`\\b${field}\\b`), `nodepool must populate ${field}`);
     assert.match(masterApi, new RegExp(`\\b${field}\\b`), `Master API must forward ${field}`);
-    assert.match(masterUi, new RegExp(field), `Master UI must render ${field}`);
+    assert.match(observability, new RegExp(`\\b${field}\\b`), `Master normalizer must consume ${field}`);
+    assert.match(masterUi, new RegExp(`observability\\.${property}\\b`), `Master UI must render ${field}`);
   }
+  assert.match(masterUi, /normalizeTaskObservability\(task\)/);
   assert.match(masterUi, /Credits used|Charged|Billed|結算/);
-  assert.match(masterUi, /Provider|provider_user/);
-  assert.match(masterUi, /Redispatch|dispatch_status/);
+  assert.match(masterUi, /Shared by/);
+  assert.match(masterUi, /Progress/);
 });
 
 // Documentation drifts away from the system silently: nothing breaks when a
@@ -389,9 +399,9 @@ test('release browser QA covers account, worker registration, and task lifecycle
   assert.match(configSource, /msedge|chrome/);
   assert.match(flowSource, /official site/i);
   assert.match(flowSource, /Account Center/);
-  assert.match(flowSource, /Share this computer/);
+  assert.match(flowSource, /Worker console/);
   assert.match(flowSource, /Sign in and connect/);
-  assert.match(flowSource, /Task dashboard/);
+  assert.match(flowSource, /Master console/);
   assert.match(flowSource, /Send task/);
   assert.match(flowSource, /Log/);
   assert.match(flowSource, /Output in Log/);

@@ -80,10 +80,7 @@ export function buildRegisterWorkerBody(username, workerProfile, endpoint) {
 }
 
 export function buildRegisterWorkerRequest(workerControlBase, authToken, body) {
-  const base = String(workerControlBase || '').trim().replace(/\/$/, '');
-  if (!base) {
-    throw new Error('Worker Control base URL is required');
-  }
+  const base = String(workerControlBase || '').trim().replace(/\/+$/, '');
   return {
     url: `${base}/api/register-worker`,
     options: {

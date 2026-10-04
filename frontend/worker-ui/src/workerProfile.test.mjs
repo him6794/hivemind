@@ -95,6 +95,11 @@ describe('worker profile registration payload', () => {
     });
   });
 
+  it('registers through the same origin when Worker Control base is root', () => {
+    const request = buildRegisterWorkerRequest('/', 'worker-session-token', {});
+    assert.equal(request.url, '/api/register-worker');
+  });
+
   it('uses authenticated username instead of edited login form username for re-registration', () => {
     assert.equal(registrationOwnerUsername(' alice ', ' bob '), 'alice');
     assert.equal(registrationOwnerUsername('', ' bob '), 'bob');

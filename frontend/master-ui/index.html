@@ -1,12 +1,76 @@
 <!doctype html>
-<html lang="zh-TW">
+<html lang="en">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Hivemind - 任務管理中心</title>
+    <meta name="theme-color" content="#ffffff" />
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 24 24%22%3E%3Ccircle cx=%2212%22 cy=%2212%22 r=%228%22 fill=%22%23171717%22/%3E%3C/svg%3E" />
+    <meta name="description" content="Hivemind Master task console" />
+    <title>Hivemind | Master Console</title>
+    <style>
+      :root { color-scheme: light; font-family: Inter, ui-sans-serif, system-ui, sans-serif; background: var(--background, #fff); color: var(--foreground, #171717); }
+      * { box-sizing: border-box; }
+      body { min-width: 320px; min-height: 100vh; margin: 0; }
+      #startup-fallback { position: fixed; z-index: 20; inset: 0; display: grid; place-items: center; padding: 20px; background: var(--background, #fff); }
+      .fallback-card { width: min(400px, 100%); padding: 28px 24px; border: 1px solid var(--border, #e5e5e5); border-radius: 12px; background: var(--card, #fff); color: var(--card-foreground, #171717); text-align: center; }
+      .fallback-mark { display: grid; width: 44px; height: 44px; place-items: center; margin: 0 auto 18px; border: 1px solid var(--border, #e5e5e5); border-radius: 12px; color: var(--foreground, #171717); }
+      .fallback-mark svg { width: 20px; height: 20px; }
+      .fallback-kicker { margin: 0 0 6px; color: var(--muted-foreground, #737373); font: 600 11px/1.2 ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: .13em; text-transform: uppercase; }
+      .fallback-card h1 { margin: 0; font-size: 22px; letter-spacing: -.03em; }
+      .fallback-message { min-height: 22px; margin: 12px 0 18px; color: var(--muted-foreground, #737373); font-size: 13px; line-height: 1.5; }
+      .fallback-dots { display: flex; height: 10px; justify-content: center; gap: 6px; }
+      .fallback-dots i { width: 6px; height: 6px; border-radius: 50%; background: var(--muted-foreground, #737373); animation: fallback-pulse 1s ease-in-out infinite; }
+      .fallback-dots i:nth-child(2) { animation-delay: .14s; }
+      .fallback-dots i:nth-child(3) { animation-delay: .28s; }
+      .fallback-action { padding: 8px 13px; border: 1px solid var(--input, #d4d4d4); border-radius: 7px; background: var(--primary, #171717); color: var(--primary-foreground, #fff); font: inherit; font-size: 13px; font-weight: 600; cursor: pointer; }
+      .fallback-action[hidden], .fallback-dots[hidden] { display: none; }
+      @keyframes fallback-pulse { 0%, 60%, 100% { transform: translateY(0); opacity: .42; } 30% { transform: translateY(-3px); opacity: 1; } }
+      @media (prefers-reduced-motion: reduce) { .fallback-dots i { animation: none; opacity: .8; } }
+    </style>
+    <script>
+      (() => {
+        try {
+          if (window.localStorage.getItem('hivemind.master.theme.v1') === 'dark') {
+            document.documentElement.classList.add('dark');
+          }
+        } catch {
+          // The default theme remains available when storage is blocked.
+        }
+      })();
+    </script>
   </head>
   <body>
+    <div id="startup-fallback" aria-busy="true">
+      <section class="fallback-card">
+        <div class="fallback-mark" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 8V4m0 16v-4m4-4h4M4 12h4m1.2-5.2 1.4 1.4m6.8 6.8 1.4 1.4m0-9.6-1.4 1.4m-6.8 6.8-1.4 1.4"/><circle cx="12" cy="12" r="3"/></svg></div>
+        <p class="fallback-kicker">Hivemind</p>
+        <h1>Master console</h1>
+        <p id="fallback-message" class="fallback-message" role="status" aria-live="polite">Preparing the console</p>
+        <span id="fallback-dots" class="fallback-dots" aria-hidden="true"><i></i><i></i><i></i></span>
+        <button id="fallback-action" class="fallback-action" type="button" hidden onclick="window.location.reload()">Reload console</button>
+      </section>
+    </div>
     <div id="root"></div>
+    <script>
+      (() => {
+        const shell = document.getElementById('startup-fallback');
+        const message = document.getElementById('fallback-message');
+        const dots = document.getElementById('fallback-dots');
+        const action = document.getElementById('fallback-action');
+        const showRecovery = (text) => {
+          if (!shell?.isConnected) return;
+          shell.dataset.state = 'recovery';
+          shell.setAttribute('aria-busy', 'false');
+          message.textContent = text;
+          dots.hidden = true;
+          action.hidden = false;
+        };
+        window.addEventListener('error', (event) => {
+          if (event.target instanceof HTMLScriptElement) showRecovery('The console could not start. Reload to try again.');
+        }, true);
+        window.setTimeout(() => showRecovery('Still preparing the console. You can reload and try again.'), 8000);
+      })();
+    </script>
     <script type="module" src="/src/main.jsx"></script>
   </body>
 </html>

@@ -79,7 +79,6 @@ export function normalizeWorkerDashboard(payload = {}) {
 export function buildWorkerDashboardRequest(workerControlBase, authToken) {
   const base = String(workerControlBase || '').trim().replace(/\/+$/, '');
   const token = String(authToken || '').trim();
-  if (!base) throw new Error('Worker Control base URL is required');
   if (!token) throw new Error('A signed-in session is required');
 
   return {

@@ -1,63 +1,34 @@
 "use client";
 
-import { Languages } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { Languages, Check } from "lucide-react";
+import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
+import { Button } from "@/components/ui/button";
 import { useI18n, type Locale } from "@/store/i18n-store";
-import { cn } from "@/lib/utils";
 
-const options: Array<{ value: Locale; label: string; short: string }> = [
-  { value: "zh", label: "中文", short: "ZH" },
-  { value: "en", label: "English", short: "EN" },
+const options: Array<{ value: Locale; label: string }> = [
+  { value: "zh", label: "中文" },
+  { value: "en", label: "English" },
 ];
 
 export function LocaleToggle({ className }: { className?: string }) {
   const { locale, setLocale } = useI18n();
-  const [open, setOpen] = useState(false);
-  const ref = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    const onPointerDown = (event: MouseEvent) => {
-      if (ref.current && !ref.current.contains(event.target as Node)) {
-        setOpen(false);
-      }
-    };
-    document.addEventListener("mousedown", onPointerDown);
-    return () => document.removeEventListener("mousedown", onPointerDown);
-  }, []);
-
   return (
-    <div ref={ref} className={cn("relative", className)}>
-      <button
-        type="button"
-        aria-label="Switch language"
-        onClick={() => setOpen((value) => !value)}
-        className="inline-flex size-9 items-center justify-center rounded-lg text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
-      >
-        <Languages className="size-4" />
-      </button>
-      {open ? (
-        <div className="absolute right-0 top-full z-50 mt-2 w-40 overflow-hidden rounded-xl border border-border bg-card p-1">
-          {options.map((option) => (
-            <button
-              key={option.value}
-              type="button"
-              onClick={() => {
-                setLocale(option.value);
-                setOpen(false);
-              }}
-              className={cn(
-                "flex w-full items-center justify-between rounded-lg px-3 py-2 text-left text-sm transition-colors",
-                locale === option.value
-                  ? "bg-honey/10 text-honey"
-                  : "text-muted-foreground hover:bg-accent hover:text-foreground"
-              )}
-            >
-              <span>{option.label}</span>
-              <span className="font-mono-tech text-xs">{option.short}</span>
-            </button>
-          ))}
-        </div>
-      ) : null}
-    </div>
+    <DropdownMenu.Root>
+      <DropdownMenu.Trigger asChild>
+        <Button type="button" variant="ghost" size="icon" aria-label="Switch language" className={`size-11 text-muted-foreground ${className || ""}`}><Languages aria-hidden="true" className="size-4" /></Button>
+      </DropdownMenu.Trigger>
+      <DropdownMenu.Portal>
+        <DropdownMenu.Content onCloseAutoFocus={(event) => { if (document.querySelector('[role="dialog"]')) event.preventDefault(); }} align="end" sideOffset={6} className="z-[60] min-w-36 rounded-md border bg-popover p-1 text-popover-foreground shadow-md outline-none data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=open]:fade-in-0 data-[state=closed]:fade-out-0 data-[state=open]:zoom-in-95 data-[state=closed]:zoom-out-95">
+          <DropdownMenu.RadioGroup value={locale} onValueChange={(value) => { if (value === "zh" || value === "en") setLocale(value); }}>
+            {options.map((option) => (
+              <DropdownMenu.RadioItem key={option.value} value={option.value} className="relative flex min-h-11 cursor-default select-none items-center rounded-sm py-2 pl-8 pr-3 text-sm outline-none focus:bg-accent focus:text-accent-foreground">
+                <DropdownMenu.ItemIndicator className="absolute left-2"><Check aria-hidden="true" className="size-4" /></DropdownMenu.ItemIndicator>
+                {option.label}
+              </DropdownMenu.RadioItem>
+            ))}
+          </DropdownMenu.RadioGroup>
+        </DropdownMenu.Content>
+      </DropdownMenu.Portal>
+    </DropdownMenu.Root>
   );
 }

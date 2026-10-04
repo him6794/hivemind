@@ -1,6 +1,17 @@
 import { useEffect, useRef, useState } from 'react';
+import { LogOut, Moon, Sun, UserRound } from 'lucide-react';
 import './console.css';
+import { Badge } from '@/components/ui/badge';
+import { Button } from '@/components/ui/button';
+import { Card, CardContent } from '@/components/ui/card';
+import { Input } from '@/components/ui/input';
+import { Label } from '@/components/ui/label';
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
+import { WorkerComputer } from './components/worker-computer.jsx';
+import { WorkerDashboard } from './components/worker-dashboard.jsx';
+import { LoadingPanel } from './components/worker-setup-panels.jsx';
 import { clearStoredSession, isExpiredJwt, readStoredSession, saveStoredSession } from './authSession.mjs';
+import { readThemePreference, writeThemePreference } from './themePreference.mjs';
 import {
   buildRegisterWorkerBody,
   buildRegisterWorkerRequest,
@@ -11,12 +22,19 @@ import {
 import {
   buildWorkerDashboardRequest,
   createNonOverlappingPoll,
-  deriveUsedPercent,
-  hasKnownDashboardMeasurement,
   normalizeWorkerDashboard,
-  PROVIDER_CREDITS_DETAIL,
-  PROVIDER_CREDITS_LABEL,
 } from './workerDashboard.mjs';
+import {
+  createSetupAttemptController,
+  createWorkerStartupStatusReader,
+  fetchWithDeadline,
+  getWorkerLoginError,
+  getWorkerSetupErrorMessage,
+  WorkerFetchTimeoutError,
+  WorkerLoginError,
+  isCurrentSessionAttempt,
+  waitForWorkerStartup,
+} from './workerStartup.mjs';
 
 const IP_PATTERN = /^[\w.-]+:\d{1,5}$/;
 const SESSION_KEY = 'hivemind.worker.session.v1';
@@ -28,60 +46,17 @@ function validateWorkerEndpoint(value) {
   return null;
 }
 
-function formatMetric(value, unit = '', maximumFractionDigits = 1) {
-  if (value === null || value === undefined || !Number.isFinite(value)) return 'Unknown';
-  const formatted = new Intl.NumberFormat(undefined, { maximumFractionDigits }).format(value);
-  return unit ? `${formatted} ${unit}` : formatted;
-}
-
-function formatSampledAt(value) {
-  if (!value) return 'Unknown';
-  const date = new Date(value);
-  if (!Number.isFinite(date.getTime())) return value;
-  return new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short' }).format(date);
-}
-
-function DashboardStat({ label, value, detail, className = '' }) {
-  return (
-    <article className={`dashboard-stat ${className}`.trim()}>
-      <span className="dashboard-stat-label">{label}</span>
-      <strong className="dashboard-stat-value">{value}</strong>
-      {detail ? <span className="dashboard-stat-detail">{detail}</span> : null}
-    </article>
-  );
-}
-
-function DashboardMeter({ label, value }) {
-  const known = hasKnownDashboardMeasurement(value);
-  const boundedValue = known ? Math.max(0, Math.min(100, value)) : 0;
-  return (
-    <article className="dashboard-stat">
-      <span className="dashboard-stat-label">{label}</span>
-      <strong className="dashboard-stat-value">{formatMetric(value, '%')}</strong>
-      {known ? (
-        <div
-          className="dashboard-meter-track"
-          role="meter"
-          aria-label={label}
-          aria-valuemin={0}
-          aria-valuemax={100}
-          aria-valuenow={boundedValue}
-          aria-valuetext={formatMetric(value, '%')}
-        >
-          <span className="dashboard-meter-fill" style={{ width: `${boundedValue}%` }} />
-        </div>
-      ) : (
-        <span className="dashboard-stat-detail">Telemetry unavailable</span>
-      )}
-    </article>
-  );
-}
-
 export default function WorkerApp() {
   const workerControlBase = String(import.meta.env.VITE_WORKER_CONTROL_BASE || 'http://127.0.0.1:18080')
     .trim()
-    .replace(/\/$/, '');
-  const initialSession = readStoredSession(window.sessionStorage, SESSION_KEY);
+    .replace(/\/+$/, '');
+  const [initialSession] = useState(() => readStoredSession(window.sessionStorage, SESSION_KEY));
+  const [theme, setTheme] = useState(() => readThemePreference());
+
+  useEffect(() => {
+    document.documentElement.classList.toggle('dark', theme === 'dark');
+    writeThemePreference(theme);
+  }, [theme]);
 
   const [username, setUsername] = useState(initialSession.username);
   const [password, setPassword] = useState('');
@@ -91,16 +66,26 @@ export default function WorkerApp() {
   const [loginLoading, setLoginLoading] = useState(false);
   const [profileLoading, setProfileLoading] = useState(false);
   const [profileError, setProfileError] = useState(null);
-  const [registerLoading, setRegisterLoading] = useState(false);
   const [refreshLoading, setRefreshLoading] = useState(false);
   const [workerIp, setWorkerIp] = useState('');
   const [profile, setProfile] = useState(emptyProfile);
+  const [profileLoaded, setProfileLoaded] = useState(false);
   const [registration, setRegistration] = useState(null);
   const [dashboard, setDashboard] = useState(null);
   const [dashboardLoading, setDashboardLoading] = useState(false);
   const [dashboardError, setDashboardError] = useState('');
+  const [backendReady, setBackendReady] = useState(false);
+  const [startupStatus, setStartupStatus] = useState({ state: 'initializing', phase: 'starting', code: null });
+  const [startupError, setStartupError] = useState(null);
+  const [startupRetryCount, setStartupRetryCount] = useState(0);
+  const [setupActive, setSetupActive] = useState(false);
+  const [setupPhase, setSetupPhase] = useState('starting');
+  const [setupError, setSetupError] = useState('');
+  const [setupErrorKind, setSetupErrorKind] = useState('');
   const sessionTokenRef = useRef(initialSession.token);
   const dashboardRefreshRef = useRef(null);
+  const setupControllerRef = useRef(null);
+  if (!setupControllerRef.current) setupControllerRef.current = createSetupAttemptController();
 
   async function readJson(res) {
     const text = await res.text();
@@ -112,47 +97,65 @@ export default function WorkerApp() {
     }
   }
 
-  async function refreshLocalProfile() {
+  async function fetchJsonWithDeadline(url, options) {
+    return fetchWithDeadline(fetch, url, options, {
+      consumeResponse: async (response) => ({
+        ok: response.ok,
+        status: response.status,
+        data: await readJson(response),
+      }),
+    });
+  }
+
+  async function refreshLocalProfile({ signal, isCurrent = () => true } = {}) {
+    if (!isCurrent()) return null;
     const ipError = validateWorkerEndpoint(workerIp);
-    if (ipError) {
-      throw new Error(ipError);
-    }
+    if (ipError) throw new Error(ipError);
 
     let res;
     try {
-      res = await fetch(`${workerControlBase}/api/worker-info`);
-    } catch {
+      res = await fetchJsonWithDeadline(`${workerControlBase}/api/worker-info`, { signal });
+    } catch (error) {
+      if (!isCurrent()) return null;
+      if (error instanceof WorkerFetchTimeoutError) throw error;
       throw new Error('This computer app could not be reached. Make sure it is open and try again.');
     }
-    const data = await readJson(res);
+    if (!isCurrent()) return null;
+    const data = res.data;
     if (!res.ok || !data.success || !data.profile) {
       throw new Error('This computer app could not be reached. Make sure it is open and try again.');
     }
 
     const normalized = normalizeWorkerProfile(data.profile, workerIp);
+    if (!isCurrent()) return null;
     setProfile(normalized);
+    setProfileLoaded(true);
     // Keep a detected callback address editable but never mandatory; a blank
     // field registers this worker as session-only.
-    if (!workerIp.trim() && normalized.ip) {
-      setWorkerIp(normalized.ip);
-    }
+    if (!workerIp.trim() && normalized.ip) setWorkerIp(normalized.ip);
     return normalized;
   }
 
-  async function bootstrapVpn(authToken = token) {
+  async function bootstrapVpn(authToken, { signal, isCurrent = () => true } = {}) {
     if (!authToken) throw new Error('Login is required before VPN bootstrap');
+    if (!isCurrent() || sessionTokenRef.current !== authToken) return null;
+
     let res;
     try {
-      res = await fetch(`${workerControlBase}/api/vpn/bootstrap`, {
+      res = await fetchJsonWithDeadline(`${workerControlBase}/api/vpn/bootstrap`, {
         method: 'POST',
         headers: { Authorization: `Bearer ${authToken}` },
+        signal,
       });
-    } catch {
+    } catch (error) {
+      if (!isCurrent() || sessionTokenRef.current !== authToken) return null;
+      if (error instanceof WorkerFetchTimeoutError) throw error;
       throw new Error('The network connection is not ready. Please try again.');
     }
-    const data = await readJson(res);
+    if (!isCurrent() || sessionTokenRef.current !== authToken) return null;
+    const data = res.data;
     if (res.status === 401) {
-      logout();
+      logout('Session expired. Please log in again.');
       throw new Error('Session expired. Please log in again.');
     }
     if (!res.ok || !data.success || !['ready', 'disabled'].includes(String(data.state || ''))) {
@@ -162,18 +165,16 @@ export default function WorkerApp() {
     return data;
   }
 
-  async function registerWorker(authToken = token, workerProfile = profile, endpoint = workerIp) {
+  async function registerWorker(authToken, workerProfile, endpoint, { signal, isCurrent = () => true } = {}) {
     const ownerUsername = registrationOwnerUsername(authenticatedUsername, username);
-    if (!authToken || !ownerUsername) return;
-    // The token may expire while this tab sits open; fail toward login
-    // instead of sending a request Nodepool must reject.
+    if (!authToken || !ownerUsername) throw new Error('Sign in before connecting this computer.');
+    if (!isCurrent() || sessionTokenRef.current !== authToken) return null;
+    // Avoid a request Nodepool must reject after this tab's JWT has expired.
     if (isExpiredJwt(authToken)) {
-      logout();
-      setStatus('Session expired. Please log in again.');
+      logout('Session expired. Please log in again.');
       setRegistration({ success: false, message: 'Session expired. Please log in again.' });
-      return;
+      throw new Error('Session expired. Please log in again.');
     }
-    setRegisterLoading(true);
     setStatus('Preparing this computer...');
 
     try {
@@ -185,22 +186,22 @@ export default function WorkerApp() {
       );
       let res;
       try {
-        res = await fetch(request.url, request.options);
-      } catch {
+        res = await fetchJsonWithDeadline(request.url, { ...request.options, signal });
+      } catch (error) {
+        if (!isCurrent() || sessionTokenRef.current !== authToken) return null;
+        if (error instanceof WorkerFetchTimeoutError) throw error;
         throw new Error('The network connection is not ready. Please try again.');
       }
-      const data = await readJson(res);
+      if (!isCurrent() || sessionTokenRef.current !== authToken) return null;
+      const data = res.data;
       if (!res.ok) {
         if (res.status === 401) {
-          logout();
+          logout('Session expired. Please log in again.');
           throw new Error('Session expired. Please log in again.');
         }
         throw new Error(data.message || data.status_message || `HTTP ${res.status}`);
       }
-
-      if (!data.success) {
-        throw new Error('This computer could not be connected. Please try again.');
-      }
+      if (!data.success) throw new Error('This computer could not be connected. Please try again.');
 
       setRegistration({
         success: true,
@@ -208,17 +209,18 @@ export default function WorkerApp() {
         workerId,
       });
       setStatus('This computer is ready to receive tasks.');
+      return data;
     } catch (err) {
-      console.error('Computer connection failed:', err);
-      setRegistration({ success: false, message: 'This computer could not be connected. Please try again.' });
-      setStatus('This computer could not be connected. Please try again.');
-    } finally {
-      setRegisterLoading(false);
+      if (isCurrent() && sessionTokenRef.current === authToken) {
+        setRegistration({ success: false, message: 'This computer could not be connected. Please try again.' });
+        setStatus('This computer could not be connected. Please try again.');
+      }
+      throw err;
     }
   }
   useEffect(() => {
-    if (!token) {
-      setDashboard(null);
+    if (!token || !backendReady) {
+      if (!token) setDashboard(null);
       setDashboardError('');
       setDashboardLoading(false);
       dashboardRefreshRef.current = null;
@@ -233,11 +235,13 @@ export default function WorkerApp() {
         const request = buildWorkerDashboardRequest(workerControlBase, token);
         let res;
         try {
-          res = await fetch(request.url, request.options);
+          res = await fetchJsonWithDeadline(request.url, request.options);
         } catch {
           throw new Error('The worker dashboard could not be reached.');
         }
-        const data = await readJson(res);
+        if (cancelled || sessionTokenRef.current !== token) return;
+        const data = res.data;
+        if (cancelled || sessionTokenRef.current !== token) return;
         if (res.status === 401) {
           if (!cancelled && sessionTokenRef.current === token) {
             logout();
@@ -269,60 +273,148 @@ export default function WorkerApp() {
       clearInterval(id);
       if (dashboardRefreshRef.current === refreshDashboard) dashboardRefreshRef.current = null;
     };
-  }, [token, workerControlBase]);
+  }, [token, workerControlBase, backendReady]);
 
-  async function handleLogin(e) {
-    e.preventDefault();
-    setLoginLoading(true);
-    setStatus('Logging in...');
-    sessionTokenRef.current = '';
-    setToken('');
-    setAuthenticatedUsername('');
+  async function runSetup(options = {}) {
+    const {
+      kind = 'profile',
+      authToken: suppliedToken = '',
+      ownerUsername = '',
+      credentials = null,
+    } = options;
+    const startingToken = suppliedToken || (kind === 'profile' || kind === 'login' ? '' : sessionTokenRef.current);
+    let attemptToken = startingToken;
+
+    setSetupActive(true);
+    setSetupError('');
+    setSetupErrorKind('');
+    setProfileError(null);
+    setProfileLoading(kind !== 'login');
+    setLoginLoading(kind === 'login');
+    setSetupPhase(kind === 'login' || (kind === 'restore' && attemptToken) ? 'connecting' : 'resources');
+    if (kind === 'login') setStatus('Signing in and connecting...');
+    else if (kind === 'restore' && attemptToken) setStatus('Signing in and connecting...');
+    else setStatus('Checking this computer...');
+
+    return setupControllerRef.current.run(async ({ signal, isCurrent: isAttemptCurrent }) => {
+      const isCurrent = () => isCurrentSessionAttempt(
+        isAttemptCurrent,
+        () => sessionTokenRef.current,
+        attemptToken,
+      );
+      const requireCurrent = () => {
+        if (!isCurrent()) {
+          const error = new Error('This setup attempt is no longer active.');
+          error.name = 'AbortError';
+          throw error;
+        }
+      };
+
+      try {
+        let authToken = attemptToken;
+        let accountName = ownerUsername || authenticatedUsername || username;
+
+        if (kind === 'login') {
+          requireCurrent();
+          let res;
+          try {
+            res = await fetchJsonWithDeadline(`${workerControlBase}/api/login`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ username: credentials?.username || '', password: credentials?.password || '' }),
+              signal,
+            });
+          } catch (error) {
+            requireCurrent();
+            if (error instanceof WorkerFetchTimeoutError || error?.name === 'AbortError') throw error;
+            throw new WorkerLoginError('network');
+          }
+          requireCurrent();
+          const loginError = getWorkerLoginError(res);
+          if (loginError) throw loginError;
+          const data = res.data;
+
+          authToken = data.token.trim();
+          accountName = String(credentials?.username || '').trim();
+          if (!accountName) throw new WorkerLoginError('invalid-response');
+          attemptToken = authToken;
+          sessionTokenRef.current = authToken;
+          saveStoredSession(window.sessionStorage, SESSION_KEY, { token: authToken, username: accountName });
+          setToken(authToken);
+          setUsername(accountName);
+          setPassword('');
+          setAuthenticatedUsername(accountName);
+          setRegistration(null);
+          requireCurrent();
+        }
+
+        if (kind === 'restore' || kind === 'login') {
+          if (!authToken) throw new Error('Sign in before connecting this computer.');
+          setSetupPhase('connecting');
+          setStatus('Signing in and connecting...');
+          await bootstrapVpn(authToken, { signal, isCurrent });
+          requireCurrent();
+        }
+
+        setSetupPhase('resources');
+        setProfileLoading(true);
+        setStatus('Checking this computer...');
+        const localProfile = await refreshLocalProfile({ signal, isCurrent });
+        requireCurrent();
+        if (!localProfile) throw new Error('This computer profile could not be loaded. Please try again.');
+
+        if (authToken && kind !== 'refresh-profile') {
+          setSetupPhase('services');
+          setStatus('Preparing this computer...');
+          await registerWorker(authToken, localProfile, localProfile.ip, { signal, isCurrent });
+          requireCurrent();
+        }
+
+        setSetupError('');
+        setSetupErrorKind('');
+        setStatus(authToken ? 'This computer is ready to receive tasks.' : 'This computer is ready to connect.');
+        return true;
+      } catch (err) {
+        if (!isCurrent()) return false;
+        const loginEstablished = kind === 'login'
+          && Boolean(attemptToken)
+          && sessionTokenRef.current === attemptToken;
+        const userMessage = getWorkerSetupErrorMessage(err, { kind, loginEstablished });
+        setSetupError(userMessage);
+        setSetupErrorKind(kind);
+        if (kind === 'profile' || kind === 'refresh-profile' || kind === 'restore') {
+          setProfileError(userMessage);
+        }
+        setStatus(userMessage);
+        return false;
+      } finally {
+        if (isCurrent()) {
+          setSetupActive(false);
+          setProfileLoading(false);
+          setLoginLoading(false);
+        }
+      }
+    });
+  }
+
+  function retryCurrentSetup() {
+    if (token) {
+      return runSetup({ kind: 'restore', authToken: token, ownerUsername: authenticatedUsername || username });
+    }
+    return runSetup({ kind: 'profile' });
+  }
+
+  async function handleLogin(event) {
+    event.preventDefault();
+    if (!backendReady || setupActive) return;
     setDashboard(null);
     setDashboardError('');
     setRegistration(null);
-
-    try {
-      let res;
-      try {
-        res = await fetch(`${workerControlBase}/api/login`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ username, password }),
-        });
-      } catch {
-        throw new Error('This computer app could not be reached. Make sure it is open and try again.');
-      }
-      const data = await readJson(res);
-      if (!res.ok || !data.success) {
-        throw new Error(data.message || data.status_message || 'Login failed');
-      }
-
-      const authToken = data.token || '';
-      const ownerUsername = username.trim();
-      // The bearer JWT lives only in tab session storage: closing the Worker
-      // console discards it, so no reusable credential persists in the
-      // browser profile.
-      saveStoredSession(window.sessionStorage, SESSION_KEY, {
-        token: authToken,
-        username: ownerUsername,
-      });
-      sessionTokenRef.current = authToken;
-      setToken(authToken);
-      setUsername(ownerUsername);
-      setAuthenticatedUsername(ownerUsername);
-      await bootstrapVpn(authToken);
-      setStatus('Connected. Checking this computer...');
-      const localProfile = await refreshLocalProfile();
-      await registerWorker(authToken, localProfile, localProfile.ip);
-    } catch (err) {
-      setStatus(`Login failed: ${err.message}`);
-    } finally {
-      setLoginLoading(false);
-    }
+    void runSetup({ kind: 'login', credentials: { username, password } });
   }
 
-  function logout() {
+  function logout(message = 'Signed out') {
+    setupControllerRef.current.invalidate();
     clearStoredSession(window.sessionStorage, SESSION_KEY);
     sessionTokenRef.current = '';
     setToken('');
@@ -331,264 +423,237 @@ export default function WorkerApp() {
     setDashboardError('');
     setDashboardLoading(false);
     setRegistration(null);
-    setStatus('Signed out');
+    setSetupActive(false);
+    setSetupError('');
+    setSetupErrorKind('');
+    setProfileLoading(false);
+    setLoginLoading(false);
+    setStatus(message);
   }
 
   async function handleRefresh() {
+    if (setupActive || refreshLoading) return;
     setRefreshLoading(true);
-    setProfileError(null);
     try {
-      await refreshLocalProfile();
-      setStatus('Profile refreshed');
-    } catch (err) {
-      setProfileError(err.message);
-      setStatus('Refresh failed. Please try again.');
+      await runSetup({ kind: 'refresh-profile' });
     } finally {
       setRefreshLoading(false);
     }
   }
 
   useEffect(() => {
-    setProfileLoading(true);
-    setProfileError(null);
-    (async () => {
-      try {
-        if (initialSession.token && initialSession.username) {
-          setStatus('Session restored. Connecting to the network...');
-          await bootstrapVpn(initialSession.token);
-          const localProfile = await refreshLocalProfile();
-          setStatus('Connected. Preparing this computer...');
-          await registerWorker(initialSession.token, localProfile, localProfile.ip);
-        } else {
-          await refreshLocalProfile();
-          setStatus('This computer is ready to connect.');
-        }
-      } catch (err) {
-        setProfileError(err.message);
-        setStatus('We could not prepare this computer. Please try again.');
-      } finally {
-        setProfileLoading(false);
-      }
-    })();
-  }, []);
+    const controller = new AbortController();
+    let active = true;
+    setStartupStatus({ state: 'initializing', phase: 'starting', code: null });
+    setStartupError(null);
+    setBackendReady(false);
+
+    const readStatus = createWorkerStartupStatusReader({
+      baseUrl: workerControlBase,
+      fetchImpl: fetch,
+    });
+    void waitForWorkerStartup({
+      readStatus,
+      signal: controller.signal,
+      onStatus: (nextStatus) => {
+        if (active) setStartupStatus(nextStatus);
+      },
+    }).then((readyStatus) => {
+      if (!active) return;
+      setStartupStatus(readyStatus);
+      setBackendReady(true);
+      void runSetup(
+        initialSession.token && initialSession.username
+          ? { kind: 'restore', authToken: initialSession.token, ownerUsername: initialSession.username }
+          : { kind: 'profile' },
+      );
+    }).catch((error) => {
+      if (!active || error.kind === 'aborted') return;
+      setBackendReady(false);
+      setStartupError(error);
+    });
+
+    return () => {
+      active = false;
+      controller.abort();
+      setupControllerRef.current.invalidate();
+    };
+  }, [workerControlBase, startupRetryCount]);
+
+  function retryStartupCheck() {
+    setStartupError(null);
+    setStartupStatus({ state: 'initializing', phase: 'starting', code: null });
+    setBackendReady(false);
+    setStartupRetryCount((count) => count + 1);
+  }
+
+  const themeToggle = (
+    <Button
+      type="button"
+      variant="ghost"
+      size="icon"
+      className="theme-toggle"
+      onClick={() => setTheme((current) => current === 'dark' ? 'light' : 'dark')}
+      aria-label={theme === 'dark' ? 'Switch to light theme' : 'Switch to dark theme'}
+      title={theme === 'dark' ? 'Switch to light theme' : 'Switch to dark theme'}
+    >
+      {theme === 'dark' ? <Sun aria-hidden="true" /> : <Moon aria-hidden="true" />}
+    </Button>
+  );
+  const statusIsError = Boolean(setupError && setupErrorKind === 'login')
+    || ['failed', 'cannot', 'could not', 'expired', 'unavailable', 'error'].some((part) => status.toLowerCase().includes(part));
+
+  if (!backendReady) {
+    const startupFailureMessage = startupError?.kind === 'failed'
+      ? `Worker startup failed${startupError.code ? ` (${startupError.code})` : ''}. Restart the Worker app, then check again.`
+      : startupError?.kind === 'timeout'
+        ? 'Worker startup is taking longer than expected. Make sure the Worker app is running, then retry.'
+        : startupError?.message || '';
+    return (
+      <main className="app-shell">
+        <div className="app-container">
+          <header className="app-header">
+            <div className="brand-lockup">
+              <div className="brand-mark" aria-hidden="true"><span /></div>
+              <div className="brand-copy">
+                <p className="eyebrow">Hivemind · Worker</p>
+                <h1>Worker console</h1>
+              </div>
+            </div>
+            <div className="header-actions">{themeToggle}</div>
+          </header>
+          <LoadingPanel
+            phase={startupStatus.phase}
+            error={startupFailureMessage}
+            onRetry={startupError ? retryStartupCheck : undefined}
+            retryLabel={startupError?.kind === 'failed' ? 'Check again' : 'Retry startup'}
+            showSkeleton={!startupError}
+          />
+        </div>
+      </main>
+    );
+  }
 
   return (
     <main className="app-shell">
       <div className="app-container">
         <header className="app-header">
           <div className="brand-lockup">
-            <div className="brand-mark" aria-hidden="true" />
-            <div>
-              <p className="eyebrow">Hivemind</p>
-              <h1>Share this computer</h1>
-              <p className="lead">
-                Sign in to put this machine to work. It registers with the network, shares what it can do, and is ready to accept jobs.
-              </p>
+            <div className="brand-mark" aria-hidden="true"><span /></div>
+            <div className="brand-copy">
+              <p className="eyebrow">Hivemind · Worker</p>
+              <h1>Worker console</h1>
             </div>
           </div>
-          {token ? (
-            <button type="button" onClick={logout} className="button ghost">
-              Sign out
-            </button>
-          ) : null}
+          <div className="header-actions">
+            {token ? (
+              <Button type="button" variant="outline" onClick={() => logout()}>
+                <LogOut aria-hidden="true" />
+                Sign out
+              </Button>
+            ) : null}
+            {themeToggle}
+          </div>
         </header>
 
-        <section className="surface">
-          {token ? (
-            <div className="toolbar">
-              <div>
-                <p className="eyebrow">Signed in</p>
-                <strong>{authenticatedUsername || username}</strong>
-              </div>
-              <span className="subtle">This computer connects automatically after sign-in.</span>
+        {setupActive ? <LoadingPanel phase={setupPhase} compact /> : null}
+        {setupError && token && (setupErrorKind === 'restore' || setupErrorKind === 'login') ? (
+          <div className="setup-alert" role="alert">
+            <div>
+              <strong>Session needs attention</strong>
+              <p>{setupError}</p>
             </div>
-          ) : (
-            <form onSubmit={handleLogin} className="form-grid">
-              <label>
-                Username
-                <input value={username} onChange={(e) => setUsername(e.target.value)} className="field" />
-              </label>
-              <label>
-                Password
-                <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} className="field" />
-              </label>
-              <button type="submit" disabled={loginLoading} className="button primary">
-                {loginLoading ? 'Connecting...' : 'Sign in and connect'}
-              </button>
-            </form>
-          )}
-          {status ? (
-            <div className={`status ${status.toLowerCase().includes('failed') || status.toLowerCase().includes('cannot') ? 'error' : ''}`}>
-              {status}
-            </div>
-          ) : null}
-        </section>
-
-        {token ? (
-          <section className="surface dashboard-panel" aria-labelledby="worker-dashboard-title">
-            <div className="toolbar dashboard-toolbar">
-              <div>
-                <p className="eyebrow">Live overview</p>
-                <h2 id="worker-dashboard-title">Worker dashboard</h2>
-              </div>
-              <button
-                type="button"
-                onClick={() => { void dashboardRefreshRef.current?.(); }}
-                disabled={dashboardLoading}
-                className="button"
-              >
-                {dashboardLoading ? 'Refreshing...' : 'Refresh dashboard'}
-              </button>
-            </div>
-
-            {!dashboard ? (
-              <div className={`status ${dashboardError ? 'error' : ''}`} role="status">
-                {dashboardError || (dashboardLoading ? 'Loading worker dashboard...' : 'Worker dashboard is unavailable.')}
-              </div>
-            ) : (
-              <>
-                {dashboardError ? (
-                  <div className="status error" role="status">
-                    Refresh failed; showing the last received dashboard snapshot.
-                  </div>
-                ) : null}
-                <div className={`dashboard-freshness ${dashboard.stale || dashboardError ? 'stale' : ''}`} role="status">
-                  <strong>{dashboard.stale || dashboardError ? 'Stale snapshot' : 'Current snapshot'}</strong>
-                  <span>Sampled {formatSampledAt(dashboard.sampled_at)}</span>
-                </div>
-
-                <div className="dashboard-stat-grid">
-                  <DashboardStat label="Computer ID" value={dashboard.worker_id || 'Unknown'} />
-                  <DashboardStat label="CPU cores" value={formatMetric(dashboard.host.cpu_cores, 'cores', 0)} />
-                  <DashboardMeter label="CPU usage" value={dashboard.host.cpu_usage_percent} />
-                  <DashboardStat label="Memory total" value={formatMetric(dashboard.host.memory_total_gb, 'GB')} />
-                  <DashboardStat label="Memory available" value={formatMetric(dashboard.host.memory_available_gb, 'GB')} />
-                  <DashboardMeter label="Memory usage" value={dashboard.host.memory_usage_percent} />
-                  <DashboardStat label="GPU count" value={formatMetric(dashboard.host.gpu_count, 'GPUs', 0)} />
-                  <DashboardMeter label="GPU utilization" value={dashboard.host.gpu_utilization_percent} />
-                  <DashboardStat label="VRAM total" value={formatMetric(dashboard.host.vram_total_mb, 'MB', 0)} />
-                  <DashboardStat label="VRAM available" value={formatMetric(dashboard.host.vram_available_mb, 'MB', 0)} />
-                  <DashboardMeter
-                    label="VRAM usage"
-                    value={deriveUsedPercent(dashboard.host.vram_total_mb, dashboard.host.vram_available_mb)}
-                  />
-                  <DashboardStat label="Storage total" value={formatMetric(dashboard.host.storage_total_gb, 'GB')} />
-                  <DashboardStat label="Storage available" value={formatMetric(dashboard.host.storage_available_gb, 'GB')} />
-                  <DashboardMeter
-                    label="Storage usage"
-                    value={deriveUsedPercent(dashboard.host.storage_total_gb, dashboard.host.storage_available_gb)}
-                  />
-                  <DashboardStat
-                    className="provider-credits-stat"
-                    label={PROVIDER_CREDITS_LABEL}
-                    value={formatMetric(dashboard.settled_provider_credits_cpt, dashboard.currency || 'CPT', 2)}
-                    detail={PROVIDER_CREDITS_DETAIL}
-                  />
-                </div>
-
-                <section className="dashboard-subsection" aria-labelledby="worker-assignments-title">
-                  <div className="toolbar dashboard-subsection-heading">
-                    <h3 id="worker-assignments-title">Current assignments</h3>
-                    <span className="subtle">{dashboard.assignments.length} listed</span>
-                  </div>
-                  {dashboard.assignments.length === 0 ? (
-                    <p className="subtle">No assignments are currently listed.</p>
-                  ) : (
-                    <ul className="assignment-list">
-                      {dashboard.assignments.map((assignment, index) => (
-                        <li className="assignment-card" key={assignment.task_id || `assignment-${index}`}>
-                          <div className="row-head assignment-head">
-                            <strong>{assignment.task_id || 'Unknown task'}</strong>
-                            <span className="dashboard-assignment-status">{assignment.status || 'Unknown'}</span>
-                          </div>
-                          <dl className="assignment-details">
-                            <dt>Submitter</dt>
-                            <dd>{assignment.submitter || 'Unknown'}</dd>
-                            <dt>Task max CPT</dt>
-                            <dd>{formatMetric(assignment.max_cpt, 'CPT', 2)}</dd>
-                            <dt>Worker-reported usage (observational)</dt>
-                            <dd>{formatMetric(assignment.reported_usage_cpt, 'CPT', 2)}</dd>
-                            <dt>Usage basis</dt>
-                            <dd>{assignment.usage_basis || 'Unknown'}</dd>
-                            <dt>Usage last updated</dt>
-                            <dd>{formatSampledAt(assignment.usage_updated_at)}</dd>
-                          </dl>
-                        </li>
-                      ))}
-                    </ul>
-                  )}
-                  <p className="subtle dashboard-observation-note">
-                    Worker-reported usage is observational evidence, not a settled charge or payout.
-                  </p>
-                </section>
-              </>
-            )}
-          </section>
+            <Button type="button" variant="outline" onClick={retryCurrentSetup} disabled={setupActive}>
+              {setupActive ? 'Connecting…' : 'Retry connection'}
+            </Button>
+          </div>
         ) : null}
 
-        <div className="grid two" style={{ marginTop: 18 }}>
-          <section className="surface">
-            <h2>This computer</h2>
-            <p className="subtle">Hivemind detects the computer settings it needs. There is nothing else to configure.</p>
-
-            {profileLoading ? (
-              <div className="status">Checking this computer...</div>
-            ) : profileError ? (
-              <div className="status error">
-                <strong>We could not check this computer</strong>
-                <p className="subtle" style={{ marginTop: 6 }}>Make sure the app is open, then try again.</p>
-                <button type="button" onClick={handleRefresh} disabled={refreshLoading} className="button">
-                  {refreshLoading ? 'Trying again...' : 'Try again'}
-                </button>
-              </div>
-            ) : (
-              <>
-                <dl>
-                  <dt>Computer ID</dt>
-                  <dd>{profile.worker_id || '(not connected yet)'}</dd>
-                  <dt>CPU cores</dt>
-                  <dd>{profile.cpu_cores}</dd>
-                  <dt>Memory</dt>
-                  <dd>{profile.memory_gb} GB</dd>
-                  <dt>CPU rating</dt>
-                  <dd>{profile.cpu_score}</dd>
-                  <dt>Graphics rating</dt>
-                  <dd>{profile.gpu_score}</dd>
-                  <dt>Graphics memory</dt>
-                  <dd>{profile.gpu_memory_gb} GB</dd>
-                  <dt>Graphics card</dt>
-                  <dd>{profile.gpu_name || '-'}</dd>
-                  <dt>Storage</dt>
-                  <dd>{profile.storage_available_gb} / {profile.storage_total_gb} GB</dd>
-                  <dt>Location</dt>
-                  <dd>{profile.location || 'local'}</dd>
-                </dl>
-                <div className="actions">
-                  <button type="button" onClick={handleRefresh} disabled={refreshLoading} className="button">
-                    {refreshLoading ? 'Checking...' : 'Check again'}
-                  </button>
+        <Card className="account-card">
+          <CardContent className="account-card-content">
+            {token ? (
+              <div className="signed-in-account">
+                <div className="account-avatar" aria-hidden="true"><UserRound /></div>
+                <div className="signed-in-copy">
+                  <div className="signed-in-heading">
+                    <Badge variant="secondary">Signed in</Badge>
+                    <strong>{authenticatedUsername || username}</strong>
+                  </div>
+                  <p>This computer reconnects automatically after sign-in.</p>
                 </div>
-              </>
-            )}
-          </section>
-
-          <section className="surface">
-            <h2>Connection</h2>
-            {registration ? (
-              <div className={`status ${registration.success ? 'success' : 'error'}`}>
-                <strong>{registration.success ? 'Ready' : 'Not connected'}</strong>
-                <div style={{ marginTop: 6 }}>{registration.message}</div>
-                {registration.workerId ? (
-                  <div className="subtle" style={{ marginTop: 6 }}>Computer ID: {registration.workerId}</div>
-                ) : null}
               </div>
             ) : (
-              <p className="subtle">
-                Sign in to connect this computer. Once it is ready, the network can send it tasks and check the work before charging.
-              </p>
+              <form onSubmit={handleLogin} className="login-form">
+                <div className="login-heading">
+                  <p className="section-kicker">Account</p>
+                  <h2>Sign in to connect</h2>
+                </div>
+                <div className="login-fields">
+                  <div className="login-field">
+                    <Label htmlFor="worker-username">Username</Label>
+                    <Input
+                      id="worker-username"
+                      name="username"
+                      autoComplete="username"
+                      value={username}
+                      onChange={(event) => setUsername(event.target.value)}
+                      disabled={loginLoading || setupActive}
+                    />
+                  </div>
+                  <div className="login-field">
+                    <Label htmlFor="worker-password">Password</Label>
+                    <Input
+                      id="worker-password"
+                      name="password"
+                      type="password"
+                      autoComplete="current-password"
+                      value={password}
+                      onChange={(event) => setPassword(event.target.value)}
+                      disabled={loginLoading || setupActive}
+                    />
+                  </div>
+                  <Button type="submit" className="login-submit" disabled={loginLoading || setupActive}>
+                    {loginLoading || setupActive ? 'Connecting…' : 'Sign in and connect'}
+                  </Button>
+                </div>
+              </form>
             )}
-          </section>
-        </div>
+            {status ? (
+              <div className={`account-status${statusIsError ? ' is-error' : ''}`} role={statusIsError ? 'alert' : 'status'}>
+                {status}
+              </div>
+            ) : null}
+          </CardContent>
+        </Card>
+
+        {token ? (
+          <Tabs defaultValue="overview" className="worker-tabs">
+            <TabsList className="worker-tabs-list" aria-label="Worker console sections">
+              <TabsTrigger value="overview">Overview</TabsTrigger>
+              <TabsTrigger value="computer">Computer</TabsTrigger>
+            </TabsList>
+            <TabsContent value="overview" className="worker-tab-content">
+              <WorkerDashboard
+                dashboard={dashboard}
+                dashboardError={dashboardError}
+                dashboardLoading={dashboardLoading}
+                onRefresh={() => { void dashboardRefreshRef.current?.(); }}
+              />
+            </TabsContent>
+            <TabsContent value="computer" className="worker-tab-content">
+              <WorkerComputer
+                profile={profile}
+                profileLoaded={profileLoaded}
+                profileLoading={profileLoading}
+                profileError={profileError}
+                registration={registration}
+                refreshLoading={refreshLoading}
+                setupActive={setupActive}
+                onRefresh={handleRefresh}
+              />
+            </TabsContent>
+          </Tabs>
+        ) : null}
       </div>
     </main>
   );

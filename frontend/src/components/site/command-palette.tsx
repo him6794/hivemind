@@ -1,12 +1,13 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { CornerDownLeft, FileText, Home, LogIn, ScrollText, Shield, User, UserPlus } from "lucide-react";
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from "@/components/ui/dialog";
 import { useAppStore, type Route } from "@/store/app-store";
 import { useI18n } from "@/store/i18n-store";
 import { getSiteDefinition } from "@/lib/hivemind-site-data.mjs";
 import { cn } from "@/lib/utils";
+import { Input } from "@/components/ui/input";
 
 const routeIcons: Record<Route, React.ElementType> = {
   home: Home,
@@ -26,6 +27,7 @@ export function CommandPalette() {
   const site = useMemo(() => getSiteDefinition(locale), [locale]);
   const [query, setQuery] = useState("");
   const [active, setActive] = useState(0);
+  const searchInput = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
@@ -70,20 +72,21 @@ export function CommandPalette() {
 
   return (
     <Dialog open={open} onOpenChange={setOpen}>
-      <DialogContent className="top-[15%] max-w-xl translate-y-0 gap-0 overflow-hidden rounded-xl border-border bg-card p-0">
+      <DialogContent onOpenAutoFocus={(event) => { event.preventDefault(); searchInput.current?.focus(); }} className="top-[15%] max-w-xl translate-y-0 gap-0 overflow-hidden rounded-xl border-border bg-card p-0">
         <DialogTitle className="sr-only">Command palette</DialogTitle>
         <DialogDescription className="sr-only">Quick navigation across the Hivemind site.</DialogDescription>
 
         <div className="flex items-center gap-3 border-b border-border/60 px-4">
-          <input
-            autoFocus
+          <Input
+            aria-label={locale === "zh" ? "搜尋頁面" : "Search pages"}
+            ref={searchInput}
             value={query}
             onChange={(event) => {
               setQuery(event.target.value);
               setActive(0);
             }}
             placeholder={locale === "zh" ? "搜尋頁面或操作..." : "Search pages or actions..."}
-            className="h-14 flex-1 bg-transparent text-sm outline-none placeholder:text-muted-foreground"
+            className="h-14 min-w-0 flex-1 border-0 bg-transparent text-sm shadow-none focus-visible:ring-0"
           />
           <kbd className="rounded-md border border-border bg-background px-1.5 py-0.5 font-mono-tech text-[10px] text-muted-foreground">
             ESC
@@ -113,7 +116,6 @@ export function CommandPalette() {
                 </span>
                 <div className="flex-1 min-w-0">
                   <div className="text-sm font-medium">{route.label}</div>
-                  <div className="text-[11px] text-muted-foreground">{route.id}</div>
                 </div>
                 {isActive ? <CornerDownLeft className="size-3.5 text-honey" /> : null}
               </button>

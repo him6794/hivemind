@@ -1,13 +1,18 @@
 "use client";
 
 import { FormEvent, useState } from "react";
-import { ArrowRight, UserPlus } from "lucide-react";
+import { ArrowRight } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { Card, CardContent, CardHeader } from "@/components/ui/card";
+import { HiveLogo } from "@/components/site/hive-logo";
+import { ThemeToggle } from "@/components/site/theme-toggle";
+import { LocaleToggle } from "@/components/site/locale-toggle";
 import { useAppStore } from "@/store/app-store";
 import { useI18n } from "@/store/i18n-store";
 import { loginUser, registerUser } from "@/lib/hivemind-api";
 import { validateRegistrationInput } from "@/lib/auth-policy.mjs";
-import { Surface } from "./page-primitives";
 
 export function RegisterPage() {
   const navigate = useAppStore((state) => state.navigate);
@@ -21,6 +26,7 @@ export function RegisterPage() {
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    if (loading) return;
     const validation = validateRegistrationInput(username, password, confirm);
     if (!validation.ok) {
       const messages = {
@@ -31,21 +37,16 @@ export function RegisterPage() {
       setStatus(messages[validation.code]);
       return;
     }
-
     setLoading(true);
     setStatus(locale === "zh" ? "建立帳號中..." : "Creating account...");
     try {
       const registered = await registerUser(validation.username, password) as { success?: boolean; message?: string };
-      if (!registered.success) {
-        throw new Error(registered.message || "Registration failed.");
-      }
+      if (!registered.success) throw new Error(registered.message || "Registration failed.");
       const login = await loginUser(validation.username, password) as { success?: boolean; token?: string; message?: string };
-      if (!login.success || !login.token) {
-        throw new Error(login.message || "Login failed.");
-      }
+      if (!login.success || !login.token) throw new Error(login.message || "Login failed.");
       setUsername(validation.username);
       setAuth({ username: validation.username }, login.token);
-      setStatus(locale === "zh" ? "帳號建立完成。" : "Account created.");
+      setStatus("");
       navigate("account");
     } catch (error) {
       setStatus(error instanceof Error ? error.message : "Registration failed.");
@@ -55,74 +56,36 @@ export function RegisterPage() {
   }
 
   return (
-    <section className="mx-auto grid min-h-screen max-w-7xl items-center gap-8 px-4 py-28 sm:px-6 lg:grid-cols-[1.1fr_0.9fr]">
-      <div>
-        <div className="mb-4 inline-flex items-center gap-2 rounded-full border border-border bg-card px-3 py-1 text-xs font-medium text-muted-foreground">
-          <UserPlus className="size-3.5 text-honey" />
-          {locale === "zh" ? "建立官方帳號" : "Create an official account"}
-        </div>
-        <h1 className="text-balance text-4xl font-semibold tracking-tight sm:text-6xl">
-          {locale === "zh" ? "建立 Hivemind 帳號，開始使用。" : "Create a Hivemind account and get started."}
-        </h1>
-        <p className="mt-4 max-w-xl text-muted-foreground">
-          {locale === "zh"
-            ? "一個帳號就能送出工作，也能分享一台電腦。"
-            : "One account lets you send tasks or share a computer."}
-        </p>
+    <section className="mx-auto flex min-h-screen w-full max-w-md flex-col justify-center gap-6 px-4 py-12">
+      <div className="flex items-center justify-between gap-3">
+        <Button variant="ghost" className="px-0 hover:bg-transparent" aria-label="Hivemind home" onClick={() => navigate("home")}><HiveLogo withText /></Button>
+        <div className="flex items-center gap-1"><ThemeToggle /><LocaleToggle /></div>
       </div>
-
-      <Surface className="border-border/80 bg-card p-8">
-        <form className="space-y-4" onSubmit={handleSubmit}>
-          <div>
-            <label htmlFor="register-username" className="mb-2 block text-sm font-medium">{locale === "zh" ? "使用者名稱" : "Username"}</label>
-            <input
-              id="register-username"
-              className="w-full rounded-xl border border-border bg-background px-4 py-3 outline-none transition focus:border-honey/40 focus-visible:ring-2 focus-visible:ring-honey/30"
-              value={username}
-              onChange={(event) => setUsername(event.target.value)}
-              placeholder="team-ops"
-              minLength={3}
-              autoComplete="username"
-              required
-            />
-          </div>
-          <div>
-            <label htmlFor="register-password" className="mb-2 block text-sm font-medium">{locale === "zh" ? "密碼" : "Password"}</label>
-            <input
-              id="register-password"
-              type="password"
-              className="w-full rounded-xl border border-border bg-background px-4 py-3 outline-none transition focus:border-honey/40 focus-visible:ring-2 focus-visible:ring-honey/30"
-              value={password}
-              onChange={(event) => setPassword(event.target.value)}
-              minLength={8}
-              autoComplete="new-password"
-              required
-            />
-          </div>
-          <div>
-            <label htmlFor="register-confirm-password" className="mb-2 block text-sm font-medium">{locale === "zh" ? "確認密碼" : "Confirm password"}</label>
-            <input
-              id="register-confirm-password"
-              type="password"
-              className="w-full rounded-xl border border-border bg-background px-4 py-3 outline-none transition focus:border-honey/40 focus-visible:ring-2 focus-visible:ring-honey/30"
-              value={confirm}
-              onChange={(event) => setConfirm(event.target.value)}
-              minLength={8}
-              autoComplete="new-password"
-              required
-            />
-          </div>
-
-          <Button type="submit" disabled={loading} className="h-12 w-full rounded-xl bg-honey text-honey-foreground hover:bg-honey/90">
-            {loading ? (locale === "zh" ? "處理中..." : "Working...") : (locale === "zh" ? "建立帳號" : "Create account")}
-            <ArrowRight className="size-4" />
-          </Button>
-        </form>
-
-        <div aria-live="polite" className="mt-4 rounded-xl border border-border/60 bg-background p-4 text-sm text-muted-foreground">
-          {status || (locale === "zh" ? "建立成功後會自動登入並進入帳號中心。" : "After creation, you will sign in automatically and enter the account center.")}
-        </div>
-      </Surface>
+      <Card>
+        <CardHeader><h1 className="text-2xl font-semibold tracking-tight">{locale === "zh" ? "建立 Hivemind 帳號，開始使用。" : "Create a Hivemind account and get started."}</h1></CardHeader>
+        <CardContent>
+          <form className="space-y-5" onSubmit={handleSubmit} aria-busy={loading}>
+            <div className="space-y-2">
+              <Label htmlFor="register-username">{locale === "zh" ? "使用者名稱" : "Username"}</Label>
+              <Input id="register-username" className="h-11" value={username} onChange={(event) => setUsername(event.target.value)} minLength={3} autoComplete="username" disabled={loading} required />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="register-password">{locale === "zh" ? "密碼" : "Password"}</Label>
+              <Input id="register-password" className="h-11" type="password" value={password} onChange={(event) => setPassword(event.target.value)} minLength={8} autoComplete="new-password" disabled={loading} required />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="register-confirm-password">{locale === "zh" ? "確認密碼" : "Confirm password"}</Label>
+              <Input id="register-confirm-password" className="h-11" type="password" value={confirm} onChange={(event) => setConfirm(event.target.value)} minLength={8} autoComplete="new-password" disabled={loading} required />
+            </div>
+            <Button type="submit" disabled={loading} className="h-11 w-full">
+              {loading ? (locale === "zh" ? "建立中..." : "Creating account...") : (locale === "zh" ? "建立帳號" : "Create account")}
+              <ArrowRight aria-hidden="true" className="size-4" />
+            </Button>
+            <p aria-live="polite" className="text-sm text-muted-foreground">{status}</p>
+          </form>
+          <Button variant="link" className="mt-3 h-auto p-0 text-muted-foreground" onClick={() => navigate("login")}>{locale === "zh" ? "已有帳號？登入" : "Already have an account? Sign in"}</Button>
+        </CardContent>
+      </Card>
     </section>
   );
 }

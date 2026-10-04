@@ -7,18 +7,22 @@
     "build": "next build",
     "start": "next start -p 3000",
     "test": "node --test site-contract.test.mjs src/lib/*.test.mjs",
-    "test:e2e": "node node_modules/@playwright/test/cli.js test"
+    "test:e2e": "node node_modules/@playwright/test/cli.js test",
+    "test:ui-contract": "node --test desktop/*.test.mjs",
+    "test:ui": "node node_modules/@playwright/test/cli.js test --config=playwright.ui.config.mjs"
   },
   "dependencies": {
-    "@grpc/grpc-js": "^1.14.4",
+    "@grpc/grpc-js": "^1.14.5",
     "@grpc/proto-loader": "^0.8.1",
     "@radix-ui/react-dialog": "^1.1.14",
+    "@radix-ui/react-dropdown-menu": "^2.1.24",
+    "@radix-ui/react-label": "^2.1.15",
     "@radix-ui/react-slot": "^1.2.3",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "framer-motion": "^12.23.2",
     "lucide-react": "^0.525.0",
-    "next": "^16.1.1",
+    "next": "^16.3.8",
     "next-themes": "^0.4.6",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
@@ -28,7 +32,7 @@
   },
   "overrides": {
     "postcss": "8.5.23",
-    "sharp": "0.35.3"
+    "sharp": "0.35.5"
   },
   "devDependencies": {
     "@playwright/test": "^1.62.0",

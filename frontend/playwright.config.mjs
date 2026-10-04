@@ -6,7 +6,7 @@ import { defineConfig } from '@playwright/test';
 const frontendDirectory = path.dirname(fileURLToPath(import.meta.url));
 const evidenceDirectory = path.resolve(
   process.env.HIVEMIND_E2E_EVIDENCE_DIR
-    || path.join(frontendDirectory, '..', '.omo', 'evidence', 'task-8-release-grade-frontends-app-and-site'),
+    || path.join(frontendDirectory, '..', 'test_logs', 'frontend-e2e'),
 );
 
 function installedBrowserChannel() {
@@ -34,6 +34,7 @@ const channel = installedBrowserChannel();
 
 export default defineConfig({
   testDir: './e2e',
+  testIgnore: '**/shadcn-*.spec.mjs',
   fullyParallel: false,
   workers: 1,
   timeout: 180_000,

@@ -61,7 +61,7 @@ export function DocsPage() {
   const docs = site.sections.docs;
 
   return (
-    <div className="mx-auto max-w-7xl px-4 py-16 sm:px-6 sm:py-24">
+    <div className="mx-auto max-w-7xl px-4 pb-16 pt-28 sm:px-6 sm:pb-24 sm:pt-32">
       <div className="max-w-3xl">
         <div className="font-mono-tech text-xs uppercase tracking-[0.24em] text-honey">
           {t(locale, { zh: "文件", en: "Documentation" })}

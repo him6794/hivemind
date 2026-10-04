@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef } from "react";
-import { AnimatePresence, motion } from "framer-motion";
+import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
 import { Navbar } from "@/components/site/navbar";
 import { Footer } from "@/components/site/footer";
 import { CommandPalette } from "@/components/site/command-palette";
@@ -29,6 +29,7 @@ export default function Home() {
   const route = useAppStore((state) => state.route);
   const navigate = useAppStore((state) => state.navigate);
   const hashSynced = useRef(false);
+  const reducedMotion = useReducedMotion();
   const isFullscreen = fullscreenRoutes.includes(route);
 
   useEffect(() => {
@@ -63,10 +64,10 @@ export default function Home() {
         <AnimatePresence mode="wait">
           <motion.div
             key={route}
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            exit={{ opacity: 0 }}
-            transition={{ duration: 0.25, ease: "easeOut" }}
+            initial={reducedMotion ? false : { opacity: 0, y: 6 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: reducedMotion ? 0 : -4 }}
+            transition={{ duration: reducedMotion ? 0 : 0.18, ease: [0.16, 1, 0.3, 1] }}
             className="flex min-h-screen flex-col"
           >
             {renderRoute(route)}

@@ -95,6 +95,10 @@ describe('worker dashboard contract', () => {
     );
   });
 
+  it('builds a same-origin dashboard request when the configured base is root', () => {
+    assert.equal(buildWorkerDashboardRequest('/', 'session-token').url, '/api/worker-dashboard');
+  });
+
   it('skips overlapping polls and resumes after the active request settles', async () => {
     let releaseFirst;
     let calls = 0;

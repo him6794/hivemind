@@ -15,9 +15,9 @@ export default function RootLayout({
   children: React.ReactNode;
 }>) {
   return (
-    <html lang="en" suppressHydrationWarning className="dark">
-      <body className="font-sans font-mono antialiased bg-background text-foreground min-h-screen">
-        <ThemeProvider attribute="class" defaultTheme="dark" enableSystem={false} disableTransitionOnChange>
+    <html lang="en" suppressHydrationWarning>
+      <body className="font-sans antialiased bg-background text-foreground min-h-screen">
+        <ThemeProvider attribute="class" defaultTheme="light" enableSystem={false}>
           {children}
           <SonnerToaster position="top-right" />
         </ThemeProvider>

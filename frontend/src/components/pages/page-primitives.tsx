@@ -2,6 +2,7 @@
 
 import { ReactNode } from "react";
 import { cn } from "@/lib/utils";
+import { Card } from "@/components/ui/card";
 
 export function PageSection({
   eyebrow,
@@ -17,10 +18,10 @@ export function PageSection({
   className?: string;
 }) {
   return (
-    <section className={cn("mx-auto max-w-7xl px-4 py-16 sm:px-6 sm:py-24", className)}>
+    <section className={cn("mx-auto max-w-7xl px-4 pb-16 pt-28 sm:px-6 sm:pb-24 sm:pt-32", className)}>
       <div className="max-w-3xl">
         <div className="font-mono-tech text-xs uppercase tracking-[0.24em] text-honey">{eyebrow}</div>
-        <h2 className="mt-3 text-balance text-3xl font-semibold tracking-tight sm:text-5xl">{title}</h2>
+        <h1 className="mt-3 text-balance text-3xl font-semibold tracking-tight sm:text-5xl">{title}</h1>
         {body ? <p className="mt-4 text-pretty text-muted-foreground">{body}</p> : null}
       </div>
       {children}
@@ -36,23 +37,8 @@ export function Surface({
   className?: string;
 }) {
   return (
-    <div className={cn("rounded-xl border border-border bg-card p-6", className)}>
+    <Card className={cn("p-6", className)}>
       {children}
-    </div>
-  );
-}
-
-export function KeyValue({
-  label,
-  value,
-}: {
-  label: string;
-  value: ReactNode;
-}) {
-  return (
-    <div>
-      <div className="text-xs uppercase tracking-wide text-muted-foreground">{label}</div>
-      <div className="mt-1 text-sm font-medium">{value}</div>
-    </div>
+    </Card>
   );
 }
