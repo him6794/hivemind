@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeSet, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Mutex, OnceLock, PoisonError};
 use std::time::{Duration, Instant, SystemTime};
 
 use crate::sha256_digest;
@@ -1003,9 +1003,7 @@ fn verify_pinned_runner(
     let cache = RUNNER_DIGEST_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
     let now = Instant::now();
     {
-        let entries = cache
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let entries = cache.lock().unwrap_or_else(PoisonError::into_inner);
         if let Some(entry) = entries.get(&key)
             && entry.size_bytes == metadata.len()
             && entry.modified == modified
@@ -1029,17 +1027,15 @@ fn verify_pinned_runner(
         return Err(ProductionSandboxError::RunnerDigestMismatch);
     }
 
-    let mut entries = cache
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    if entries.len() >= RUNNER_CACHE_LIMIT && !entries.contains_key(&key) {
-        if let Some(oldest) = entries
+    let mut entries = cache.lock().unwrap_or_else(PoisonError::into_inner);
+    if entries.len() >= RUNNER_CACHE_LIMIT
+        && !entries.contains_key(&key)
+        && let Some(oldest) = entries
             .iter()
             .min_by_key(|(_, entry)| entry.verified_at)
             .map(|(key, _)| key.clone())
-        {
-            entries.remove(&oldest);
-        }
+    {
+        entries.remove(&oldest);
     }
     entries.insert(
         key,

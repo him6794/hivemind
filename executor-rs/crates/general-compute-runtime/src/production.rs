@@ -21,7 +21,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Mutex, OnceLock, PoisonError};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// Operator-owned registration for the cross-platform closed managed DSL.
@@ -1387,9 +1387,7 @@ fn load_verified_seccomp_profile(
     let now = Instant::now();
     let cache = SECCOMP_PROFILE_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
     {
-        let entries = cache
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let entries = cache.lock().unwrap_or_else(PoisonError::into_inner);
         if let Some(entry) = entries.get(&key)
             && entry.size_bytes == metadata.len()
             && entry.modified == modified
@@ -1413,7 +1411,7 @@ fn load_verified_seccomp_profile(
         ))
     })?;
     validate_seccomp_profile(&profile)
-        .map_err(|message| ProductionBackendRegistryError::SeccompProfileUnavailable(message))?;
+        .map_err(ProductionBackendRegistryError::SeccompProfileUnavailable)?;
     let canonical = serde_json::to_vec(&profile).map_err(|error| {
         ProductionBackendRegistryError::SeccompProfileUnavailable(error.to_string())
     })?;
@@ -1435,17 +1433,15 @@ fn load_verified_seccomp_profile(
         ));
     }
 
-    let mut entries = cache
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    if entries.len() >= SECCOMP_CACHE_LIMIT && !entries.contains_key(&key) {
-        if let Some(oldest) = entries
+    let mut entries = cache.lock().unwrap_or_else(PoisonError::into_inner);
+    if entries.len() >= SECCOMP_CACHE_LIMIT
+        && !entries.contains_key(&key)
+        && let Some(oldest) = entries
             .iter()
             .min_by_key(|(_, entry)| entry.verified_at)
             .map(|(key, _)| key.clone())
-        {
-            entries.remove(&oldest);
-        }
+    {
+        entries.remove(&oldest);
     }
     entries.insert(
         key,
@@ -1527,9 +1523,8 @@ fn rootfs_snapshot_for_template(
                 continue;
             }
             let root = path.join("rootfs");
-            let root_metadata = match fs::symlink_metadata(&root) {
-                Ok(metadata) => metadata,
-                Err(_) => continue,
+            let Ok(root_metadata) = fs::symlink_metadata(&root) else {
+                continue;
             };
             if root_metadata.file_type().is_symlink() || !root_metadata.is_dir() {
                 continue;
@@ -1869,12 +1864,13 @@ fn atomic_replace_config(path: &Path, bytes: &[u8]) -> Result<(), ProductionBack
         )
     })?;
     ensure_no_symlink_ancestors(parent)?;
-    if let Ok(metadata) = fs::symlink_metadata(path) {
-        if metadata.file_type().is_symlink() || !metadata.is_file() {
-            return Err(ProductionBackendRegistryError::RootUnavailable(
-                "OCI config path must be a regular non-symlink file".into(),
-            ));
-        }
+    if matches!(
+        fs::symlink_metadata(path),
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file()
+    ) {
+        return Err(ProductionBackendRegistryError::RootUnavailable(
+            "OCI config path must be a regular non-symlink file".into(),
+        ));
     }
     let nonce = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -2000,6 +1996,9 @@ fn clone_file_reflink_or_copy(
 fn try_reflink_file(source: &Path, destination: &Path) -> bool {
     use std::os::fd::AsRawFd;
     const FICLONE: u64 = 0x4004_9409;
+    unsafe extern "C" {
+        fn ioctl(file_descriptor: i32, request: u64, ...) -> i32;
+    }
     let Ok(source) = File::open(source) else {
         return false;
     };
@@ -2011,9 +2010,9 @@ fn try_reflink_file(source: &Path, destination: &Path) -> bool {
     else {
         return false;
     };
-    unsafe extern "C" {
-        fn ioctl(file_descriptor: i32, request: u64, ...) -> i32;
-    }
+    // SAFETY: Both owned files remain open during the call. FICLONE takes
+    // the destination descriptor and a source descriptor as its integer
+    // variadic argument, matching the Linux ioctl ABI; no pointers are passed.
     let result = unsafe { ioctl(destination.as_raw_fd(), FICLONE, source.as_raw_fd()) } == 0;
     drop(destination);
     if !result {
@@ -2182,9 +2181,7 @@ pub(crate) fn verify_windows_hcs_assets(
     let cache = WINDOWS_ASSET_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
     let now = Instant::now();
     {
-        let entries = cache
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let entries = cache.lock().unwrap_or_else(PoisonError::into_inner);
         if let Some(entry) = entries.get(&key)
             && entry.image_metadata_fingerprint == image_metadata_fingerprint
             && entry.runner_size_bytes == runner_metadata.len()
@@ -2225,17 +2222,15 @@ pub(crate) fn verify_windows_hcs_assets(
         return Err(ProductionBackendRegistryError::WindowsRunnerOutsideImage);
     }
 
-    let mut entries = cache
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    if entries.len() >= WINDOWS_ASSET_CACHE_LIMIT && !entries.contains_key(&key) {
-        if let Some(oldest) = entries
+    let mut entries = cache.lock().unwrap_or_else(PoisonError::into_inner);
+    if entries.len() >= WINDOWS_ASSET_CACHE_LIMIT
+        && !entries.contains_key(&key)
+        && let Some(oldest) = entries
             .iter()
             .min_by_key(|(_, entry)| entry.verified_at)
             .map(|(key, _)| key.clone())
-        {
-            entries.remove(&oldest);
-        }
+    {
+        entries.remove(&oldest);
     }
     entries.insert(
         key,
