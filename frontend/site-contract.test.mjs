@@ -3,6 +3,23 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import { getSiteDefinition } from './src/lib/hivemind-site-data.mjs';
 
+test('frontend lockfiles retain the complete bundled WASM dependency graph', () => {
+  for (const surface of ['.', 'master-ui', 'worker-ui']) {
+    const lock = JSON.parse(fs.readFileSync(new URL(`./${surface}/package-lock.json`, import.meta.url), 'utf8'));
+    const wasmPath = 'node_modules/@tailwindcss/oxide-wasm32-wasi';
+    const wasm = lock.packages[wasmPath];
+    assert.ok(wasm, `${surface} must lock the optional Tailwind WASM package`);
+    for (const dependency of Object.keys(wasm.dependencies)) {
+      const entry = lock.packages[`${wasmPath}/node_modules/${dependency}`]
+        ?? lock.packages[`node_modules/${dependency}`];
+      assert.ok(entry?.version, `${surface} must lock the WASM dependency ${dependency} for clean npm installs`);
+      if (!entry.inBundle) {
+        assert.ok(entry.resolved && entry.integrity, `${surface} ${dependency} must have verified package metadata`);
+      }
+    }
+  }
+});
+
 test('site definition exposes only official website and account-center routes', () => {
   const site = getSiteDefinition('en');
   const zhSite = getSiteDefinition('zh');
