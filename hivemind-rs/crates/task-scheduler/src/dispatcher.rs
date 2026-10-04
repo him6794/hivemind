@@ -2095,6 +2095,14 @@ fn select_missing_general_compute_chunks(
     Ok(selected)
 }
 
+#[derive(Clone)]
+struct ManagedConsensusReplicaExecutionOptions {
+    max_result_bytes: usize,
+    deadline: chrono::DateTime<chrono::Utc>,
+    enforce: bool,
+    replica_count: u16,
+}
+
 struct ManagedConsensusVote {
     observation: ConsensusObservation,
     output: String,
@@ -2351,12 +2359,17 @@ async fn execute_managed_consensus_attempt(
         return Ok(());
     }
     let mut workers = tokio::task::JoinSet::new();
-    let enforce = attempt.mode == "enforce";
-    let replica_count = policy.replica_count;
+    let execution_options = ManagedConsensusReplicaExecutionOptions {
+        max_result_bytes,
+        deadline,
+        enforce: attempt.mode == "enforce",
+        replica_count: policy.replica_count,
+    };
     for assignment in assignments {
         let repo = Arc::clone(&repo);
         let task = task.clone();
         let private_key_pem = private_key_pem.clone();
+        let execution_options = execution_options.clone();
         workers.spawn(async move {
             let replica_id = assignment.replica_id.clone();
             let result = execute_managed_consensus_replica(
@@ -2364,10 +2377,7 @@ async fn execute_managed_consensus_attempt(
                 task,
                 assignment,
                 private_key_pem,
-                max_result_bytes,
-                deadline,
-                enforce,
-                replica_count,
+                execution_options,
             )
             .await;
             (replica_id, result)
@@ -2514,10 +2524,7 @@ async fn execute_managed_consensus_replica(
     task: Task,
     assignment: ManagedConsensusAssignment,
     private_key_pem: String,
-    max_result_bytes: usize,
-    deadline: chrono::DateTime<chrono::Utc>,
-    enforce: bool,
-    replica_count: u16,
+    execution_options: ManagedConsensusReplicaExecutionOptions,
 ) -> Result<Option<ManagedConsensusVote>> {
     if !repo
         .mark_managed_consensus_replica_running(assignment.attempt_id, &assignment.replica_id)
@@ -2535,11 +2542,11 @@ async fn execute_managed_consensus_replica(
     if task.runtime.as_deref().map(str::trim) == Some(MANAGED_DSL_V1_RUNTIME_VERSION) {
         // Enforce-mode Workers receive the persisted escrow allowance. Observe
         // mode creates no hold, but still uses an equal share of the task cap.
-        request.managed_budget_units = if enforce {
+        request.managed_budget_units = if execution_options.enforce {
             repo.managed_v1_replica_allowance_for_attempt(assignment.attempt_id)
                 .await?
         } else {
-            managed_v1_total_budget_hold(task.max_cpt, replica_count)?.0
+            managed_v1_total_budget_hold(task.max_cpt, execution_options.replica_count)?.0
         };
     }
     request.execution_id = assignment.execution_id.clone();
@@ -2549,7 +2556,8 @@ async fn execute_managed_consensus_replica(
     request.consensus_round_id = assignment.round_id.clone();
     request.replica_id = assignment.replica_id.clone();
     request.consensus_protocol_version = CONSENSUS_PROTOCOL_VERSION as u32;
-    let rpc_timeout = deadline
+    let rpc_timeout = execution_options
+        .deadline
         .signed_duration_since(chrono::Utc::now())
         .to_std()
         .unwrap_or_default();
@@ -2574,9 +2582,9 @@ async fn execute_managed_consensus_replica(
     let result = response
         .managed_consensus_result
         .ok_or_else(|| anyhow::anyhow!("managed consensus result is missing"))?;
-    if max_result_bytes == 0
-        || result.encoded_len() > max_result_bytes
-        || result.output.len() > max_result_bytes
+    if execution_options.max_result_bytes == 0
+        || result.encoded_len() > execution_options.max_result_bytes
+        || result.output.len() > execution_options.max_result_bytes
     {
         anyhow::bail!("managed consensus result exceeds the configured byte limit");
     }
