@@ -1824,7 +1824,9 @@ mod tests {
 
         let old_config = std::env::var_os("HIVEMIND_CONFIG");
         let old_database_url = std::env::var_os("DATABASE_URL");
+        let old_redis_url = std::env::var_os("REDIS_URL");
         let old_master_addr = std::env::var_os("MASTER_HTTP_ADDR");
+        std::env::remove_var("REDIS_URL");
         std::env::set_var("HIVEMIND_CONFIG", "explicit-config.json");
         std::env::set_var("DATABASE_URL", "postgres://operator-database");
         std::env::set_var("MASTER_HTTP_ADDR", "operator-master:8082");
@@ -1846,6 +1848,10 @@ mod tests {
         match old_database_url {
             Some(value) => std::env::set_var("DATABASE_URL", value),
             None => std::env::remove_var("DATABASE_URL"),
+        }
+        match old_redis_url {
+            Some(value) => std::env::set_var("REDIS_URL", value),
+            None => std::env::remove_var("REDIS_URL"),
         }
         match old_master_addr {
             Some(value) => std::env::set_var("MASTER_HTTP_ADDR", value),
