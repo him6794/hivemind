@@ -1,45 +1,55 @@
-﻿# Hivemind - Distributed Compute Runtime
+# Hivemind - Distributed Compute Runtime
 
-A distributed compute runtime for public-network workers, now rewritten in Rust.
+A batch-oriented distributed compute runtime for public-network workers, built in Rust.
 
 ## Quick Start
 
-```bash
-# Build
-make build
+From the repository root, build and run the Rust workspace tests:
 
-# Run tests
-make test
-
-# Start development environment
-make dev
+```powershell
+cargo build --release --manifest-path hivemind-rs/Cargo.toml
+cargo test --manifest-path hivemind-rs/Cargo.toml
 ```
+
+Database and settlement tests require a dedicated test database. To start
+services, prepare the role-specific configuration and execution keys; enforced
+consensus also needs enough eligible Workers. See the
+[project manual (繁體中文)](docs/HIVEMIND_MANUAL.zh-TW.md)
+or [Getting Started](docs/GETTING_STARTED.md) for setup.
+
+The root `Makefile` provides convenience targets when GNU Make and the required
+platform tools are installed; there is no separate `hivemind-rs/Makefile`.
 
 ## User Guide
 
-If you want to submit a task and write the task program, start here:
+The [project manual (繁體中文)](docs/HIVEMIND_MANUAL.zh-TW.md) covers architecture,
+installation, operations, APIs, billing, testing, and troubleshooting. See the
+[documentation index](docs/README.md) for runtime contracts, product plans, and
+historical evaluations.
 
-- [docs/MANAGED_FUNCTION_RUNTIME.md](docs/MANAGED_FUNCTION_RUNTIME.md) — the
-  active `managed-function-v1` syntax, metering model, and settlement formula
+For task submission and programming:
+
+- [docs/MANAGED_FUNCTION_RUNTIME.md](docs/MANAGED_FUNCTION_RUNTIME.md) — active
+  `managed-function-v1` syntax, metering, and settlement
 - [docs/PUBLIC_NETWORK_LIMITATIONS.md](docs/PUBLIC_NETWORK_LIMITATIONS.md) —
-  what the network does not do yet, including that CPT is an internal quota unit
-- The Docs and Usage rules pages on the official site render the same reference
-  from `frontend/src/lib/hivemind-site-data.mjs`; `frontend/site-contract.test.mjs`
-  checks the limits and failure codes it publishes against the enforcing source
+  execution, security, service, and CPT limits
+- The official site's Docs and Usage rules pages share the reference in
+  `frontend/src/lib/hivemind-site-data.mjs`. `frontend/site-contract.test.mjs`
+  checks the published limits and failure codes against the runtime implementation.
 
 ## Architecture
 
-Hivemind is a batch-oriented distributed compute runtime. The system consists of:
+The system consists of:
 
 - **Hivemind Binary** (`hivemind-rs/`) - Unified Rust binary containing all services
-- **Official Site** (`frontend/`) - Public-facing product site, account center, and documentation
-- **Master UI** (`frontend/master-ui/`) - React surface for users: task submission, API keys, dashboard
-- **Worker UI** (`frontend/worker-ui/`) - React surface for workers: node status, task queue, earnings
-- **Infrastructure** - Docker Compose for Redis and PostgreSQL
+- **Official Site** (`frontend/`) - Product site, account center, and documentation
+- **Master UI** (`frontend/master-ui/`) - Task submission, progress, logs, results, and history
+- **Worker UI** (`frontend/worker-ui/`) - Local sign-in, registration, status, and earnings
+- **Infrastructure** - Redis and PostgreSQL, with a local Docker Compose stack
 
 ### Services
 
-All services run in a single binary (`hivemind-bin`):
+Service roles are selected through `hivemind-bin`:
 
 | Service | Port | Protocol | Description |
 |---------|------|----------|-------------|
@@ -49,7 +59,7 @@ All services run in a single binary (`hivemind-bin`):
 
 ### Rust Crates
 
-```
+```text
 hivemind-rs/
 ├── crates/
 │   ├── auth/           - JWT authentication
@@ -70,24 +80,21 @@ hivemind-rs/
 
 ### Prerequisites
 
-- Rust 1.70+
-- Docker (for Redis & PostgreSQL)
-- Node.js 18+ (for frontend)
+- Rust 1.98.1, used by Hivemind CI; the workspace does not declare an MSRV
+- Native build tools for the chosen target; see the [project manual](docs/HIVEMIND_MANUAL.zh-TW.md)
+- Docker with Compose for the local service stack
+- Node.js 20.9+ for the Next.js official site (CI uses Node.js 20)
+- Windows PowerShell 5.1 or PowerShell 7 for frontend/release scripts
 
 ### Build
 
 ```bash
-# Build Rust binary
 make build
-
-# Build frontend
 make build-frontend
-
-# Release smoke all frontend surfaces
 make smoke-frontend
 ```
 
-The shared frontend release harness also runs directly on Windows PowerShell:
+The frontend release harness also runs directly on Windows PowerShell:
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-release-frontends.ps1
@@ -100,20 +107,14 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/release-frontend-smo
 ### Test
 
 ```bash
-# Run all tests
 make test
-
-# Run tests with verbose output
 make test-verbose
 ```
 
 ### Lint & Format
 
 ```bash
-# Run linter
 make lint
-
-# Format code
 make fmt
 ```
 
@@ -124,80 +125,79 @@ make fmt
 | Service       | Port  | Description                |
 |---------------|-------|----------------------------|
 | Official Site | 8080  | Public product site and account center |
-| Master UI     | 3000  | User-facing task dashboard |
-| Worker UI     | 3001  | Worker node control panel  |
-| Master API    | 8082  | HTTP API (auth, tasks)     |
-| Nodepool gRPC | 50051 | Worker registration        |
-| Worker gRPC   | 50053 | Task execution             |
-| Worker HTTP   | 18080 | Local worker control API   |
-| Redis         | 6379  | Session & cache            |
-| PostgreSQL    | 5432  | Persistent data            |
+| Master UI     | 3000  | Task dashboard |
+| Worker UI     | 3001  | Local worker dashboard |
+| Master API    | 8082  | HTTP API (auth, tasks) |
+| Nodepool gRPC | 50051 | Worker registration |
+| Worker gRPC   | 50053 | Task execution |
+| Worker HTTP   | 18080 | Local worker control API |
+| Redis         | 6379  | Session & cache |
+| PostgreSQL    | 5432  | Persistent data |
 
 ### Docker Compose
 
 ```bash
-# Start all services
 make docker-up
-
-# View logs
 make docker-logs
-
-# Stop all services
 make docker-down
 ```
 
 ### Three-surface release
 
-The release candidate consists of the public Official Site/account center on
-port 8080, the task-oriented Master UI on port 3000, and the provider-oriented
-Worker UI on port 3001. The detailed operator runbook, environment contract,
-trust boundaries, smoke checks, browser tests, and troubleshooting steps are in
-[docs/GETTING_STARTED.md](docs/GETTING_STARTED.md).
+The release includes the Official Site/account center on port 8080, Master UI
+on port 3000, and Worker UI on port 3001. Configuration, smoke checks, browser
+tests, and troubleshooting are in [docs/GETTING_STARTED.md](docs/GETTING_STARTED.md).
 
-From the repository root on Windows, build and leave the complete stack running:
+Use a disposable Windows environment. The smoke harness does not force a unique
+Compose project; normal cleanup runs `docker compose down -v` and deletes project
+volumes. Check project and volume ownership before running it. From the repository
+root, build and leave the stack running:
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts/release-stack-smoke.ps1 -KeepRunning
 ```
 
-Then run the real cross-surface browser journey:
+In the browser-test shell, set `HIVEMIND_SITE_URL`, `HIVEMIND_MASTER_UI_URL`, and
+`HIVEMIND_WORKER_UI_URL` to the URLs printed by the harness, then run:
 
 ```powershell
 cd frontend; npm run test:e2e
 ```
 
-When verification is complete, return to the repository root and run
-`docker compose down`. See the runbook before using raw Compose in production:
-unlike the smoke harness, raw Compose requires secrets and the matching worker
-execution key pair to be supplied.
+The harness can allocate ephemeral host ports. The root stack contains one
+Worker; default enforced task execution and settlement require three eligible
+Workers in a separate test.
+
+After verification, return to the repository root and run `docker compose down`.
+Raw Compose requires supplied secrets and a matching Worker execution key pair;
+see the runbook for configuration and cleanup details.
 
 ### Managed consensus
 
-Managed tasks settle through Nodepool-coordinated replicated execution
-by default. Nodepool assigns the same deterministic task to three distinct
-registered Workers and requires a strict majority of two to return matching
-canonical results. It persists a quorum certificate before completing or
-settling the task, and never falls back to a single-Worker result.
+Nodepool assigns each deterministic CPU `managed-function-v1` task to three
+distinct registered Workers by default. Two must return matching canonical results. Nodepool
+persists a quorum certificate before publishing a successful task result and
+does not fall back to single-Worker completion. Valid attempt-bound v1 usage
+can still be billable for a failed or no-quorum task.
 
-Consensus is agreement evidence, not independent correctness validation: a
-colluding or commonly compromised Worker majority can still agree on an incorrect result.
-Only deterministic, side-effect-free managed tasks are eligible. For v1,
-`max_cpt` is the maximum total task charge, including the 10% platform fee and
-all configured replicas (three by default); it is not a per-replica cap. Nodepool
-derives identical deterministic integer execution budgets from the fee-exclusive
-cap. For a 100 CPT cap and three replicas, each receives 30 CPT of execution
-budget, the worst-case hold is 99 CPT (90 usage + 9 fee), and the remaining 1
-CPT stays with the owner. Settlement aggregates valid replica usage plus the fee
-and never exceeds `max_cpt`; unused held CPT is refunded. Automatic paid retries
-are disabled until a funded platform treasury is available, and retry work is
-not charged to task owners. The task-wide cap applies to new v1 submissions;
-historical tasks billed under the former per-replica contract remain as recorded
-and are not retroactively re-capped or refunded. Quorum output and payment
-eligibility are separate decisions.
+Consensus records agreement, not independently verified correctness. A colluding
+or commonly compromised Worker majority can agree on an incorrect result. Only
+deterministic, side-effect-free managed tasks are eligible.
 
-The default rollout is `enforce`. Use `observe` for a canary that fans out
-replicas, records non-settling shadow state, and never exposes a billable
-result; use `disabled` to turn the consensus path off entirely.
+For new v1 tasks, `max_cpt` is the total charge cap, including the 10% platform
+fee and all replicas. Nodepool derives equal integer execution budgets from the
+fee-exclusive cap. With a 100 CPT cap and three replicas, each receives 30 CPT
+of execution budget. The hold is 99 CPT (90 usage + 9 fee); the remaining 1 CPT
+stays with the owner. Settlement aggregates valid replica usage plus the fee,
+never exceeds `max_cpt`, and refunds unused held CPT.
+
+Automatic paid retries are disabled pending a funded platform treasury; retry
+work is not charged to task owners. Historical per-replica billing remains as
+recorded, without retroactive re-capping or refunds.
+
+The default rollout is `enforce`. `observe` dispatches replicas and records shadow
+state without publishing user output or settling. `disabled` turns off the
+consensus path.
 
 ```text
 MANAGED_CONSENSUS_ROLLOUT_MODE=enforce
@@ -206,32 +206,28 @@ MANAGED_CONSENSUS_QUORUM=2
 MANAGED_CONSENSUS_MAX_RESULT_BYTES=262144
 ```
 
-Do not treat a consensus certificate as independent correctness validation,
-and do not enable it for side-effecting tasks.
-
 ### Manual
 
-```bash
-# Start Redis
-docker run -d -p 6379:6379 redis:7-alpine
+Prepare PostgreSQL, Redis, the platform JWT secret, execution keys, and the
+selected role's configuration. When starting services, the `hivemind-bin` CLI
+searches the working directory and its parents for `.env`; standalone Windows Master/Worker packages
+load only the file beside the executable. Role-specific settings are in the
+[project manual](docs/HIVEMIND_MANUAL.zh-TW.md).
 
-# Start PostgreSQL
-export POSTGRES_PASSWORD='replace-with-a-strong-password'
-docker run -d -p 5432:5432 \
-  -e POSTGRES_DB=hivemind \
-  -e POSTGRES_USER=hivemind \
-  -e POSTGRES_PASSWORD="$POSTGRES_PASSWORD" \
-  postgres:16-alpine
+With Nodepool configured, run from the repository root:
 
-# Run Hivemind
-DATABASE_URL="postgres://hivemind:${POSTGRES_PASSWORD}@localhost:5432/hivemind" \
-REDIS_URL=redis://localhost:6379 \
-./target/release/hivemind-bin all
+```powershell
+cargo run --release --manifest-path hivemind-rs/Cargo.toml --bin hivemind-bin -- nodepool
 ```
+
+This starts Nodepool only. `all` combines services for local use; production
+separates the official control plane from user-deployed Master and Worker nodes.
 
 ## Configuration
 
-Configuration is via environment variables. The table below describes server/service deployment settings; it is not a configuration checklist for ordinary packaged Master or Worker nodes. Those users do not set the server `JWT_SECRET` or manually pin a Nodepool IP: first authenticated login performs VPN enrollment, and the client discovers Nodepool through the overlay.
+These settings are for service deployments. Ordinary packaged Master and Worker
+clients do not need the platform `JWT_SECRET` or a fixed Nodepool IP: authenticated
+login handles VPN enrollment and Nodepool discovery through the overlay.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
@@ -239,17 +235,17 @@ Configuration is via environment variables. The table below describes server/ser
 | `REDIS_URL` | - | Redis connection string |
 | `JWT_SECRET` | - | JWT signing secret |
 | `HIVEMIND_ADMIN_USERS` | unset | Comma-separated usernames allowed to access `/api/admin/*` endpoints |
-| `HIVEMIND_TASK_SUBMIT_LIMIT_PER_MINUTE` | `60` | Per-user task submission rate limit for a rolling 1-minute window (`0` disables limiting) |
-| `WEBSITE_NODEPOOL_GRPC_ADDR` | `localhost:50051` | Server-side nodepool target used only by the official website backend for account endpoints |
+| `HIVEMIND_TASK_SUBMIT_LIMIT_PER_MINUTE` | `60` | Master process-local per-owner 60-second submission window; `0` or a negative value blocks submissions |
+| `WEBSITE_NODEPOOL_GRPC_ADDR` | `localhost:50051` | Server-side Nodepool target for the official website's account endpoints |
 | `MASTER_HTTP_ADDR` | `0.0.0.0:8082` | Master HTTP listen address |
 | `NODEPOOL_GRPC_ADDR` | `0.0.0.0:50051` | Nodepool gRPC listen/connect address |
 | `WORKER_GRPC_ADDR` | `0.0.0.0:50053` | Worker gRPC listen address |
-| `WORKER_ADVERTISE_ADDR` | - | Worker address registered with nodepool |
+| `WORKER_ADVERTISE_ADDR` | - | Worker address registered with Nodepool |
 | `EXECUTOR_SANDBOX_DIR` | `./sandbox` | Per-task working directory root |
-| `MANAGED_CONSENSUS_ROLLOUT_MODE` | `enforce` | Managed consensus rollout: `disabled`, `observe`, or `enforce`; the default is `enforce`, which settles managed tasks only from a strict-majority quorum certificate |
-| `MANAGED_CONSENSUS_REPLICA_COUNT` | `3` | Distinct Worker replicas for consensus-managed tasks |
-| `MANAGED_CONSENSUS_QUORUM` | `2` | Required matching replicas; must be a strict majority |
-| `MANAGED_CONSENSUS_TIMEOUT_SECS` | `120` | Overall deadline for one consensus round |
+| `MANAGED_CONSENSUS_ROLLOUT_MODE` | `enforce` | `disabled`, `observe`, or `enforce`; successful output requires a strict-majority certificate; valid v1 usage is validated separately for payment |
+| `MANAGED_CONSENSUS_REPLICA_COUNT` | `3` | Distinct Worker replicas per managed task |
+| `MANAGED_CONSENSUS_QUORUM` | `2` | Matching replicas required; must be a strict majority |
+| `MANAGED_CONSENSUS_TIMEOUT_SECS` | `120` | Deadline for one consensus round |
 | `MANAGED_CONSENSUS_MAX_RESULT_BYTES` | `262144` | Nodepool/Worker cap for one consensus result |
 | `LOG_LEVEL` | `info` | Log level (debug, info, warn, error) |
 
@@ -258,7 +254,6 @@ Configuration is via environment variables. The table below describes server/ser
 ### Authentication
 
 ```bash
-# Login
 curl -X POST http://localhost:8082/api/login \
   -H "Content-Type: application/json" \
   -d '{"username": "<username>", "password": "<password>"}'
@@ -267,7 +262,6 @@ curl -X POST http://localhost:8082/api/login \
 ### Tasks
 
 ```bash
-# Create task
 curl -X POST http://localhost:8082/api/tasks \
   -H "Authorization: Bearer <token>" \
   -H "Content-Type: application/json" \
@@ -282,7 +276,6 @@ curl -X POST http://localhost:8082/api/tasks \
     "max_cpt": 1000
   }'
 
-# List tasks
 curl http://localhost:8082/api/tasks \
   -H "Authorization: Bearer <token>"
 ```
@@ -290,15 +283,12 @@ curl http://localhost:8082/api/tasks \
 ### Admin Observability
 
 ```bash
-# Cache alert (with thresholds)
 curl "http://localhost:8082/api/admin/scheduling/cache-alert?low=0.5&high=2.0" \
   -H "Authorization: Bearer <admin-token>"
 
-# Cache anomaly history (persisted low/high alerts)
 curl "http://localhost:8082/api/admin/scheduling/cache-anomalies?limit=100" \
   -H "Authorization: Bearer <admin-token>"
 
-# Admin audit logs (trust-control / artifact cleanup / etc.)
 curl "http://localhost:8082/api/admin/audit/logs?limit=100" \
   -H "Authorization: Bearer <admin-token>"
 ```
@@ -311,4 +301,6 @@ curl http://localhost:8082/health
 
 ## License
 
-MIT
+Hivemind is licensed under the MIT [LICENSE](LICENSE). Third-party dependencies,
+vendored components, and packaged images retain their own licenses and required
+notices.

@@ -1,6 +1,6 @@
 # Managed Function Runtime
 
-## Goal
+## Overview
 
 The Managed Function Runtime is a restricted, metered execution path for small
 serverless-style Hivemind tasks. It parses a fixed syntax, evaluates it with a
@@ -14,7 +14,7 @@ Docker, WSL, a VM, SSH, or a direct host-process fallback.
 
 ## Active contract
 
-`managed-function-v1` is the only managed-function runtime accepted for new
+`managed-function-v1` is the CPU managed-function runtime accepted for new
 submissions. It uses the closed interpreter described below with versioned
 per-replica metering, a task-wide fee-inclusive charge cap, checked arithmetic,
 structural safety limits, and Nodepool-coordinated consensus settlement.
@@ -110,7 +110,6 @@ Input:
   allowances, with any remainder staying with the owner
 - structural safety limits such as call depth, value size, output size, and the
   task deadline
-- optional function arguments in a later milestone
 
 Output:
 
@@ -208,8 +207,10 @@ Rules:
 - Identifiers are ASCII letters, digits, and `_`, and must not start with a
   digit.
 - Integers are signed 64-bit values.
-- Strings are UTF-8 string literals with `\"`, `\\`, `\n`, `\r`, and `\t`
-  escapes.
+- Source strings use double quotes and `\"`, `\\`, `\n`, `\r`, and `\t`
+  escapes, without `\uXXXX`. Byte-wise source-literal decoding in both CPU
+  contracts does not preserve non-ASCII UTF-8 text. Pass Unicode data through
+  JSON input.
 - User functions are pure runtime functions over values in the managed
   environment.
 - `print` appends to the receipt output and is bounded by `max_output_bytes`.
@@ -220,8 +221,13 @@ Rules:
   deterministically assigned runtime usage budget derived from the task-wide
   `max_cpt`; structural limits and the task deadline remain active. Frozen v0
   fixtures additionally retain their historical `max_loop_iterations` limit.
-- Built-in functions currently include `len(value)`, `get(target, key)`, and
-  `contains(target, value)`.
+- CPU built-ins are `len(value)`, `get(target, key)`, and
+  `contains(target, value)`. `len(string)` counts UTF-8 bytes; string indexing
+  counts characters. Numeric CPU input is restricted to integers;
+  floating-point operations belong to the GPU contract.
+- `if` requires an `else` and one expression per branch. Bare reassignment,
+  `while`, `break`, `continue`, `%`, member-dot access, and source comments are
+  unsupported. Use `let` to rebind a variable.
 
 Forbidden in managed-function-v1 (and in the frozen v0 language):
 
@@ -256,11 +262,13 @@ executable. The operator-selected backend owns CUDA/cuBLAS resources, and a
 GPU-required request fails closed when a trusted compatible GPU is unavailable;
 it never silently uses the CPU reference backend.
 
-GPU-v1 also permits the separately declared floating-point and math surface
-only inside its explicit GPU execution context. GPU-v1 uses the authoritative
-typed result contract and consensus settlement path. A GPU result without the
-required consensus evidence is not settled, and the route never falls back to
-legacy result-torrent completion.
+GPU-v1 permits floating-point and math operations only inside its explicit GPU
+execution context. Its completion path is separate from CPU v1 consensus:
+Nodepool validates the typed result against the persisted request manifest,
+assignment, and trusted capability snapshot, then stores the result and performs
+GPU-specific fixed-reservation settlement in one transaction. It does not require
+a CPU quorum certificate or use CPU v1 operation-based billing, and does not fall
+back to legacy result-torrent completion.
 
 ## Metering v0
 
@@ -302,7 +310,7 @@ receipt semantics. V0 is no longer accepted for new work; completed v0 records
 are preserved as historical evidence, and unfinished v0 work is cancelled at
 Nodepool startup rather than being converted to v1.
 
-For v1, consensus and payment are deliberately separate:
+For v1, consensus selects the output; validated usage determines payment:
 
 ```text
 canonical result = managed-consensus-result-v1

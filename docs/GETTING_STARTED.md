@@ -8,15 +8,16 @@
 - Node.js 20.9+ for Next.js frontend builds and Playwright browser QA
 - Rust stable when building or testing the backend outside Docker
 
-The release uses these browser-facing local executable paths. The ports must be available on
-the host:
+Raw Compose uses the following default browser-facing URLs. The smoke harness
+can assign different host ports; use the URLs it prints rather than assuming
+these defaults apply to a smoke run:
 
 | Surface or API | Default URL | Operator purpose |
 | --- | --- | --- |
 | Official Site | `http://localhost:8080` | Public product site and account center |
 | Master UI | `http://localhost:3000` | Submit managed-function tasks and inspect their status, logs, results, and artifacts |
 | Worker UI | `http://localhost:3001` | Inspect the local worker and register its capacity |
-| Master API | `http://localhost:8082` | Authenticated HTTP gateway used by the browser surfaces |
+| Master API | `http://localhost:8082` | Authenticated task gateway used by Master UI; not the Official Site BFF |
 | Worker control | `http://localhost:18080` | Local worker profile/control API used by Worker UI |
 
 ## Configure
@@ -38,8 +39,23 @@ Raw `docker compose` requires the following release values:
 - `WORKER_NODEPOOL_TOKEN`: optional. Leave it blank when the Worker signs in
   through Website API and registers through Worker UI.
 
-Start from `.env.example` for a persistent operator configuration. Generate a
-matching Ed25519 key pair with OpenSSL:
+Start from `.env.example` for an operator deployment; ordinary downloaded clients
+use their package-specific configuration. When starting services, the
+`hivemind-bin` CLI searches the working directory and its parents for `.env`.
+Standalone Windows Master/Worker
+packages load only the file beside the executable. Configuration comes from the
+process environment or `HIVEMIND_CONFIG` JSON.
+
+Inside the Official Site Compose container, set
+`WEBSITE_NODEPOOL_GRPC_ADDR=nodepool:50051`, not the template's host-local
+`localhost:50051`.
+
+Raw Compose requires the Worker backend registry at its configured path; startup
+fails if the file is missing. The smoke harness creates an empty registry for
+closed DSL tests. General-compute backends require operator-pinned assets and
+separate validation.
+
+Generate a matching Ed25519 key pair with OpenSSL:
 
 ```powershell
 openssl genpkey -algorithm Ed25519 -out worker-execution-private.pem
@@ -50,14 +66,19 @@ Do not commit `.env` or private keys. In an environment file, PEM values must be
 encoded in the form supported by the deployment environment (the repository
 template uses one line with literal `\n` separators).
 
-For local release verification, `scripts/release-stack-smoke.ps1` is
-self-contained: when values are absent it generates an ephemeral
-`POSTGRES_PASSWORD`, a non-default `JWT_SECRET`, and a matching Ed25519 private
-and public key pair. It preserves user-supplied values exactly and restores the
-calling process environment afterward. It also assigns Redis and PostgreSQL
-collision-free ephemeral host ports when `REDIS_HOST_PORT` and
-`POSTGRES_HOST_PORT` are unset. The five product/API ports listed above remain
-fixed and must be free.
+For local release verification, `scripts/release-stack-smoke.ps1` generates an
+ephemeral `POSTGRES_PASSWORD`, a non-default `JWT_SECRET`, and a matching Ed25519
+private/public key pair when values are absent. It preserves user-supplied values
+exactly and restores the calling process environment afterward. Unset host-port
+variables across the stack receive collision-free ephemeral ports; this is not
+limited to `REDIS_HOST_PORT` and `POSTGRES_HOST_PORT`. Explicitly supplied ports
+must be available.
+
+**Use a disposable development environment.** Normal cleanup runs
+`docker compose down -v`, deleting the project's volumes. The harness does not
+force a unique Compose project; supplied volume names and the default Worker
+state volume may reuse existing data. Check project and volume ownership before
+running it. `-KeepRunning` leaves the stack running and skips cleanup.
 
 ## External operator topology
 
@@ -72,18 +93,16 @@ Local suitable host
   Master + Worker
 ```
 
-Master and Worker connect to the Orange Pi Nodepool through the Headscale
-overlay. Do not deploy either downloaded client or the platform
-`HEADSCALE_API_KEY` on the Orange Pi as a substitute for that topology. The API
-key remains server-side and is never distributed in client packages.
+Master and Worker run on separate hosts and connect to the Orange Pi Nodepool
+through the Headscale overlay. Keep `HEADSCALE_API_KEY` on the control plane;
+never distribute it in client packages.
 
 For a local Windows Master or Worker to enroll automatically, its configured
 Website API origin must be the HTTPS origin of the deployed Rust Website API.
 Set `WEBSITE_API_BASE` (or the role-specific `MASTER_WEBSITE_API_BASE` /
 `WORKER_WEBSITE_API_BASE`) only when the package/runtime default does not match
 your deployment. The origin must expose both `POST /api/login` and the protected
-`POST /api/vpn/config`; the official Next BFF is not a VPN-config local executable path unless
-that route is explicitly added there. The downloaded Worker package exposes
+`POST /api/vpn/config`; the official Next BFF does not provide that VPN route. The downloaded Worker package exposes
 `WEBSITE_API_BASE` in `.env.worker.example`; the runtime also has a baked-in
 public default for deployments that intentionally use it.
 
@@ -105,11 +124,12 @@ role-scoped `MASTER_VPN_AUTHKEY` or `WORKER_VPN_AUTHKEY` remains supported; set
 path is unavailable. Set `VPN_STARTUP_TIMEOUT_SECS` between 1 and 300 seconds
 when the default 120-second readiness deadline needs adjustment. A login-server-only setting does not auto-enroll.
 
-Automatic update/download behavior is not implemented yet. The current startup
-slice only adds authenticated Headscale enrollment, persisted-state rehydration,
-and readiness ordering. The root all-in-one Compose stack and
-`infra/docker-compose.vpn.yml` are local/legacy development configurations, not
-formal external Headscale evidence.
+Signed client updates support verification, activation, and rollback. A production
+channel additionally requires approved signed metadata and packages, plus
+clean-host testing. Missing or invalid assets fail closed.
+
+Root Compose and `infra/docker-compose.vpn.yml` are local/legacy development
+configurations. Test the deployed Headscale path separately.
 
 ```bash
 cd hivemind-rs
@@ -146,8 +166,10 @@ This builds all three release surfaces:
 
 ### Release smoke and browser tests
 
-From the repository root, validate packaging, build the complete stack, wait
-for all five HTTP local executable paths, and keep the containers running for browser QA:
+From the repository root on a disposable Windows host, run the harness to
+validate packaging, build the stack, check HTTP/service health, and leave it
+running for browser tests. Account flows, quorum, and settlement are tested
+separately:
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts/release-stack-smoke.ps1 -KeepRunning
@@ -158,9 +180,12 @@ The harness prints every generated setting without printing secret values. Omit
 Use `-CheckOnly` to validate Compose packaging and environment generation
 without starting containers.
 
-In a second PowerShell session, run the serial Playwright journey. It creates a
-fresh account, checks Official Site validation and balance, registers the local
-worker, submits/cancels/completes tasks in Master UI, and captures downloads:
+In a second PowerShell session, set `HIVEMIND_SITE_URL`, `HIVEMIND_MASTER_UI_URL`,
+and `HIVEMIND_WORKER_UI_URL` to the printed URLs. Generated ports are not inherited
+by that shell. The root Compose stack contains one Worker; task execution and
+settlement tests under the default enforce policy require three eligible Workers.
+
+Run the browser tests:
 
 ```powershell
 cd frontend
@@ -202,9 +227,19 @@ entry points.
 make dev
 ```
 
-For a manual run, set the database, Redis, and JWT environment variables, then
-start `hivemind-bin` in the mode you need (`all`, `master`, `nodepool`, or
-`worker`).
+This is a legacy convenience target, not a self-contained quickstart: it needs
+GNU Make and the legacy `docker-compose` executable, does not generate secrets
+or execution keys, does not build/start frontend applications, and uses a fixed
+wait instead of a database readiness check. Review its implementation and supply
+the required configuration before running it.
+
+For a manual run, configure the selected role and start `hivemind-bin` in the
+mode you need (`all`, `master`, `nodepool`, `website`, or `worker`). Nodepool needs
+the platform JWT secret and execution signing private key; Website API needs its
+server-side account/VPN configuration; Worker needs the matching public key.
+Do not distribute platform JWT secrets or database credentials to downloaded
+Master/Worker clients. `all` is local composition, not a substitute for the
+separate official/user-deployed topology.
 
 To run the full local release stack, including the official site and both app
 surfaces without the smoke harness, first supply the required secrets and key
@@ -228,9 +263,9 @@ The default local ports are:
 curl http://localhost:8082/health
 ```
 
-For frontend release verification:
+For frontend release verification (with the actual running endpoints configured):
 
-```bash
+```powershell
 $env:WEBSITE_NODEPOOL_GRPC_ADDR = "127.0.0.1:50051"
 $env:VITE_API_BASE = "http://127.0.0.1:8082"
 $env:VITE_WORKER_CONTROL_BASE = "http://127.0.0.1:18080"
@@ -245,7 +280,7 @@ public product site and account center; task operations belong in Master UI and
 worker operations belong in Worker UI. Browser code must not connect directly
 to nodepool. The Official Site backend reaches nodepool server-side through
 `WEBSITE_NODEPOOL_GRPC_ADDR`, while browser-facing traffic uses the Master API
-or the local worker control local executable path.
+or the local Worker control API.
 
 The same rule governs billing for managed tasks. With
 `MANAGED_CONSENSUS_ROLLOUT_MODE=enforce` (the default), Nodepool dispatches
@@ -265,22 +300,24 @@ agree on a wrong result.
 - **Compose reports a missing variable**: raw Compose does not generate
   secrets. Fill `POSTGRES_PASSWORD`, `JWT_SECRET`, and both worker execution key
   variables, or use the release smoke harness.
-- **A frontend or API port is already allocated**: free 8080, 3000, 3001, 8082,
-  or 18080. Only Redis/PostgreSQL infrastructure host ports become
-  collision-free ephemeral ports during smoke.
-- **An local executable path times out**: run `docker compose ps` and
+- **A frontend or API port is already allocated**: raw Compose uses the defaults
+  above unless overridden. Smoke assigns collision-free ephemeral ports to unset
+  host-port variables across the stack. Check the printed URLs; an explicitly
+  configured port is preserved and must be free.
+- **An endpoint times out**: run `docker compose ps` and
   `docker compose logs <service>`; the smoke harness treats any missing surface
   or unexpected health payload as a failure.
 - **Worker registration fails**: confirm
   `http://localhost:18080/api/worker-info` responds, the public key matches the
   nodepool private key, and login credentials are valid. A blank
   `WORKER_NODEPOOL_TOKEN` is expected for UI-driven registration.
-- **Every managed-function task fails to settle**: no quorum was reached.
-  Confirm at least two of the three assigned Workers returned a matching
-  canonical result before the round deadline (`MANAGED_CONSENSUS_TIMEOUT_SECS`).
-  If a Worker is untrusted, offline, or produced a divergent result, the round
-  records a no-quorum observation, releases the reservations, and retries up
-  to the task retry limit before failing the task.
+- **Managed tasks do not produce a successful result**: check admission,
+  readiness, runtime identity, per-replica budgets, and the round deadline
+  (`MANAGED_CONSENSUS_TIMEOUT_SECS`). The default needs three eligible Workers
+  and two matching results; one root Compose Worker is insufficient. New v1
+  automatic paid retries are disabled. Outstanding replicas must be stopped or
+  fenced; unconfirmed stops retain durable slot reservations. Valid attempt-bound
+  usage can still be billed for failed or no-quorum tasks.
 - **Playwright cannot launch a browser**: install Edge/Chrome on Windows or the
   Playwright browser dependencies on other platforms; optionally set
   `HIVEMIND_PLAYWRIGHT_CHANNEL`.

@@ -1,328 +1,167 @@
-# 貢獻指南
+# Hivemind 貢獻指南
 
-感謝您對 Hivemind 專案的興趣！我們歡迎各種形式的貢獻。
+架構、任務契約與部署設定見[使用與部署手冊](docs/HIVEMIND_MANUAL.zh-TW.md)，其他專題見[文檔索引](docs/README.md)。
 
-## 目錄
+## 1. 產品與信任邊界
 
-- [行為準則](#行為準則)
-- [如何貢獻](#如何貢獻)
-- [開發環境設置](#開發環境設置)
-- [提交規範](#提交規範)
-- [測試要求](#測試要求)
-- [程式碼風格](#程式碼風格)
-- [Pull Request 流程](#pull-request-流程)
+修改前請閱讀 [AGENT.md](AGENT.md)、[AGENTS.md](AGENTS.md) 與所屬目錄的開發指引。
 
-## 行為準則
+- Nodepool 是帳號、餘額、排程、任務狀態、Worker 身分與結算的唯一可信權威。
+- Master 與 Worker 由使用者部署；它們回報的身分、資源、結果與費用都必須由 Nodepool 驗證。
+- 官網提供產品入口與帳號中心，任務操作屬於 Master，Worker 註冊與本機資訊屬於 Worker。
+- 瀏覽器不直接連 Nodepool；官網後端透過 `WEBSITE_NODEPOOL_GRPC_ADDR` 連線。
+- 新 CPU managed 任務只接受 `managed-function-v1`，v0 僅供讀取歷史資料；GPU 與 general-compute 使用獨立契約。
+- v1 的 `max_cpt` 是包含平台費與所有副本的整個任務收費上限。
+- 保留身分驗證、共識、用量驗證與隔離要求，不以單一 Worker 結算或較弱的執行方式繞過檢查。
 
-本專案遵循貢獻者公約（Contributor Covenant）。參與本專案即表示您同意遵守其條款。
+## 2. 開發環境
 
-## 如何貢獻
+### 後端
 
-### 報告 Bug
+- `hivemind-rs/`：應用程式、API、Nodepool、資料庫、排程與 Worker。
+- `executor-rs/`：封閉 DSL、GPU 與 general-compute runtime libraries。
+- Hivemind CI 使用 Rust 1.98.1；workspace 未宣告 MSRV。工具鏈版本見 [CI](.github/workflows/ci.yml) 與對應 Dockerfile。
+- 各平台需要 linker、protobuf compiler 與原生函式庫建置工具，安裝方式見手冊與 CI。
+- `Makefile` 位於 repository root，`hivemind-rs/` 沒有獨立的 Makefile。
 
-在提交 Bug 報告前，請：
+### 前端
 
-1. 檢查 [Issues](https://github.com/yourusername/hivemind/issues) 確認問題尚未被報告
-2. 使用最新版本重現問題
-3. 收集相關資訊：
-   - 作業系統和版本
-   - Go 版本
-   - 錯誤訊息和堆疊追蹤
-   - 重現步驟
+三個前端各自安裝依賴、建置與測試：
 
-提交 Bug 時請包含：
+| 目錄 | 用途 |
+| --- | --- |
+| `frontend/` | Next.js 官網與帳號中心 |
+| `frontend/master-ui/` | Vite／React Master UI |
+| `frontend/worker-ui/` | Vite／React Worker UI |
 
-```markdown
-**描述**
-簡短描述問題
+Next.js 官網需要 Node.js 20.9+，CI 使用 Node.js 20。一般建置使用 `npm ci`；更新依賴時使用 `npm install`，並一併檢查 lockfile。
 
-**重現步驟**
-1. 執行 '...'
-2. 點擊 '...'
-3. 看到錯誤
+### 設定與機密
 
-**預期行為**
-應該發生什麼
+以 [`.env.example`](.env.example) 為設定範本。`hivemind-bin` CLI 啟動服務時會搜尋工作目錄及父目錄的 `.env`；Windows 封裝的獨立 Master／Worker 入口只載入執行檔旁的 `.env`。設定再由環境變數或 `HIVEMIND_CONFIG` JSON 讀取。
 
-**實際行為**
-實際發生什麼
+`.env`、密碼、JWT、私鑰、Headscale API key 與本機 client state 不得提交。一般 Master／Worker client 不需要平台的 `JWT_SECRET`、資料庫密碼或 Nodepool signing private key。
 
-**環境**
-- OS: [例如 Windows 11]
-- Go 版本: [例如 1.25]
-- Hivemind 版本: [例如 v0.1.0]
+## 3. 建置與測試
 
-**日誌**
-相關的日誌輸出
+以下命令從 repository root 執行，適用於 PowerShell：
+
+```powershell
+cargo build --manifest-path hivemind-rs/Cargo.toml
+cargo fmt --manifest-path hivemind-rs/Cargo.toml --all -- --check
+cargo clippy --manifest-path hivemind-rs/Cargo.toml --all-targets -- -D warnings
+cargo test --manifest-path hivemind-rs/Cargo.toml
 ```
 
-### 建議新功能
+修改 executor libraries 時，另執行：
 
-提交功能建議時請：
-
-1. 清楚描述功能和使用場景
-2. 說明為什麼這個功能對專案有價值
-3. 如果可能，提供實作建議
-
-### 提交程式碼
-
-1. Fork 本專案
-2. 建立功能分支 (`git checkout -b feature/amazing-feature`)
-3. 提交變更 (`git commit -m 'feat: add amazing feature'`)
-4. 推送到分支 (`git push origin feature/amazing-feature`)
-5. 開啟 Pull Request
-
-## 開發環境設置
-
-### 前置需求
-
-- Go 1.25+
-- Node.js 18+
-- Docker (用於 Redis 和 PostgreSQL)
-- protoc (用於生成 protobuf 程式碼)
-
-### 快速開始
-
-```bash
-# 1. Clone 專案
-git clone https://github.com/yourusername/hivemind.git
-cd hivemind
-
-# 2. 安裝依賴
-make install-deps
-
-# 3. 複製環境變數範例
-cp .env.example .env
-
-# 4. 啟動開發環境
-make dev
+```powershell
+cargo fmt --manifest-path executor-rs/Cargo.toml --all -- --check
+cargo clippy --manifest-path executor-rs/Cargo.toml --all-targets -- -D warnings
+cargo test --manifest-path executor-rs/Cargo.toml
 ```
 
-### 執行測試
+單一 crate 或測試：
 
-```bash
-# 執行所有測試
-make test
-
-# 執行特定服務的測試
-cd services/nodepool && go test ./...
-
-# 生成覆蓋率報告
-make test-coverage
+```powershell
+cargo test --manifest-path hivemind-rs/Cargo.toml -p hivemind-models
+cargo test --manifest-path hivemind-rs/Cargo.toml "test_name_filter" -- --nocapture
 ```
 
-## 提交規範
+將 `test_name_filter` 換成實際名稱，確認測試數量不為零。GPU、原生 WebView 等功能需要開啟對應 feature。
 
-我們使用 [Conventional Commits](https://www.conventionalcommits.org/) 規範：
+### 資料庫測試
 
-```
-<type>(<scope>): <subject>
+將 `HIVEMIND_TEST_DATABASE_URL` 指向專用、可丟棄的 PostgreSQL。部分資料庫與結算測試在無法連線時會跳過或提早返回，執行後需確認案例數量與跳過項目。
 
-<body>
+**不要使用正式資料庫。** 測試可能清除或重建資料；測試記錄應包含資料庫連線與 schema 初始化結果。
 
-<footer>
-```
+### 前端
 
-### Type
+```powershell
+npm --prefix frontend ci
+npm --prefix frontend test
+npm --prefix frontend run build
 
-- `feat`: 新功能
-- `fix`: Bug 修復
-- `docs`: 文檔變更
-- `style`: 程式碼格式（不影響程式碼運行）
-- `refactor`: 重構（既不是新功能也不是 Bug 修復）
-- `perf`: 性能優化
-- `test`: 新增或修改測試
-- `chore`: 建置流程或輔助工具變更
-- `ci`: CI 配置變更
+npm --prefix frontend/master-ui ci
+npm --prefix frontend/master-ui test
+npm --prefix frontend/master-ui run build
 
-### 範例
-
-```bash
-feat(nodepool): add task priority scheduling
-fix(worker): resolve memory leak in task executor
-docs(readme): update installation instructions
-test(master): add integration tests for torrent generation
+npm --prefix frontend/worker-ui ci
+npm --prefix frontend/worker-ui test
+npm --prefix frontend/worker-ui run build
 ```
 
-## 測試要求
+服務連線與瀏覽器流程見 [Getting Started](docs/GETTING_STARTED.md)，原生視窗測試見 [SHADCN_UI.md](docs/SHADCN_UI.md)。
 
-所有程式碼變更必須包含測試：
+### 文檔
 
-### 單元測試
-
-- 新功能必須有對應的單元測試
-- Bug 修復必須包含回歸測試
-- 測試覆蓋率應保持在 60% 以上
-
-```go
-func TestTaskDispatch(t *testing.T) {
-    // Arrange
-    task := &Task{ID: "test-1", Status: "PENDING"}
-
-    // Act
-    result := DispatchTask(task)
-
-    // Assert
-    if result.Status != "DISPATCHED" {
-        t.Errorf("expected DISPATCHED, got %s", result.Status)
-    }
-}
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/release-docs.Tests.ps1
 ```
 
-### 整合測試
+此腳本直接執行，不需要 Pester。新增或修改文檔時，另檢查相對連結、範例語法、工作目錄與設定名稱。
 
-對於涉及多個組件的變更，請新增整合測試：
+## 4. 驗證範圍
 
-```go
-func TestTaskLifecycle(t *testing.T) {
-    // 測試完整的任務生命週期
-    // PENDING → DISPATCHED → RUNNING → COMPLETED
-}
+| 修改範圍 | 測試重點 |
+| --- | --- |
+| DSL parser／evaluator／metering | 語法、語義、overflow、budget、value/output bounds |
+| 排程與共識 | 不同副本、request/attempt binding、過期回應、no quorum、cancel fencing |
+| 計費與結算 | 使用 PostgreSQL 驗證交易、冪等性、hold/refund 與有效用量 |
+| API／auth | 未登入、錯誤 owner、過期 token、權限、正常請求與錯誤映射 |
+| 前端 | 所屬介面的契約測試與建置，必要時追加瀏覽器、鍵盤與小螢幕測試 |
+| Linux OCI／Windows HCS | provider/policy 測試，以及對應平台的實機執行測試 |
+| Client 更新 | 簽章、digest、版本限制、activation/recovery；正式通道需在乾淨主機驗證 |
+| 文檔 | 實作一致性、相對連結、範例與文檔契約 |
+
+新功能需涵蓋核心行為，bug fix 需加入能重現問題的回歸測試。Mock 與 preflight 測試不能替代 provider 實際執行。
+
+## 5. 程式碼與文檔風格
+
+- 遵循所屬 crate／前端的命名、錯誤處理與註解習慣，Rust 使用 `cargo fmt` 與 Clippy。
+- 三個前端的登入狀態與部署設定分開處理。
+- 沿用既有 domain type 與版本化協定；計費與結算權限留在 Nodepool。
+- 協定、語義或 cost model 的不相容變更需有版本、fixture、migration 與 rollout，不修改 frozen v0 的契約。
+- 文檔寫明適用版本；操作命令附工作目錄、平台、前置需求與破壞性影響。
+- Issue、一般日誌與截圖不得包含任務原始碼、input、JWT、私鑰或 callback secret。
+
+## 6. 回報問題
+
+請附上：
+
+1. Commit／release 版本與 runtime ID。
+2. 作業系統、架構、Rust／Node 版本與 feature flags。
+3. Master／Nodepool／Worker 拓撲與 VPN 設定。
+4. 最小重現步驟、預期結果與實際結果。
+5. 去除機密後的錯誤碼、時間、task/attempt/round ID 與相關日誌。
+6. 資料庫與 provider 環境，以及測試的執行、失敗或跳過結果。
+
+安全問題請透過維護者指定的私人管道通報，不要在公開 issue 張貼正式環境的機密。
+
+## 7. Commit 與 review
+
+每個 feature 使用獨立、可 review／revert 的 commit。執行對應測試後再提交，不混入其他功能或無關格式變更。
+
+使用 Conventional Commits，例如：
+
+```text
+feat(scheduler): add bounded admission policy
+fix(runtime): reject overflowing integer arithmetic
+test(database): cover idempotent usage settlement
+docs(manual): document runtime configuration
 ```
 
-## 程式碼風格
+提交前確認：
 
-### Go
+- [ ] 變更符合產品與信任邊界。
+- [ ] 已執行對應測試，記錄失敗與跳過原因。
+- [ ] 格式與 lint 檢查通過。
+- [ ] 文檔、設定範例、proto、fixtures 與 migration 一致。
+- [ ] Diff 沒有機密、本機 state 或無關 lockfile 變更。
 
-- 遵循 [Effective Go](https://golang.org/doc/effective_go.html)
-- 使用 `gofmt` 格式化程式碼
-- 使用 `golangci-lint` 進行靜態分析
+PR 描述包含修改原因、契約影響、驗證結果、未測項目與 rollback 方式。
 
-```bash
-# 格式化程式碼
-make fmt
+## 8. 授權
 
-# 執行 linter
-make lint
-```
-
-### 命名規範
-
-- 變數：camelCase
-- 常數：UPPER_SNAKE_CASE
-- 函數：PascalCase（公開）或 camelCase（私有）
-- 檔案：snake_case.go
-
-### 註解
-
-- 公開函數必須有文檔註解
-- 複雜邏輯需要解釋性註解
-- 避免顯而易見的註解
-
-```go
-// DispatchTask 將任務分配給可用的 Worker
-// 如果沒有可用的 Worker，任務將保持 PENDING 狀態
-func DispatchTask(task *Task) error {
-    // 選擇資源最充足的 Worker
-    worker := selectBestWorker(task.Requirements)
-    if worker == nil {
-        return ErrNoAvailableWorker
-    }
-
-    return assignTaskToWorker(task, worker)
-}
-```
-
-## Pull Request 流程
-
-### 提交前檢查清單
-
-- [ ] 程式碼已通過所有測試 (`make test`)
-- [ ] 程式碼已格式化 (`make fmt`)
-- [ ] 程式碼已通過 linter (`make lint`)
-- [ ] 新增了必要的測試
-- [ ] 更新了相關文檔
-- [ ] 提交訊息符合規範
-- [ ] 沒有合併衝突
-
-### PR 描述範本
-
-```markdown
-## 變更類型
-- [ ] Bug 修復
-- [ ] 新功能
-- [ ] 重構
-- [ ] 文檔更新
-
-## 變更描述
-簡短描述這個 PR 做了什麼
-
-## 相關 Issue
-Closes #123
-
-## 測試
-描述如何測試這些變更
-
-## 截圖（如適用）
-新增截圖展示變更
-
-## 檢查清單
-- [ ] 程式碼已通過所有測試
-- [ ] 新增了必要的測試
-- [ ] 更新了文檔
-```
-
-### Review 流程
-
-1. 提交 PR 後，CI 會自動執行測試
-2. 至少需要一位維護者的批准
-3. 所有討論必須解決
-4. CI 必須通過
-5. 維護者會合併 PR
-
-## 開發技巧
-
-### 本地測試 Docker 建置
-
-```bash
-# 建置並測試 Docker 映像
-make docker-build
-make docker-up
-
-# 檢查日誌
-make docker-logs
-
-# 清理
-make docker-down
-```
-
-### 除錯技巧
-
-```bash
-# 監控 Nodepool 日誌
-make watch-logs
-
-# 連線到 Redis
-make redis-cli
-
-# 連線到 PostgreSQL
-make psql
-```
-
-### 常見問題
-
-**Q: 測試失敗，提示 "missing go.sum entry"**
-
-A: 執行 `go mod tidy` 更新依賴
-
-**Q: Docker 容器無法啟動**
-
-A: 檢查端口是否被佔用，執行 `make docker-clean` 清理
-
-**Q: 前端無法連線到後端**
-
-A: 檢查 `.env` 中的 `VITE_API_BASE` 設定
-
-## 獲取幫助
-
-- 查看 [文檔](./README.md)
-- 搜尋 [Issues](https://github.com/yourusername/hivemind/issues)
-- 加入討論區（如果有）
-
-## 授權
-
-提交程式碼即表示您同意將貢獻以 MIT 授權釋出。
-
----
-
-再次感謝您的貢獻！🎉
+專案採用 MIT [LICENSE](LICENSE)。第三方依賴、vendored 元件與打包映像依各自授權；重新散布時需保留相應的授權文件與 notices。

@@ -20,18 +20,17 @@ MANAGED_CONSENSUS_TIMEOUT_SECS=120
 MANAGED_CONSENSUS_MAX_RESULT_BYTES=262144
 ```
 
-The default is `enforce`: managed tasks settle only from a quorum
-certificate and never fall back to a single-Worker result. The initial
-bounded policy is three distinct registered Workers and a strict majority of
-two. The Nodepool never lowers the quorum when fewer Workers are available.
-`observe` is non-settling: the dispatcher fans out all replicas and ends the
-task in non-settling `OBSERVED` state. It records shadow quorum/no-quorum
-metadata while keeping output, billing, and settlement empty; no single-Worker
-fallback is allowed.
+The default `enforce` policy assigns three distinct registered Workers and
+requires two matching results. Successful completion requires a quorum
+certificate; Nodepool does not lower the quorum or use a single-Worker fallback
+when fewer Workers are available. Valid assignment-bound v1 usage may still be
+billable if the task fails or no quorum forms.
+
+`observe` dispatches all replicas and records quorum/no-quorum metadata. The task
+ends as `OBSERVED`, without user output, billing, or settlement.
 
 Only deterministic, side-effect-free managed DSL tasks are eligible. The
-existing `host_count` field remains a pricing/input field and is not silently
-repurposed as the consensus factor.
+`host_count` field is a pricing/input field, separate from the replica count.
 
 ## Acceptance and settlement
 
@@ -45,8 +44,9 @@ A quorum certificate is created and the task is completed in one Nodepool
 transaction. The round, replica assignments, endpoint/provider snapshots,
 observations, worker-slot reservations, certificate, and settlement record are
 persisted independently. No quorum, stale response, conflicting result, or
-single Worker success may complete a consensus task. The certificate and bounded typed `ManagedConsensusResult` bytes in each
-replica's internal `result_json` are persisted as Nodepool evidence; the raw
+single Worker success may complete a consensus task. The certificate and bounded
+`ManagedConsensusResult` bytes in each replica's internal `result_json` are
+persisted as Nodepool evidence; the raw
 transport envelope and per-replica evidence are not exposed through public APIs.
 Outstanding replicas are explicitly fenced and receive an attempt-bound stop
 request after a quorum, timeout, or cancellation. If a stop cannot be

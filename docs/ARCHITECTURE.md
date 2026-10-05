@@ -2,11 +2,16 @@
 
 Hivemind 是以 Rust 為核心的分散式運算平台，主要由
 `hivemind-rs` workspace 與 `hivemind-bin` runtime entry point 組成。
+CPU managed 工作使用 `managed-function-v1` 的共識與用量計費契約；GPU 與
+general compute 的獨立路徑見[使用與部署手冊](HIVEMIND_MANUAL.zh-TW.md#other-runtimes)。
 
-本平台對外採用**登入後即可加入的開放式模型**：任何能透過 Website API
-登入的使用者，都可以註冊 Master 或 Worker 並加入 Headscale overlay。
-這裡的「開放加入」不代表匿名存取，也不代表跳過 Nodepool 的伺服器端
-授權、能力檢查、配額、聲譽、consensus 驗證或結算檢查。
+本文件說明架構、信任邊界與零設定產品目標。設定、計費、API 與原始碼索引見
+[使用與部署手冊](HIVEMIND_MANUAL.zh-TW.md)，測試方式見
+[平台驗證指南](platform-validation-state.md)。
+
+平台採用**登入後加入的開放式模型**。使用者透過 Website API 登入後，
+可以註冊 Master 或 Worker 並加入 Headscale overlay；Nodepool 仍會執行
+授權、能力檢查、配額、聲譽、共識與結算驗證。
 
 ## 最終產品目標：零設定使用體驗
 
@@ -26,13 +31,11 @@ Worker 使用者只需要：
 
 登入後，client 應自動完成：
 
-- 取得短期 enrollment credential。
-- 取得一次性的 Headscale enrollment material。
-- 建立或恢復本機 overlay identity。
-- 向 Nodepool 註冊 Worker 與 authenticated owner。
-- 自動取得可用的 closed-DSL runtime 與平台政策。
-- 執行 capability/readiness handshake。
-- 在背景接收符合條件的任務並回報結果；consensus task 不需額外本機服務。
+- 登入取得 JWT，呼叫受保護的 `/api/vpn/config` 取得一次性 Headscale auth key。
+- 建立或恢復本機 overlay identity，完成 Nodepool gRPC readiness handshake。
+- 透過獨立的 enrollment credential／redeem 流程取得 owner-bound Worker identity。
+- 向 Nodepool 註冊 Worker，完成 runtime capability／readiness 檢查。
+- 使用已打包的 closed-DSL runtime 與平台政策執行符合條件的任務並回報結果。
 
 Worker 使用者不應該手動填寫 local executable path、port、Worker ID、owner、trust list
 或 Worker execution certificate path。這些資料由 Website API、Headscale 與 Nodepool 的
@@ -59,10 +62,11 @@ Master 使用者不需要：
 - 計算 usage、billing 或 settlement。
 - 了解任務實際在哪一台主機執行。
 
-平台應自動負責 quote/preflight、Worker 選擇、排程、DSL 執行、consensus
-round/quorum、重試、usage accounting、billing、settlement 與結果回傳。
-Managed task 只有在多個 Worker 回報一致結果並達到 quorum 後才會結算；無法取得
-quorum 時，任務保持未結算或失敗。使用者只需要取得成功結果或清楚的失敗原因。
+平台負責報價、Worker 選擇、排程、DSL 執行、共識、用量驗證、計費、結算與結果回傳。
+新 v1 任務暫停自動付費重試，待平台有已注資的 treasury 才能啟用。
+
+成功結果必須達到 quorum，不接受單一 Worker 降級完成。計費另行判斷：
+失敗或未達 quorum 的任務，仍可能因有效、與 attempt 綁定的副本用量而收費。
 
 ### 平台內部與使用者體驗的分離
 
@@ -73,7 +77,7 @@ quorum 時，任務保持未結算或失敗。使用者只需要取得成功結�
 平台內部處理：
   enrollment -> Headscale -> Nodepool admission -> quote -> lease
   -> Worker execution -> consensus replicas -> quorum certificate
-  -> usage -> fixed-reservation billing -> settlement -> result/log retrieval
+  -> verified v1 usage -> task-wide capped billing -> settlement -> result/log retrieval
 ```
 
 所有複雜的 trust、network、consensus 與 settlement 流程都必須留在平台內部，
@@ -117,7 +121,7 @@ Repository 另外包含：
                           | 帳號與 enrollment         |
                           +-------------+------------+
                                         |
-                    一次性、角色限定的 enrollment credential
+                    JWT 授權取得一次性 Headscale auth key
                                         v
                           +--------------------------+
                           | Headscale / VPN overlay   |
@@ -141,10 +145,9 @@ Repository 另外包含：
                             +--------------------------+
 ```
 
-Nodepool 是 settlement authority。Consensus-enabled managed tasks create a durable
-round and slot reservations, assign the same deterministic side-effect-free task to
-distinct Workers, compare canonical result bytes, and accept only a strict majority
-certificate. Worker 回報只是待驗證的 observation。
+Nodepool 負責結算。它為 managed 任務建立持久化的共識 round 與 slot reservations，
+把同一個確定性、無副作用的任務派給不同 Worker，再比對 canonical result bytes。
+成功結果需要嚴格多數 certificate；Worker 回報先作為待驗證的 observation 保存。
 
 ```text
 Nodepool
@@ -152,7 +155,7 @@ Nodepool
   -> replica-2 / Worker B (attempt-bound token)
   -> replica-3 / Worker C (attempt-bound token)
   -> persisted observations -> canonical quorum certificate
-  -> atomic task completion + fixed-reservation settlement
+  -> certificate-backed task completion + separately validated v1 usage settlement
 ```
 
 Worker 回報的結果與 usage 都只是 claim；Nodepool 必須獨立完成 quorum、result
@@ -179,8 +182,8 @@ Orange Pi 不得執行 Master 或 Worker。Master 與 Worker 都必須在 Orange
 之外執行；Linux-only infrastructure stays in the control plane or local Docker
 during development and is never a Worker prerequisite.
 
-root all-in-one Compose stack 只供本機開發與 release smoke test 使用，
-不是正式外部拓撲，也不能作為外部 Headscale 已連通的證據。
+Root Compose 共置服務，供本機開發與 release smoke 使用。
+正式部署分開控制面與運算主機，外部 Headscale 連線需另行測試。
 
 ### 外部運算主機
 
@@ -195,21 +198,20 @@ Native Windows Worker 會在本機執行封閉的 managed DSL。Consensus-enable
 managed tasks 只需要已打包的 closed-DSL runtime，並由 Nodepool 將同一個
 deterministic task 派送給多個 Worker；不要求使用者安裝 Docker、WSL、Rust、
 Cargo 或其他 runtime。Worker readiness、replica 數量或 quorum 不足時，
-任務保持未結算或失敗，不會改走單一 Worker 路徑。
+任務不能提供成功 output，不會改走單一 Worker completion；有效 v1 usage 的收費另行驗證。
 
 ## 公開註冊與開放式加入
 
 正常的公開 onboarding 不需要使用者手動維護 Worker allowlist。流程如下：
 
 ```text
-1. 使用者透過 Website API 建立帳號或登入。
-2. Website API 回傳短期、角色限定的 enrollment credential。
-3. Master/Worker 使用 credential 申請一次性的 VPN enrollment。
-4. Worker 加入 Headscale，取得 overlay identity。
-5. Worker 透過已驗證的 overlay 向 Nodepool 註冊。
-6. Nodepool 將 Worker identity 綁定到已驗證的 owner。
-7. Nodepool 記錄並驗證 Worker 的 capability/readiness 狀態。
-8. Worker 依照相容性與平台政策進入可排程狀態。
+1. 使用者透過 Website API 建立帳號並登入，取得 JWT。
+2. Master/Worker 帶 JWT 呼叫 /api/vpn/config，取得一次性 Headscale auth key。
+3. Client 加入 Headscale，完成 Nodepool gRPC readiness handshake。
+4. Worker 透過 /api/enrollment/credential 與 /api/enrollment/redeem 取得平台身分。
+5. Worker 經 overlay 向 Nodepool 註冊，Nodepool 核對身分與 owner。
+6. Nodepool 記錄並驗證 Worker 的 capability/readiness 狀態。
+7. Worker 依照相容性與平台政策進入可排程狀態。
 ```
 
 使用者不應該需要手動編輯：
@@ -228,14 +230,13 @@ liveness、capability 相容性、資源政策、配額、聲譽與 readiness。
 limit、聲譽、stake/bond、容量限制、lease 檢查與失敗懲罰。這些是平台
 政策與帳務控制，不是逐台 Worker 的人工 cryptographic allowlist。
 
-### 目前實作差距
+### 部署前提
 
-目前公開 onboarding 與自動 enrollment 仍需要正式 Website API、Headscale
-與 Nodepool 部署。Nodepool 負責選擇具備 readiness 的 Worker、驗證 execution
-identity、建立 consensus round，並在 quorum 不足時保持任務未結算。
+公開 onboarding 需要部署 Rust Website API、Headscale 與 Nodepool。
+Nodepool 依 readiness 選擇 Worker，驗證執行身分，並建立共識 round。
 
-Windows Worker 的登入、註冊與本機 closed-DSL 啟動已有零設定 package；完整的
-外部 VPN、三個 eligible Worker 與多 Worker settlement 仍需要正式環境驗證。
+Windows package 提供登入、註冊與本機 closed-DSL 啟動流程。
+正式環境測試還需涵蓋外部 VPN、至少三個 eligible Worker 與多 Worker 結算。
 
 ## Enrollment 與 VPN 邊界
 
@@ -266,29 +267,30 @@ Operator 也可以為 unattended startup 配置角色限定的
 等待真正的 Nodepool transport handshake，並在 bounded timeout 內失敗時
 停止啟用註冊或 task operation。
 
-重啟時會先嘗試使用已保存的 libtailscale state。互動式 JWT 過期後，必須
-重新登入。自動更新與自動下載目前不在範圍內。
+重啟時先嘗試恢復已保存的 libtailscale state；互動式 JWT 過期後需重新登入。
+Client 更新的發布條件見下方「測試與發布要求」。
 
 ## 完整平台流程
 
 ### 1. 帳號與 enrollment
 
-1. 使用者透過 Website API 登入。
-2. Website API 驗證使用者並簽發短期、角色限定的 enrollment credential。
-3. 本機 Master 或 Worker 使用 credential 取得一次性的 Headscale enrollment
-   material。
-4. Headscale 配置 overlay peer identity 與 route。
-5. runtime 透過 overlay 探測 Nodepool 並註冊 identity。
-6. Nodepool 將 Worker 綁定到登入的 owner，並記錄 liveness/capability。
-   公開流程不需要另外手動註冊 Worker。
+1. 使用者透過 Website API 登入，取得 JWT。
+2. 本機 Master／Worker 帶 JWT 呼叫 `/api/vpn/config`，取得一次性 Headscale auth key。
+3. Client 加入 overlay，探測 Nodepool 並完成 gRPC readiness handshake。
+4. Public-dynamic Worker 另外呼叫 `/api/enrollment/credential`，再以一次性 credential
+   呼叫 `/api/enrollment/redeem`，取得 owner-bound client／Worker identity。
+5. Worker 使用該身分向 Nodepool 註冊；Nodepool 核對 owner，記錄 liveness／capability。
+
+Identity enrollment credential 與 Headscale auth key 用途不同，不可互換。
 
 ### 2. Quote 與排程
 
 1. 使用者透過 Master UI、Master API 或 CLI 提交任務。
 2. Nodepool 驗證帳號授權、任務限制、DSL runtime 與資源需求。
 3. Nodepool 按照目前價格與政策回傳 resource quote。
-4. 使用者接受 quote 後，scheduler 按照資源、註冊 capability、Worker
-   readiness、quota、reputation 與政策，選出可用 Worker。
+4. 任務通過 Nodepool submission/preflight 後，scheduler 按照資源、註冊 capability、
+   Worker readiness 與適用政策，選出可用 Worker。Quote 是提交前的資訊，不能取代
+   Nodepool 正式的 admission 與 balance/budget 檢查。
 5. Nodepool 建立 active lease，並產生穩定的 execution identity、attempt
    identity 與 lease generation。
 
@@ -309,21 +311,20 @@ Operator 也可以為 unattended startup 配置角色限定的
    attempt、result digest、output bytes 與 protocol bounds。
 3. Nodepool 持久化 observations，將相同 canonical result 分組，並只接受 strict
    majority quorum certificate。
-4. Worker 數量不足、結果不一致、round 過期或 quorum 無法完成時，任務保持未結算
-   或失敗，不會改走單一 Worker completion。
+4. Worker 數量不足、結果不一致、round 過期或 quorum 無法完成時，任務不得產生成功
+   output，不會改走單一 Worker completion。是否有有效可計費 usage 由 Nodepool 另行判斷。
 
 ### 5. 驗證、結算與結果取得
 
 1. Nodepool 驗證 task、Worker、attempt、policy、result digest、output、budget 與
    managed DSL backend/semantics binding。
-2. Quorum certificate 與相符的 replica evidence 必須一併持久化；沒有 certificate
-   就不能標記完成、寫入 output、billing 或 settlement。
+2. 持久化 quorum certificate 與相符的副本記錄，再標記成功完成並發布輸出。
 3. `managed-function-v1` enforce settlement 使用經驗證且與 assignment 綁定的 replica
-   usage evidence，並受 task-wide `max_cpt` 上限約束；缺失或無效的 receipt 不計費。
-   `observe` 不結算。Frozen `managed-function-v0` 才保留 Nodepool-owned fixed-reservation
-   billing contract。
-4. 已授權的使用者透過 Website/Master API 取得 result、logs 與 lifecycle evidence。
-   Secrets 與內部 enrollment material 不會回傳。
+   usage evidence，包含有效但 failed/divergent 的工作，並受 task-wide `max_cpt` 上限
+   約束；缺失或無效的 receipt 不計費。`observe` 不結算。Frozen `managed-function-v0`
+   才保留歷史 Nodepool-owned fixed-reservation billing contract。
+4. 已授權的使用者透過 Master API 取得 result、logs 與 lifecycle evidence；
+   官網與 Website API 不提供任務操作介面。Secrets 與內部 enrollment material 不會回傳。
 
 ## 主要服務角色
 
@@ -418,12 +419,13 @@ Worker into a settlement authority; only Nodepool can verify a quorum certificat
 - Headscale 或 Nodepool readiness 失敗時，不得啟用 registration 或 task operation。
 - stale lease、request digest 改變、Worker/owner 錯誤、attempt 錯誤或 malformed
   response 時，不得產生可 billing 的完成結果。
-- consensus policy 缺少、replica 不足、結果不一致、certificate 無效或 replica
-  evidence 不完整時，managed task 必須保持未結算或失敗。
-- generic single-Worker completion、observe evidence 與 Worker 自己的 usage claim
-  都不能授權 managed settlement。
-- source、input、password、raw JWT、Headscale key 與 private key 不得寫入一般
-  log 或 durable state。
+- 缺少共識 policy、副本不足、結果不一致、certificate 無效或副本記錄不完整時，
+  不發布成功輸出；單一 Worker 或 observe 記錄也不能授權成功完成。
+- Nodepool 驗證 enforce v1 的 attempt-bound receipt 後，才可納入結算。
+  有效用量在無 quorum 時仍可能計費；無效或缺失的 receipt 不計費。
+- password、raw JWT、Headscale key 與 private key 不得寫入一般 log 或未受保護的
+  durable state；task source/input 需由專用任務記錄保存，不應混入一般診斷 log。
+  任務輸出沒有通用機密遮蔽機制，請勿將秘密放入 task。
 - 不得因 consensus 暫時不可用而切換到未驗證或單一 Worker 路徑。
 
 ## 現有 Contract
@@ -452,22 +454,16 @@ Worker into a settlement authority; only Nodepool can verify a quorum certificat
 - Worker control HTTP：`127.0.0.1:18080`
 - Managed consensus：由 Nodepool 建立 replica round，不需要額外的本機服務。
 
-以上是 development 或 service default，不是 live credential。
-實際部署可以透過 environment variable 或 JSON config file 覆寫。
+位址可透過環境變數或 JSON 設定檔覆寫。
 
-## 目前狀態
+<a id="目前狀態"></a>
 
-- Rust workspace 是 authoritative implementation。
-- 本文件描述的公開 enrollment、dynamic admission、versioned managed runtime
-  與 consensus settlement model 是 authoritative product architecture；未配置
-  的外部 credential 或 operator asset 仍必須 fail closed。
-- 目前本機測試已涵蓋 policy admission、replica fan-out、quorum certificate、
-  certificate-backed settlement、accepted-replica usage billing 與 fail-closed
-  completion guard。
-- 完整外部證據仍需要在 Orange Pi 之外完成 Website enrollment、Headscale overlay
-  connectivity、至少三個 eligible Worker、Worker registration、result/log
-  retrieval、usage、billing、settlement 與 audit evidence。
-- Signed client update runtime 已實作 archive verification、activation 與
-  rollback guard；在 production-signed keyset、核准 HTTPS endpoint、clean-host
-  live update 與 minimum-supported-version evidence 齊備前，更新保持
-  fail-closed/deferred，不使用 unsigned fallback。
+## 測試與發布要求
+
+- 測試案例涵蓋 admission、副本派送、quorum certificate、結算、有效副本用量計費
+  與失敗時拒絕成功完成的檢查。
+- 外部整合測試需使用正式 Website API 和 Headscale，並在 Orange Pi 之外配置
+  至少三個 eligible Worker，驗證註冊、結果與 log、用量、計費、結算及 audit。
+- Signed client update 支援 archive verification、activation 與 rollback。
+  正式發布還需簽章 keyset、核准的 HTTPS endpoint、乾淨主機上的更新測試與
+  最低支援版本驗證；缺少或無效的資產會阻擋更新，不接受 unsigned fallback。
