@@ -19,6 +19,19 @@ export function taskResponseFailureMessage(response, fallbackMessage, transportO
   return usableText(fallbackMessage) || 'Task request failed';
 }
 
+export function taskListResponseFailureMessage(response) {
+  if (response?.success === true) {
+    return Array.isArray(response.tasks) && response.tasks.every((task) =>
+      task !== null && typeof task === 'object' && !Array.isArray(task))
+      ? ''
+      : 'Task list response was invalid';
+  }
+
+  return usableText(response?.message)
+    || usableText(response?.status_message)
+    || 'Failed to load tasks';
+}
+
 export function taskRequestFailureText(operation, error, fallbackMessage) {
   const label = usableText(operation) || 'Task request';
   const detail = usableText(error?.message) || usableText(fallbackMessage) || 'Task request failed';

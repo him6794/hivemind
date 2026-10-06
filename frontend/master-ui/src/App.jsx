@@ -35,6 +35,7 @@ import { createTaskId, validateTaskId } from './taskIdPolicy.mjs';
 import {
   isManagedGpuResult,
   isManagedLogGuidanceResult,
+  taskListResponseFailureMessage,
   taskRequestFailureText,
   taskResponseFailureMessage,
 } from './taskResponsePolicy.mjs';
@@ -198,13 +199,13 @@ export default function MasterApp() {
     if (!authToken) return false;
     const { data } = await api('GET', '/api/tasks', undefined, authToken, signal);
     if (tokenRef.current !== authToken) return false;
-    if (data.success) {
-      setTasks(data.tasks || []);
-      setLoadedTasksToken(authToken);
-      setTasksLoadError('');
-      return true;
-    }
-    throw new Error(data.message || data.status_message || 'Failed to load tasks');
+    const failureMessage = taskListResponseFailureMessage(data);
+    if (failureMessage) throw new Error(failureMessage);
+
+    setTasks(data.tasks);
+    setLoadedTasksToken(authToken);
+    setTasksLoadError('');
+    return true;
   }
 
   function getBalanceRefreshController() {
@@ -325,7 +326,11 @@ export default function MasterApp() {
       if (tokenRef.current !== token || vpnReadyToken.current !== token) return;
       refreshTasks(token).then((loaded) => {
         if (loaded && tokenRef.current === token) setLastRefresh(Date.now());
-      }).catch(() => {});
+      }).catch((error) => {
+        if (tokenRef.current === token) {
+          setTasksLoadError(error?.message || 'Failed to load tasks');
+        }
+      });
     }, 5000);
     return () => clearInterval(id);
   }, [token, loadedTasksToken]);
@@ -982,8 +987,16 @@ export default function MasterApp() {
                                   {message ? <p className="task-message">{message}</p> : null}
                                   <div className="task-meta">
                                     <span>Wall {hasWallTime ? `${(wallTimeMs / 1000).toFixed(1)}s` : '—'}</span>
-                                    <span>{observability.billingSettled ? `Charged ${observability.billedAmount} CPT${historicalOverCap ? ' (above recorded max_cpt; fee included)' : ' (fee included)'}` : 'Charge pending'}</span>
-                                    {observability.retryCount ? <span>Retry counter {observability.retryCount}</span> : null}
+                                    <span>{observability.billingSettled
+                                      ? observability.billedAmount === null
+                                        ? 'Charge settled; amount unknown'
+                                        : `Charged ${observability.billedAmount} CPT${historicalOverCap ? ' (above recorded max_cpt; fee included)' : ' (fee included)'}`
+                                      : 'Charge pending'}</span>
+                                    {observability.retryCount === null
+                                      ? <span>Retry counter unavailable</span>
+                                      : observability.retryCount > 0
+                                        ? <span>Retry counter {observability.retryCount}</span>
+                                        : null}
                                   </div>
                                   <Separator className="task-separator" />
                                   <dl className="observability-grid">
@@ -994,9 +1007,9 @@ export default function MasterApp() {
                                     <dt>Progress</dt>
                                     <dd>{observability.dispatchStatus}</dd>
                                     <dt>Aggregate replica usage</dt>
-                                    <dd>{observability.usageUnits} CPT before fee</dd>
+                                    <dd>{observability.usageUnits === null ? 'Unknown' : `${observability.usageUnits} CPT before fee`}</dd>
                                     <dt>{runtime === 'managed-function-v1' ? 'Submitted max_cpt' : 'Task charge cap'}</dt>
-                                    <dd>{observability.chargeCapCpt || '—'} CPT{runtime === 'managed-function-v1' ? ' (new v1: task-wide, fee included)' : ', fee included'}</dd>
+                                    <dd>{observability.chargeCapCpt === null ? '—' : observability.chargeCapCpt} CPT{runtime === 'managed-function-v1' ? ' (new v1: task-wide, fee included)' : ', fee included'}</dd>
                                     <dt>Settled charge-cap remainder</dt>
                                     <dd>
                                       {observability.settledRemainderCpt === null

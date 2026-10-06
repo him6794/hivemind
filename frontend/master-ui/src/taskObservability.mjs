@@ -2,19 +2,23 @@ function text(value) {
   return typeof value === 'string' ? value : '';
 }
 
-function nonNegativeNumber(value, fallback = 0) {
-  const parsed = Number(value);
-  return Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback;
-}
-
 function finiteNumberOrNull(value) {
-  if (value === undefined || value === null || value === '') return null;
+  if (typeof value !== 'number' && typeof value !== 'string') return null;
+  if (typeof value === 'string' && value.trim() === '') return null;
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : null;
 }
 
+function nonNegativeNumberOrNull(value) {
+  const parsed = finiteNumberOrNull(value);
+  return parsed !== null && parsed >= 0 ? parsed : null;
+}
+
 export function normalizeTaskObservability(task = {}) {
-  const retryCount = nonNegativeNumber(task.retry_count, 0);
+  // retry_count is a proto3 int32 and the persisted task counter defaults to zero.
+  const retryCount = Object.prototype.hasOwnProperty.call(task, 'retry_count')
+    ? nonNegativeNumberOrNull(task.retry_count)
+    : 0;
   const runtime = text(task.runtime || task.runtime_version || task.Runtime).trim();
   const isManagedV1 = runtime === 'managed-function-v1';
   const reportedDispatchStatus = text(task.dispatch_status);
@@ -33,32 +37,32 @@ export function normalizeTaskObservability(task = {}) {
   } else if (isManagedV1 && reportedDispatchStatus === 'REDISPATCHED') {
     dispatchStatus = 'RETRY_COUNTER_RECORDED';
   } else if (!dispatchStatus) {
-    if (retryCount > 0) {
+    if (retryCount !== null && retryCount > 0) {
       dispatchStatus = isManagedV1 ? 'RETRY_COUNTER_RECORDED' : 'REDISPATCHED';
     } else if (workerId) {
       dispatchStatus = 'DISPATCHED';
-    } else if (isManagedV1 && !isNotStarted) {
+    } else if (retryCount === null || (isManagedV1 && !isNotStarted)) {
       dispatchStatus = 'UNKNOWN';
     } else {
       dispatchStatus = 'NOT_DISPATCHED';
     }
   }
-  const chargeCapCpt = nonNegativeNumber(task.max_cpt, 0);
-  const billedAmount = nonNegativeNumber(task.billed_amount, 0);
+  const chargeCapCpt = nonNegativeNumberOrNull(task.max_cpt);
+  const billedAmount = nonNegativeNumberOrNull(task.billed_amount);
   const billingSettled = task.billing_settled === true;
-  const rawChargeCap = finiteNumberOrNull(task.max_cpt);
-  const rawBilledAmount = finiteNumberOrNull(task.billed_amount);
-  const settledRemainderCpt = billingSettled && rawChargeCap !== null && rawBilledAmount !== null
-    ? rawChargeCap - rawBilledAmount
+  const settledRemainderCpt = billingSettled && chargeCapCpt !== null && billedAmount !== null
+    ? chargeCapCpt - billedAmount
     : null;
-  const historicalOverCap = isManagedV1 && billingSettled && chargeCapCpt > 0 && billedAmount > chargeCapCpt;
+  const historicalOverCap = isManagedV1 && billingSettled && chargeCapCpt !== null && billedAmount !== null
+    && chargeCapCpt > 0 && billedAmount > chargeCapCpt;
 
   return {
     workerId: text(task.worker_id),
     providerUser: text(task.provider_user),
     dispatchStatus,
     retryCount,
-    usageUnits: nonNegativeNumber(task.usage_units, nonNegativeNumber(task.managed_executed_ops, 0)),
+    usageUnits: nonNegativeNumberOrNull(task.usage_units)
+      ?? nonNegativeNumberOrNull(task.managed_executed_ops),
     chargeCapCpt,
     billedAmount,
     billingSettled,

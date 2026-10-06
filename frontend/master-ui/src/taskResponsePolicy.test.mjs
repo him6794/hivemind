@@ -4,6 +4,7 @@ import { describe, it } from 'node:test';
 import {
   isManagedGpuResult,
   isManagedLogGuidanceResult,
+  taskListResponseFailureMessage,
   taskRequestFailureText,
   taskResponseFailureMessage,
 } from './taskResponsePolicy.mjs';
@@ -65,6 +66,32 @@ describe('task response policy', () => {
     assert.equal(
       taskRequestFailureText('Result', null, 'Result unavailable'),
       'Result failed: Result unavailable',
+    );
+  });
+});
+
+describe('task list response contract', () => {
+  it('accepts a well-formed empty list as a genuine empty result', () => {
+    assert.equal(taskListResponseFailureMessage({ success: true, tasks: [] }), '');
+    assert.equal(taskListResponseFailureMessage({ success: true, tasks: [{ task_id: 'task-1' }] }), '');
+  });
+
+  it('rejects successful responses without an array of task records', () => {
+    for (const response of [
+      { success: true },
+      { success: true, tasks: null },
+      { success: true, tasks: {} },
+      { success: true, tasks: [null] },
+      { success: true, tasks: ['task-1'] },
+    ]) {
+      assert.equal(taskListResponseFailureMessage(response), 'Task list response was invalid');
+    }
+  });
+
+  it('preserves explicit failures from the task endpoint', () => {
+    assert.equal(
+      taskListResponseFailureMessage({ success: false, message: 'Task list unavailable' }),
+      'Task list unavailable',
     );
   });
 });
