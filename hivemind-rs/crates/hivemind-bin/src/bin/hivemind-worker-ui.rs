@@ -12,6 +12,10 @@ mod local_ui_webview;
 
 #[cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))]
 fn main() {
+    let args: Vec<String> = std::env::args().collect();
+    if let Some(done) = hivemind_bin::try_benchmark_helper(&args) {
+        std::process::exit(i32::from(!done));
+    }
     if let Err(error) = local_ui_webview::run("Hivemind Worker") {
         let _ = writeln!(std::io::stderr().lock(), "hivemind-worker-ui: {error:#}");
         std::process::exit(1);

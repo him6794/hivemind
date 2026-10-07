@@ -100,8 +100,29 @@ fn standalone_service_dotenv_policy(role: ServiceRole, is_windows: bool) -> Dote
     }
 }
 
+/// Intercept the fixed, versioned hardware-benchmark helper mode before
+/// tracing, service configuration, or GUI initialization. Returns `Some` when
+/// the helper was invoked and its outcome handled; the caller exits the
+/// process with the reported result. Returns `None` when the helper flag is
+/// absent so normal startup continues.
+#[cfg(feature = "worker")]
+pub fn try_benchmark_helper(args: &[String]) -> Option<bool> {
+    let result = hivemind_worker_executor::benchmark::dispatch_helper(args)?;
+    match result {
+        Ok(()) => Some(true),
+        Err(error) => {
+            eprintln!("hivemind hardware benchmark: {error:#}");
+            Some(false)
+        }
+    }
+}
+
 pub async fn run_service(role: ServiceRole) -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
+    #[cfg(feature = "worker")]
+    if let Some(done) = try_benchmark_helper(&args) {
+        std::process::exit(i32::from(!done));
+    }
     if let Some(descriptor) = client_runtime::update::activation_request_path(&args)? {
         hivemind_common::init_tracing("hivemind-update");
         client_runtime::update::run_activation_helper(descriptor).await?;
@@ -119,6 +140,10 @@ pub async fn run_service(role: ServiceRole) -> Result<()> {
 
 #[cfg(feature = "cli")]
 pub async fn run_from_cli(args: Vec<String>) -> Result<()> {
+    #[cfg(feature = "worker")]
+    if let Some(done) = try_benchmark_helper(&args) {
+        std::process::exit(i32::from(!done));
+    }
     if let Some(descriptor) = client_runtime::update::activation_request_path(&args)? {
         hivemind_common::init_tracing("hivemind-update");
         client_runtime::update::run_activation_helper(descriptor).await?;
