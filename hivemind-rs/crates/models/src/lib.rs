@@ -1,3 +1,5 @@
+pub mod observations;
+
 use chrono::{DateTime, Utc};
 use general_compute_runtime::{
     MANAGED_DSL_V1_RUNTIME_VERSION, MANAGED_DSL_V1_SEMANTICS_MANIFEST_SHA256,
