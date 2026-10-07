@@ -1,8 +1,62 @@
 use super::{GpuInfo, SystemResources};
 use hivemind_models::{ResourceSpec, ResourceUsage};
-use std::process::Command;
+use std::io::Read;
+use std::process::{Command, Output, Stdio};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
+
+/// Run a bounded inventory probe with a hard deadline. Resource collection
+/// happens on the heartbeat path, so a hung `nvidia-smi` or `powershell`
+/// subprocess must be killed rather than left to block the worker. Reader
+/// threads drain the pipes so a chatty probe cannot deadlock on a full
+/// buffer; the caller's deadline bounds the whole call. Returns `None` if the
+/// process could not start or the deadline passed.
+fn run_bounded(command: &mut Command, deadline: Duration) -> Option<Output> {
+    let mut child = command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .ok()?;
+    let stdout_reader = child
+        .stdout
+        .take()
+        .map(|mut pipe| std::thread::spawn(move || read_pipe_to_end(&mut pipe)));
+    let stderr_reader = child
+        .stderr
+        .take()
+        .map(|mut pipe| std::thread::spawn(move || read_pipe_to_end(&mut pipe)));
+    let started = Instant::now();
+    loop {
+        if child.try_wait().ok().flatten().is_some() {
+            let stdout = stdout_reader
+                .and_then(|t| t.join().ok())
+                .unwrap_or_default();
+            let stderr = stderr_reader
+                .and_then(|t| t.join().ok())
+                .unwrap_or_default();
+            return Some(Output {
+                status: child.wait().ok()?,
+                stdout,
+                stderr,
+            });
+        }
+        if started.elapsed() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            drop(stdout_reader);
+            drop(stderr_reader);
+            return None;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+fn read_pipe_to_end(pipe: &mut dyn Read) -> Vec<u8> {
+    let mut buffer = Vec::new();
+    let _ = pipe.read_to_end(&mut buffer);
+    buffer
+}
 
 struct SystemProbe {
     system: sysinfo::System,
@@ -89,22 +143,24 @@ pub fn to_resource_spec(resources: &SystemResources) -> ResourceSpec {
         .map(|g| g.name.clone())
         .unwrap_or_default();
     let gpu_count = resources.gpu_count;
-    let cpu_score = calculate_cpu_score(resources.cpu_cores, resources.cpu_usage_percent);
-    let gpu_score = calculate_gpu_score(&resources.gpu_infos);
     let vram_mb = resources
         .gpu_infos
         .first()
         .map(|g| g.vram_total_mb)
         .unwrap_or(0);
 
+    // This profile carries identity and capacity. The measured performance
+    // score is reported separately in the presence-aware benchmark observation
+    // (absent when unmeasured), not fabricated here from core count and idle
+    // time, so the profile scores read as "not scored in this profile".
     ResourceSpec {
         cpu_cores: resources.cpu_cores,
         memory_mb: resources.total_memory_gb as i64 * 1024,
         gpu_count,
         gpu_name,
         vram_mb,
-        cpu_score,
-        gpu_score,
+        cpu_score: 0,
+        gpu_score: 0,
         storage_total_gb: resources.storage_total_gb,
         storage_available_gb: resources.storage_available_gb,
     }
@@ -147,33 +203,18 @@ pub fn to_resource_usage(resources: &SystemResources) -> ResourceUsage {
     }
 }
 
-fn calculate_cpu_score(cpu_cores: i32, cpu_usage_percent: f64) -> i32 {
-    let cores = cpu_cores.max(0) as f64;
-    let available_ratio = (100.0 - cpu_usage_percent.clamp(0.0, 100.0)) / 100.0;
-    let score = cores * available_ratio * 100.0;
-    score.round().clamp(0.0, i32::MAX as f64) as i32
-}
-
-fn calculate_gpu_score(gpu_infos: &[GpuInfo]) -> i32 {
-    let score = gpu_infos.iter().fold(0.0_f64, |acc, gpu| {
-        let total_gb = gpu.vram_total_mb.max(0) as f64 / 1024.0;
-        let available_ratio = (100.0 - gpu.gpu_utilization_percent.clamp(0.0, 100.0)) / 100.0;
-        acc + total_gb * available_ratio * 100.0
-    });
-    score.round().clamp(0.0, i32::MAX as f64) as i32
-}
-
 /// Detect NVIDIA GPUs via nvidia-smi
 fn detect_gpus() -> (Vec<GpuInfo>, bool, bool, bool, bool) {
-    let output = Command::new("nvidia-smi")
-        .args([
+    let output = run_bounded(
+        Command::new("nvidia-smi").args([
             "--query-gpu=index,name,memory.total,memory.used,memory.free,utilization.gpu",
             "--format=csv,noheader,nounits",
-        ])
-        .output();
+        ]),
+        Duration::from_secs(5),
+    );
 
     match output {
-        Ok(out) if out.status.success() => {
+        Some(out) if out.status.success() => {
             let stdout = String::from_utf8_lossy(&out.stdout);
             parse_nvidia_smi_output(&stdout)
         }
@@ -248,13 +289,17 @@ fn parse_nvidia_smi_output(stdout: &str) -> (Vec<GpuInfo>, bool, bool, bool, boo
 #[cfg(windows)]
 fn detect_gpus_windows() -> (Vec<GpuInfo>, bool, bool, bool, bool) {
     // PowerShell query for GPU info via WMI
-    let output = Command::new("powershell")
-        .args(["-NoProfile", "-Command",
-            "Get-CimInstance -ClassName Win32_VideoController | Where-Object { .AdapterRAM -gt 0 } | Select-Object Name, AdapterRAM, DriverVersion | ConvertTo-Csv -NoTypeInformation"])
-        .output();
+    let output = run_bounded(
+        Command::new("powershell").args([
+            "-NoProfile",
+            "-Command",
+            "Get-CimInstance -ClassName Win32_VideoController | Where-Object { $_.AdapterRAM -gt 0 } | Select-Object Name, AdapterRAM, DriverVersion | ConvertTo-Csv -NoTypeInformation",
+        ]),
+        Duration::from_secs(5),
+    );
 
     match output {
-        Ok(out) if out.status.success() => {
+        Some(out) if out.status.success() => {
             let stdout = String::from_utf8_lossy(&out.stdout);
             let infos: Vec<GpuInfo> = stdout
                 .lines()
@@ -328,31 +373,18 @@ mod tests {
     }
 
     #[test]
-    fn test_score_calculation_uses_floats() {
-        let cpu_score = calculate_cpu_score(12, 25.0);
-        assert_eq!(cpu_score, 900);
-
-        let gpus = vec![
-            GpuInfo {
-                index: 0,
-                name: "GPU-0".into(),
-                vram_total_mb: 8192,
-                vram_used_mb: 2048,
-                vram_available_mb: 6144,
-                gpu_utilization_percent: 25.0,
-            },
-            GpuInfo {
-                index: 1,
-                name: "GPU-1".into(),
-                vram_total_mb: 4096,
-                vram_used_mb: 1024,
-                vram_available_mb: 3072,
-                gpu_utilization_percent: 50.0,
-            },
-        ];
-        let gpu_score = calculate_gpu_score(&gpus);
-        assert!(gpu_score > 0);
-        assert!(gpu_score < 2000);
+    fn capacity_profile_does_not_fabricate_a_performance_score() {
+        // The capacity profile reports identity and capacity only. A measured
+        // score is carried in the separate presence-aware benchmark observation,
+        // so this profile must not synthesize one from cores or VRAM idle time.
+        let r = collect_resources();
+        let spec = to_resource_spec(&r);
+        assert_eq!(spec.cpu_score, 0);
+        assert_eq!(spec.gpu_score, 0);
+        // Capacity fields are still reported independently of the scores.
+        assert_eq!(spec.cpu_cores, r.cpu_cores);
+        assert_eq!(spec.gpu_count, r.gpu_count);
+        assert!(spec.vram_mb >= 0);
     }
 
     #[test]
