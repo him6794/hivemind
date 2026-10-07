@@ -165,8 +165,8 @@ fn run_case_gpu(
     fill_buffer(device, &right, &f32_to_bytes(&right_values))?;
     let dim_uniform = device.create_buffer(&buffer_desc(
         "gpu-bench-dim",
-        4,
-        BufferUsages::STORAGE,
+        16,
+        BufferUsages::UNIFORM,
         true,
     ));
     fill_buffer(device, &dim_uniform, &dimension.to_le_bytes())?;
@@ -179,7 +179,7 @@ fn run_case_gpu(
     let staging = device.create_buffer(&buffer_desc(
         "gpu-bench-staging",
         element_bytes,
-        BufferUsages::COPY_DST,
+        BufferUsages::COPY_DST | BufferUsages::MAP_READ,
         false,
     ));
     let bind_group = device.create_bind_group(&BindGroupDescriptor {
@@ -259,44 +259,17 @@ fn buffer_entry<'a>(binding: u32, buffer: &'a wgpu::Buffer) -> wgpu::BindGroupEn
     }
 }
 
-fn fill_buffer(device: &wgpu::Device, buffer: &wgpu::Buffer, data: &[u8]) -> Result<()> {
+fn fill_buffer(_device: &wgpu::Device, buffer: &wgpu::Buffer, data: &[u8]) -> Result<()> {
     let size = u64::try_from(data.len()).unwrap_or(u64::MAX);
-    let mapped = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let callback_flag = std::sync::Arc::clone(&mapped);
-    buffer.map_async(MapMode::Write, 0..size, move |result: Result<(), _>| {
-        if result.is_ok() {
-            callback_flag.store(true, std::sync::atomic::Ordering::Release);
-        }
-    });
-    poll_until_queue_empty(device);
-    if !mapped.load(std::sync::atomic::Ordering::Acquire) {
-        bail!("GPU input buffer did not map in time");
-    }
+    // The buffer is mapped_at_creation, so the CPU range is available without
+    // a map round trip.
     let mut view = buffer
         .get_mapped_range_mut(0..size)
-        .context("mapped input range is available")?;
+        .context("input buffer mapped range is available")?;
     view.copy_from_slice(data);
     drop(view);
     buffer.unmap();
     Ok(())
-}
-
-fn poll_until_queue_empty(device: &wgpu::Device) {
-    let deadline = Instant::now() + Duration::from_secs(5);
-    loop {
-        if let Ok(status) = device.poll(PollType::Wait {
-            submission_index: None,
-            timeout: Some(Duration::from_millis(50)),
-        }) {
-            if status.wait_finished() {
-                return;
-            }
-        }
-        if Instant::now() >= deadline {
-            return;
-        }
-        std::thread::sleep(Duration::from_millis(1));
-    }
 }
 
 /// Execute `repetitions` full matmul dispatches, copy the result into the
@@ -335,14 +308,17 @@ fn measure_batch(
     let copy_index = queue.submit([copy_encoder.finish()]);
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        let status = device
-            .poll(PollType::Wait {
-                submission_index: Some(copy_index.clone()),
-                timeout: Some(Duration::from_millis(100)),
-            })
-            .context("GPU completion poll failed")?;
-        if status.wait_finished() {
-            break;
+        match device.poll(PollType::Wait {
+            submission_index: Some(copy_index.clone()),
+            timeout: Some(Duration::from_millis(100)),
+        }) {
+            // A timeout means the copy is still in flight; keep polling until
+            // the hard deadline. Only a genuine poll error is fatal here.
+            Ok(status) if status.wait_finished() => break,
+            Err(wgpu::PollError::Timeout) => {}
+            other => {
+                bail!("GPU completion poll failed: {other:?}")
+            }
         }
         if Instant::now() >= deadline {
             bail!("GPU benchmark readback timed out");
