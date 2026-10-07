@@ -440,6 +440,7 @@ impl GrpcClient {
                     gpu_memory_gb,
                     storage_gb,
                     host_count,
+                    score_suite: String::new(),
                 }))
                 .await
                 .map(|r| r.into_inner())
@@ -750,6 +751,8 @@ impl GrpcClient {
                     location,
                     token,
                     capability_report: None,
+                    benchmark_report: None,
+                    resource_observation: None,
                 }))
                 .await
                 .map(|r| r.into_inner())

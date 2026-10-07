@@ -1283,6 +1283,7 @@ fn build_execute_task_request_with_credentials(task: &Task, token: String) -> Ex
             gpu_score: task.req_gpu_score,
             storage_total_gb: task.req_storage_gb,
             storage_available_gb: task.req_storage_gb,
+            score_suite: None,
         }),
         runtime: runtime.unwrap_or_default().to_owned(),
         task_source: if is_managed_gpu || is_general_compute {

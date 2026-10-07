@@ -195,6 +195,7 @@ async fn grpc_client_talks_to_nodepool_test_fixture_for_provider_flow() {
                 gpu_score: 0,
                 storage_total_gb: 500,
                 storage_available_gb: 250,
+                score_suite: None,
             },
             "local",
             &token,

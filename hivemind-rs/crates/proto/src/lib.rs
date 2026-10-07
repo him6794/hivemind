@@ -68,6 +68,37 @@ pub const WORKER_EXECUTION_TOKEN_MAX_BYTES: usize = 8 * 1024;
 /// identity fields. This matches the persistent control-plane identifiers.
 pub const GENERAL_COMPUTE_TRANSFER_ID_MAX_BYTES: usize = 255;
 
+pub const OBSERVATION_PROTOCOL_VERSION: u32 = 1;
+pub const OBSERVATION_ENVELOPE_MAX_BYTES: usize = 64 * 1024;
+
+fn validate_observation_json(version: u32, payload: &str) -> Result<&str, &'static str> {
+    if version != OBSERVATION_PROTOCOL_VERSION {
+        return Err("unsupported observation envelope version");
+    }
+    if payload.is_empty() || payload.len() > OBSERVATION_ENVELOPE_MAX_BYTES {
+        return Err("observation envelope payload is empty or too large");
+    }
+    Ok(payload)
+}
+
+pub fn validate_hardware_benchmark_envelope(
+    envelope: &HardwareBenchmarkReport,
+) -> Result<&str, &'static str> {
+    validate_observation_json(envelope.protocol_version, &envelope.report_json)
+}
+
+pub fn validate_resource_observation_envelope(
+    envelope: &ResourceObservation,
+) -> Result<&str, &'static str> {
+    validate_observation_json(envelope.protocol_version, &envelope.observation_json)
+}
+
+pub fn validate_execution_observation_envelope(
+    envelope: &ExecutionObservation,
+) -> Result<&str, &'static str> {
+    validate_observation_json(envelope.protocol_version, &envelope.observation_json)
+}
+
 /// Maximum signed admission budget accepted for `managed-function-v0` execution.
 /// This cap is frozen as part of the v0 contract.
 pub const MANAGED_BUDGET_MAX_USAGE_UNITS: i64 = 1_000_000;

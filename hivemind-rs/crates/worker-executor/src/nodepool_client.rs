@@ -393,6 +393,8 @@ pub fn build_register_request_with_capability_report(
         location: location.to_string(),
         token: token.to_string(),
         capability_report,
+        benchmark_report: None,
+        resource_observation: None,
     }
 }
 
@@ -429,6 +431,8 @@ pub fn build_status_request_with_capability_report(
         usage: Some(resource_usage_to_proto(usage)),
         token: token.to_string(),
         capability_report,
+        benchmark_report: None,
+        resource_observation: None,
     }
 }
 
@@ -590,6 +594,9 @@ pub async fn report_task_usage_once(
             token: token.to_string(),
             worker_id: worker_id.to_string(),
             retry_count,
+            execution_observation: None,
+            resource_observation: None,
+            usage_received: false,
         })
         .await?
         .into_inner();
@@ -1347,6 +1354,7 @@ fn resource_spec_to_proto(spec: ResourceSpec) -> ProtoResourceSpec {
         gpu_score: spec.gpu_score,
         storage_total_gb: spec.storage_total_gb,
         storage_available_gb: spec.storage_available_gb,
+        score_suite: None,
     }
 }
 
@@ -1842,6 +1850,8 @@ mod tests {
             Ok(Response::new(StatusResponse {
                 success: true,
                 status_message: "OK".into(),
+                effective_cpu_threads: None,
+                worker_policy_generation: 0,
             }))
         }
 
@@ -1852,6 +1862,8 @@ mod tests {
             Ok(Response::new(RunningStatusResponse {
                 success: true,
                 status_message: "OK".into(),
+                effective_cpu_threads: None,
+                worker_policy_generation: 0,
             }))
         }
 
@@ -1950,7 +1962,27 @@ mod tests {
             Ok(Response::new(StatusResponse {
                 success: true,
                 status_message: "OK".into(),
+                effective_cpu_threads: None,
+                worker_policy_generation: 0,
             }))
+        }
+
+        async fn get_performance_contract(
+            &self,
+            _request: Request<hivemind_proto::GetPerformanceContractRequest>,
+        ) -> Result<Response<hivemind_proto::GetPerformanceContractResponse>, Status> {
+            Ok(Response::new(
+                hivemind_proto::GetPerformanceContractResponse {
+                    success: true,
+                    status_message: "OK".into(),
+                    supported: true,
+                    protocol_version: hivemind_proto::OBSERVATION_PROTOCOL_VERSION,
+                    score_suite: hivemind_models::observations::HARDWARE_SUITE.to_string(),
+                    max_cpu_threads: 32,
+                    benchmark_ttl_seconds: 86400,
+                    resource_ttl_seconds: 30,
+                },
+            ))
         }
     }
 

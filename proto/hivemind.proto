@@ -113,6 +113,7 @@ message ResourceSpec {
     int32 gpu_score = 7;
     int64 storage_total_gb = 8;
     int64 storage_available_gb = 9;
+    optional string score_suite = 10;
 }
 
 message ResourceUsage {
@@ -121,6 +122,22 @@ message ResourceUsage {
     float gpu_percent = 3;
     float vram_percent = 4;
     float storage_percent = 5;
+}
+
+// Typed contract JSON is validated against the shared strict Rust models.
+message HardwareBenchmarkReport {
+    uint32 protocol_version = 1;
+    string report_json = 2;
+}
+
+message ResourceObservation {
+    uint32 protocol_version = 1;
+    string observation_json = 2;
+}
+
+message ExecutionObservation {
+    uint32 protocol_version = 1;
+    string observation_json = 2;
 }
 
 // Bounded public capability/readiness observation. The JSON payload is a
@@ -145,11 +162,15 @@ message RegisterWorkerNodeRequest {
     string worker_id = 5;
     string token = 6;
     WorkerCapabilityReport capability_report = 7;
+    HardwareBenchmarkReport benchmark_report = 8;
+    ResourceObservation resource_observation = 9;
 }
 
 message StatusResponse {
     bool success = 1;
     string status_message = 2;
+    optional int32 effective_cpu_threads = 3;
+    uint64 worker_policy_generation = 4;
 }
 
 message RunningStatusRequest {
@@ -159,11 +180,15 @@ message RunningStatusRequest {
     string token = 4;
     string worker_id = 5;
     WorkerCapabilityReport capability_report = 6;
+    HardwareBenchmarkReport benchmark_report = 7;
+    ResourceObservation resource_observation = 8;
 }
 
 message RunningStatusResponse {
     bool success = 1;
     string status_message = 2;
+    optional int32 effective_cpu_threads = 3;
+    uint64 worker_policy_generation = 4;
 }
 
 // Worker -> Nodepool: authoritative validation of one immutable
@@ -247,6 +272,8 @@ message TaskInfo {
     int64 max_cpt = 22;
     string runtime = 23;
     ManagedConsensusSummary managed_consensus = 25;
+    ExecutionObservation execution_observation = 26;
+    string performance_suite = 27;
 }
 
 
@@ -280,6 +307,10 @@ message WorkerInfo {
     double memory_usage = 22;
     double gpu_usage = 23;
     double gpu_memory_usage = 24;
+    HardwareBenchmarkReport benchmark_report = 25;
+    ResourceObservation resource_observation = 26;
+    optional int32 effective_cpu_threads = 27;
+    uint64 worker_policy_generation = 28;
 }
 
 message ListWorkersResponse {
@@ -301,6 +332,7 @@ message QuoteTaskRequest {
     int32 gpu_memory_gb = 5;
     int64 storage_gb = 6;
     int32 host_count = 7;
+    string score_suite = 8;
 }
 
 message PricingBreakdown {
@@ -320,6 +352,7 @@ message QuoteTaskResponse {
     int64 quoted_cpt = 2;
     string currency = 3;
     PricingBreakdown breakdown = 4;
+    string score_suite = 5;
 }
 
 message GetProviderEarningsRequest {
@@ -524,6 +557,7 @@ message ExecuteTaskResponse {
     string replica_id = 15;
     string consensus_round_id = 16;
     uint32 consensus_protocol_version = 17;
+    ExecutionObservation execution_observation = 18;
 }
 
 // Nodepool -> Worker: authenticated, attempt-bound general-compute artifact
@@ -676,6 +710,9 @@ message TaskUsageRequest {
     // The retry generation returned by PullBatch. Legacy callers that do not
     // provide it are accepted only for the initial assignment (generation 0).
     int32 retry_count = 5;
+    ExecutionObservation execution_observation = 6;
+    ResourceObservation resource_observation = 7;
+    bool usage_received = 8;
 }
 message TaskUsageResponse {
     bool success = 1;
@@ -773,6 +810,7 @@ message ExecutionMetrics {
     int64 peak_memory_mb = 3;
     int64 download_bytes = 4;
     int64 cache_hits = 5;
+    ExecutionObservation execution_observation = 6;
 }
 
 message CompletedTask {
@@ -804,6 +842,8 @@ message HeartbeatRequest {
     int32 available_memory_gb = 3;
     int32 queue_capacity = 4;
     string token = 5;
+    ResourceObservation resource_observation = 6;
+    HardwareBenchmarkReport benchmark_report = 7;
 }
 
 message HeartbeatResponse {
@@ -1112,6 +1152,21 @@ service WorkerSessionService {
     rpc OpenSession(stream WorkerSessionClientFrame) returns (stream WorkerSessionServerFrame);
 }
 
+message GetPerformanceContractRequest {
+    string token = 1;
+}
+
+message GetPerformanceContractResponse {
+    bool success = 1;
+    string status_message = 2;
+    bool supported = 3;
+    uint32 protocol_version = 4;
+    string score_suite = 5;
+    int32 max_cpu_threads = 6;
+    int64 benchmark_ttl_seconds = 7;
+    int64 resource_ttl_seconds = 8;
+}
+
 // ============================================================
 // Services
 // ============================================================
@@ -1135,6 +1190,7 @@ service NodeManagerService {
     rpc TaskUsage(TaskUsageRequest) returns (TaskUsageResponse);
     rpc ListWorkers(ListWorkersRequest) returns (ListWorkersResponse);
     rpc RemoveWorker(RemoveWorkerRequest) returns (StatusResponse);
+    rpc GetPerformanceContract(GetPerformanceContractRequest) returns (GetPerformanceContractResponse);
 }
 
 service MasterNodeService {

@@ -891,6 +891,7 @@ fn worker_registration_resources(body: &RegisterWorkerBody) -> ProtoResourceSpec
         gpu_score,
         storage_total_gb: body.storage_total_gb.unwrap_or(0),
         storage_available_gb: body.storage_available_gb.unwrap_or(0),
+        score_suite: None,
     }
 }
 
@@ -1499,6 +1500,7 @@ async fn create_task_from_submission(
         gpu_score: body.gpu_score.unwrap_or(0),
         storage_total_gb: body.storage_gb.unwrap_or(0),
         storage_available_gb: 0,
+        score_suite: None,
     };
     match grpc
         .upload_task(

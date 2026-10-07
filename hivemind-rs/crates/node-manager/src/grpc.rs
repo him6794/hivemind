@@ -1163,6 +1163,8 @@ impl NodeManagerService for GrpcNodeManagerService {
             return Ok(Response::new(StatusResponse {
                 success: false,
                 status_message: "Invalid worker_id".into(),
+                effective_cpu_threads: None,
+                worker_policy_generation: 0,
             }));
         }
         let admin = is_admin(&claims.sub);
@@ -1170,6 +1172,8 @@ impl NodeManagerService for GrpcNodeManagerService {
             return Ok(Response::new(StatusResponse {
                 success: false,
                 status_message: "Not authorized".into(),
+                effective_cpu_threads: None,
+                worker_policy_generation: 0,
             }));
         }
         if !admin {
@@ -1184,6 +1188,8 @@ impl NodeManagerService for GrpcNodeManagerService {
                     return Ok(Response::new(StatusResponse {
                         success: false,
                         status_message: "Worker is owned by another user".into(),
+                        effective_cpu_threads: None,
+                        worker_policy_generation: 0,
                     }));
                 }
             }
@@ -1192,6 +1198,8 @@ impl NodeManagerService for GrpcNodeManagerService {
             return Ok(Response::new(StatusResponse {
                 success: false,
                 status_message: message.into(),
+                effective_cpu_threads: None,
+                worker_policy_generation: 0,
             }));
         }
         let public_dynamic = self.state.node_manager.is_public_dynamic_admission();
@@ -1202,6 +1210,8 @@ impl NodeManagerService for GrpcNodeManagerService {
                     return Ok(Response::new(StatusResponse {
                         success: false,
                         status_message: message,
+                        effective_cpu_threads: None,
+                        worker_policy_generation: 0,
                     }));
                 }
             }
@@ -1254,11 +1264,15 @@ impl NodeManagerService for GrpcNodeManagerService {
                 Ok(Response::new(StatusResponse {
                     success: true,
                     status_message: "OK".into(),
+                    effective_cpu_threads: None,
+                    worker_policy_generation: 0,
                 }))
             }
             Err(e) => Ok(Response::new(StatusResponse {
                 success: false,
                 status_message: e.to_string(),
+                effective_cpu_threads: None,
+                worker_policy_generation: 0,
             })),
         }
     }
@@ -1279,6 +1293,8 @@ impl NodeManagerService for GrpcNodeManagerService {
                 return Ok(Response::new(RunningStatusResponse {
                     success: false,
                     status_message,
+                    effective_cpu_threads: None,
+                    worker_policy_generation: 0,
                 }));
             }
         }
@@ -1290,6 +1306,8 @@ impl NodeManagerService for GrpcNodeManagerService {
                     return Ok(Response::new(RunningStatusResponse {
                         success: false,
                         status_message: message,
+                        effective_cpu_threads: None,
+                        worker_policy_generation: 0,
                     }));
                 }
             }
@@ -1306,6 +1324,8 @@ impl NodeManagerService for GrpcNodeManagerService {
                 return Ok(Response::new(RunningStatusResponse {
                     success: false,
                     status_message: error.to_string(),
+                    effective_cpu_threads: None,
+                    worker_policy_generation: 0,
                 }));
             }
         };
@@ -1344,10 +1364,14 @@ impl NodeManagerService for GrpcNodeManagerService {
             Ok(_) => Ok(Response::new(RunningStatusResponse {
                 success: true,
                 status_message: "OK".into(),
+                effective_cpu_threads: None,
+                worker_policy_generation: 0,
             })),
             Err(e) => Ok(Response::new(RunningStatusResponse {
                 success: false,
                 status_message: e.to_string(),
+                effective_cpu_threads: None,
+                worker_policy_generation: 0,
             })),
         }
     }
@@ -1672,6 +1696,8 @@ impl NodeManagerService for GrpcNodeManagerService {
             return Ok(Response::new(StatusResponse {
                 success: false,
                 status_message: "Invalid worker_id".into(),
+                effective_cpu_threads: None,
+                worker_policy_generation: 0,
             }));
         }
         let claims = self
@@ -1689,12 +1715,16 @@ impl NodeManagerService for GrpcNodeManagerService {
             return Ok(Response::new(StatusResponse {
                 success: false,
                 status_message: "Worker not found".into(),
+                effective_cpu_threads: None,
+                worker_policy_generation: 0,
             }));
         };
         if worker.username != claims.sub && !is_admin(&claims.sub) {
             return Ok(Response::new(StatusResponse {
                 success: false,
                 status_message: "Not authorized".into(),
+                effective_cpu_threads: None,
+                worker_policy_generation: 0,
             }));
         }
         let removed = self
@@ -1706,7 +1736,32 @@ impl NodeManagerService for GrpcNodeManagerService {
         Ok(Response::new(StatusResponse {
             success: removed,
             status_message: if removed { "OK" } else { "Worker not found" }.into(),
+            effective_cpu_threads: None,
+            worker_policy_generation: 0,
         }))
+    }
+
+    async fn get_performance_contract(
+        &self,
+        request: Request<hivemind_proto::GetPerformanceContractRequest>,
+    ) -> Result<Response<hivemind_proto::GetPerformanceContractResponse>, Status> {
+        let req = request.into_inner();
+        self.state
+            .auth
+            .validate_token(&req.token)
+            .map_err(|_| Status::unauthenticated("Invalid token"))?;
+        Ok(Response::new(
+            hivemind_proto::GetPerformanceContractResponse {
+                success: true,
+                status_message: "OK".into(),
+                supported: true,
+                protocol_version: hivemind_proto::OBSERVATION_PROTOCOL_VERSION,
+                score_suite: hivemind_models::observations::HARDWARE_SUITE.to_string(),
+                max_cpu_threads: hivemind_models::observations::BENCHMARK_MAX_THREADS as i32,
+                benchmark_ttl_seconds: hivemind_models::observations::BENCHMARK_TTL_SECONDS,
+                resource_ttl_seconds: hivemind_models::observations::RESOURCE_TTL_SECONDS,
+            },
+        ))
     }
 }
 
@@ -3313,6 +3368,7 @@ impl MasterNodeService for GrpcMasterNodeService {
                 quoted_cpt: 0,
                 currency: "CPT".into(),
                 breakdown: None,
+                score_suite: req.score_suite.clone(),
             }));
         }
         let breakdown = quote_breakdown(
@@ -3328,6 +3384,7 @@ impl MasterNodeService for GrpcMasterNodeService {
             quoted_cpt: breakdown.total,
             currency: "CPT".into(),
             breakdown: Some(breakdown),
+            score_suite: req.score_suite.clone(),
         }))
     }
 
@@ -3829,6 +3886,7 @@ fn task_lease_from_task(task: &Task) -> TaskLease {
             gpu_score: task.req_gpu_score,
             storage_total_gb: task.req_storage_gb,
             storage_available_gb: task.req_storage_gb,
+            score_suite: None,
         }),
         deadline_unix: task
             .deadline
@@ -3989,6 +4047,8 @@ async fn task_info_from_task(pool: &sqlx::PgPool, task: Task) -> Result<TaskInfo
         max_cpt: task.max_cpt,
         runtime: task.runtime.unwrap_or_default(),
         managed_consensus: consensus,
+        execution_observation: None,
+        performance_suite: String::new(),
     })
 }
 
@@ -4052,6 +4112,10 @@ fn worker_info_from_model(worker: WorkerNode) -> WorkerInfo {
         memory_usage: worker.memory_usage,
         gpu_usage: worker.gpu_usage,
         gpu_memory_usage: worker.gpu_memory_usage,
+        benchmark_report: None,
+        resource_observation: None,
+        effective_cpu_threads: None,
+        worker_policy_generation: 0,
     }
 }
 
@@ -4731,6 +4795,9 @@ mod tests {
             .into_inner();
         let usage = node_service
             .task_usage(Request::new(TaskUsageRequest {
+                execution_observation: None,
+                resource_observation: None,
+                usage_received: false,
                 task_id: oversized_task_id,
                 worker_id: String::new(),
                 retry_count: 0,
@@ -6159,6 +6226,7 @@ mod tests {
                     gpu_score: 0,
                     storage_total_gb: 1,
                     storage_available_gb: 1,
+                    score_suite: None,
                 }),
                 location: String::new(),
                 host_count: 1,
@@ -6200,6 +6268,7 @@ mod tests {
 
         let response = service
             .quote_task(Request::new(QuoteTaskRequest {
+                score_suite: String::new(),
                 token: owner_token,
                 cpu_score: -10,
                 gpu_score: 0,
@@ -6243,6 +6312,7 @@ mod tests {
                     gpu_score: 0,
                     storage_total_gb: 1,
                     storage_available_gb: 1,
+                    score_suite: None,
                 }),
                 location: String::new(),
                 host_count: 0,
@@ -6310,6 +6380,7 @@ mod tests {
                     gpu_score: 0,
                     storage_total_gb: 1,
                     storage_available_gb: 1,
+                    score_suite: None,
                 }),
                 location: String::new(),
                 host_count: 1,
@@ -6377,6 +6448,7 @@ mod tests {
                     gpu_score: 0,
                     storage_total_gb: 1,
                     storage_available_gb: 1,
+                    score_suite: None,
                 }),
                 location: String::new(),
                 host_count: 1,
@@ -6558,6 +6630,8 @@ mod tests {
         let response = node_service
             .register_worker_node(Request::new(RegisterWorkerNodeRequest {
                 capability_report: None,
+                benchmark_report: None,
+                resource_observation: None,
                 username: owner.clone(),
                 worker_id: ".".into(),
                 ip: "10.77.9.10:50053".into(),
@@ -6571,6 +6645,7 @@ mod tests {
                     gpu_score: 0,
                     storage_total_gb: 500,
                     storage_available_gb: 250,
+                    score_suite: None,
                 }),
                 location: "local".into(),
                 token: owner_token,
@@ -6607,6 +6682,8 @@ mod tests {
         let response = node_service
             .register_worker_node(Request::new(RegisterWorkerNodeRequest {
                 capability_report: None,
+                benchmark_report: None,
+                resource_observation: None,
                 username: owner.clone(),
                 worker_id: worker_id.clone(),
                 ip: "10.77.9.10:50053".into(),
@@ -6620,6 +6697,7 @@ mod tests {
                     gpu_score: -10,
                     storage_total_gb: 100,
                     storage_available_gb: 200,
+                    score_suite: None,
                 }),
                 location: "local".into(),
                 token: owner_token,
@@ -6656,6 +6734,8 @@ mod tests {
         let response = node_service
             .register_worker_node(Request::new(RegisterWorkerNodeRequest {
                 capability_report: None,
+                benchmark_report: None,
+                resource_observation: None,
                 username: owner.clone(),
                 worker_id: worker_id.clone(),
                 ip: "10.77.9.10:50053".into(),
@@ -6669,6 +6749,7 @@ mod tests {
                     gpu_score: 0,
                     storage_total_gb: 500,
                     storage_available_gb: 250,
+                    score_suite: None,
                 }),
                 location: "local".into(),
                 token: other_token,
@@ -6717,6 +6798,8 @@ mod tests {
                     ready: report.ready,
                     readiness_reason: report.readiness_reason.clone(),
                 }),
+                benchmark_report: None,
+                resource_observation: None,
                 username: owner.clone(),
                 worker_id: worker_id.clone(),
                 ip: "10.77.12.10:50053".into(),
@@ -6730,6 +6813,7 @@ mod tests {
                     gpu_score: 0,
                     storage_total_gb: 500,
                     storage_available_gb: 250,
+                    score_suite: None,
                 }),
                 location: "public".into(),
                 token: owner_token,
@@ -6809,6 +6893,8 @@ mod tests {
         let response = node_service
             .register_worker_node(Request::new(RegisterWorkerNodeRequest {
                 capability_report: None,
+                benchmark_report: None,
+                resource_observation: None,
                 username: owner.clone(),
                 worker_id: worker_id.clone(),
                 ip: "10.77.10.10:50053".into(),
@@ -6822,6 +6908,7 @@ mod tests {
                     gpu_score: 0,
                     storage_total_gb: 500,
                     storage_available_gb: 250,
+                    score_suite: None,
                 }),
                 location: "local".into(),
                 token: owner_token,
@@ -6883,6 +6970,8 @@ mod tests {
         let error = node_service
             .register_worker_node(Request::new(RegisterWorkerNodeRequest {
                 capability_report: None,
+                benchmark_report: None,
+                resource_observation: None,
                 username: owner.clone(),
                 worker_id: worker_id.clone(),
                 ip: "10.77.11.10:50053".into(),
@@ -6896,6 +6985,7 @@ mod tests {
                     gpu_score: 0,
                     storage_total_gb: 10,
                     storage_available_gb: 5,
+                    score_suite: None,
                 }),
                 location: "local".into(),
                 token,
@@ -7494,6 +7584,8 @@ mod tests {
         node_service
             .register_worker_node(Request::new(RegisterWorkerNodeRequest {
                 capability_report: None,
+                benchmark_report: None,
+                resource_observation: None,
                 username: owner.clone(),
                 worker_id: worker_id.clone(),
                 ip: "10.77.1.10:50053".into(),
@@ -7507,6 +7599,7 @@ mod tests {
                     gpu_score: 0,
                     storage_total_gb: 500,
                     storage_available_gb: 250,
+                    score_suite: None,
                 }),
                 location: "local".into(),
                 token: owner_token.clone(),
@@ -7539,6 +7632,9 @@ mod tests {
 
         let usage_response = node_service
             .task_usage(Request::new(TaskUsageRequest {
+                execution_observation: None,
+                resource_observation: None,
+                usage_received: false,
                 task_id: task_id.clone(),
                 worker_id: worker_id.clone(),
                 retry_count: 0,
@@ -7635,6 +7731,8 @@ mod tests {
         node_service
             .register_worker_node(Request::new(RegisterWorkerNodeRequest {
                 capability_report: None,
+                benchmark_report: None,
+                resource_observation: None,
                 username: owner.clone(),
                 worker_id: worker_id.clone(),
                 ip: "10.77.2.10:50053".into(),
@@ -7648,6 +7746,7 @@ mod tests {
                     gpu_score: 0,
                     storage_total_gb: 500,
                     storage_available_gb: 250,
+                    score_suite: None,
                 }),
                 location: "local".into(),
                 token: owner_token,
@@ -7792,6 +7891,9 @@ mod tests {
             .into_inner();
         let usage_response = node_service
             .task_usage(Request::new(TaskUsageRequest {
+                execution_observation: None,
+                resource_observation: None,
+                usage_received: false,
                 task_id: task_id.clone(),
                 worker_id: worker_id.clone(),
                 retry_count: 0,
@@ -8544,6 +8646,8 @@ mod tests {
         let registered = node_service
             .register_worker_node(Request::new(RegisterWorkerNodeRequest {
                 capability_report: None,
+                benchmark_report: None,
+                resource_observation: None,
                 username: owner.clone(),
                 worker_id: worker_id.clone(),
                 ip: "10.77.0.10:50053".into(),
@@ -8557,6 +8661,7 @@ mod tests {
                     gpu_score: 0,
                     storage_total_gb: 500,
                     storage_available_gb: 250,
+                    score_suite: None,
                 }),
                 location: "local".into(),
                 token: owner_token.clone(),
@@ -8614,6 +8719,8 @@ mod tests {
         node_service
             .register_worker_node(Request::new(RegisterWorkerNodeRequest {
                 capability_report: None,
+                benchmark_report: None,
+                resource_observation: None,
                 username: other_user.clone(),
                 worker_id: other_worker_id.clone(),
                 ip: "10.77.0.11:50053".into(),
@@ -8627,6 +8734,7 @@ mod tests {
                     gpu_score: 0,
                     storage_total_gb: 500,
                     storage_available_gb: 250,
+                    score_suite: None,
                 }),
                 location: "local".into(),
                 token: other_token,
@@ -9281,6 +9389,7 @@ mod tests {
                 "artifact://stdout.log",
                 "artifact://stderr.log",
                 Some(hivemind_proto::ExecutionMetrics {
+                    execution_observation: None,
                     cpu_time_ms: 101,
                     wall_time_ms: 202,
                     peak_memory_mb: 303,
@@ -9553,6 +9662,8 @@ mod tests {
 
         let denied = batch_service
             .heartbeat(Request::new(HeartbeatRequest {
+                benchmark_report: None,
+                resource_observation: None,
                 worker_id: worker_id.clone(),
                 status: "BUSY".into(),
                 available_memory_gb: 7,
@@ -9570,6 +9681,8 @@ mod tests {
 
         let allowed = batch_service
             .heartbeat(Request::new(HeartbeatRequest {
+                benchmark_report: None,
+                resource_observation: None,
                 worker_id: worker_id.clone(),
                 status: "BUSY".into(),
                 available_memory_gb: 7,
@@ -9635,6 +9748,8 @@ mod tests {
         let registered = node_service
             .register_worker_node(Request::new(RegisterWorkerNodeRequest {
                 capability_report: None,
+                benchmark_report: None,
+                resource_observation: None,
                 username: owner.to_string(),
                 worker_id: worker_id.to_string(),
                 ip: "10.77.99.10:50053".into(),
@@ -9648,6 +9763,7 @@ mod tests {
                     gpu_score: 0,
                     storage_total_gb: 500,
                     storage_available_gb: 250,
+                    score_suite: None,
                 }),
                 location: "local".into(),
                 token: token_for(&node_service.state.auth, owner),

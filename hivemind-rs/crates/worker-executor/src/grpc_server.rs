@@ -1970,6 +1970,7 @@ fn execute_response_from_result_for_runtime(
         attempt_id: identity.attempt_id.clone(),
         idempotency_key: identity.idempotency_key.clone(),
         request_digest: identity.request_digest.clone(),
+        execution_observation: None,
     };
     if managed_gpu {
         let Some(payload) = (!response.managed_gpu_result_json.is_empty())
@@ -2221,6 +2222,7 @@ fn failed_execute_response(message: &str, identity: &ExecuteTaskIdentity) -> Exe
         attempt_id: identity.attempt_id.clone(),
         idempotency_key: identity.idempotency_key.clone(),
         request_digest: identity.request_digest.clone(),
+        execution_observation: None,
     }
 }
 
@@ -3706,6 +3708,9 @@ mod tests {
                 retry_count: 0,
                 usage: Some(test_usage()),
                 token: test_user_token(test_private_key_pem(), ASSIGNED_OWNER),
+                execution_observation: None,
+                resource_observation: None,
+                usage_received: false,
             }))
             .await;
 
@@ -3840,6 +3845,9 @@ mod tests {
                 retry_count: 0,
                 usage: Some(test_usage()),
                 token: test_token(test_private_key_pem(), OTHER_OWNER),
+                execution_observation: None,
+                resource_observation: None,
+                usage_received: false,
             }))
             .await;
 
@@ -3859,6 +3867,9 @@ mod tests {
                 retry_count: 0,
                 usage: Some(test_usage()),
                 token: test_token(test_private_key_pem(), ASSIGNED_OWNER),
+                execution_observation: None,
+                resource_observation: None,
+                usage_received: false,
             }))
             .await;
 
@@ -3968,6 +3979,9 @@ mod tests {
                     storage_percent: 1.0,
                 }),
                 token,
+                execution_observation: None,
+                resource_observation: None,
+                usage_received: false,
             }))
             .await
             .unwrap()
@@ -4019,6 +4033,9 @@ mod tests {
                     storage_percent: 0.0,
                 }),
                 token,
+                execution_observation: None,
+                resource_observation: None,
+                usage_received: false,
             }))
             .await
             .unwrap()
@@ -4042,6 +4059,9 @@ mod tests {
                 retry_count: 0,
                 usage: None,
                 token,
+                execution_observation: None,
+                resource_observation: None,
+                usage_received: false,
             }))
             .await
             .unwrap()
@@ -4094,6 +4114,7 @@ mod tests {
                         gpu_score: 0,
                         storage_total_gb: 1,
                         storage_available_gb: 1,
+                        score_suite: None,
                     }),
                     runtime: "managed-function-v1".into(),
                     task_source: "return 1;".into(),
