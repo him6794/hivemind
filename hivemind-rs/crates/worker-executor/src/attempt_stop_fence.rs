@@ -131,6 +131,13 @@ impl AttemptStopFenceStore {
         })
     }
 
+    pub(crate) fn worker_state_root(&self) -> Option<PathBuf> {
+        self.root
+            .as_ref()
+            .and_then(|root| root.parent())
+            .map(PathBuf::from)
+    }
+
     pub(crate) fn fences(&self) -> HashMap<ActiveTaskKey, i64> {
         self.state
             .lock()

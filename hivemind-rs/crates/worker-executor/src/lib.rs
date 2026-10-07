@@ -1,4 +1,5 @@
 pub mod attempt_stop_fence;
+pub mod benchmark;
 pub mod chunk_transport;
 pub mod control_api;
 pub mod executor;
@@ -97,6 +98,7 @@ pub struct WorkerExecutor {
     stop_fences: AttemptStopFenceStore,
     latest_resource_sample: Arc<std::sync::RwLock<Option<ResourceSample>>>,
     resource_refresh_lock: Arc<Mutex<()>>,
+    pub benchmark: Arc<benchmark::BenchmarkCoordinator>,
     task_runner: Arc<TaskRunner>,
     dynamic_capability_report: WorkerCapabilityReport,
     runtime_admission: runtime_admission::WorkerRuntimeAdmission,
@@ -225,7 +227,9 @@ impl WorkerExecutor {
             Some(Arc::new(admission.capability_matrix()))
         };
         let runner_hcs_journal = hcs_journal.clone();
+        let benchmark = benchmark::BenchmarkCoordinator::new(stop_fences.worker_state_root())?;
         Ok(Self {
+            benchmark,
             active_tasks: Arc::new(Mutex::new(ActiveTaskRegistry {
                 running: HashMap::new(),
                 stopped: stop_fences.fences(),
@@ -293,6 +297,7 @@ impl WorkerExecutor {
         Fut: Future<Output = Result<TaskResult>> + Send + 'static,
     {
         Self {
+            benchmark: benchmark::BenchmarkCoordinator::new(None).expect("test benchmark state"),
             active_tasks: Arc::new(Mutex::new(ActiveTaskRegistry {
                 running: HashMap::new(),
                 stopped: stop_fences.fences(),
