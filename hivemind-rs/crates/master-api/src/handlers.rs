@@ -809,6 +809,69 @@ pub struct TaskInfo {
     pub max_cpt: i64,
     pub runtime: String,
     pub managed_consensus: Option<ManagedConsensusInfo>,
+    /// Presence-aware execution metrics. `null` means Nodepool sent no
+    /// observation for this task (legacy / in-flight); a non-null object means
+    /// Nodepool attached a validated measurement, and within it each gauge is
+    /// `null` when the worker did not measure it.
+    pub execution_observation: Option<ExecutionObservationView>,
+    /// The versioned suite the task's performance requirement was expressed
+    /// against, or `null` when the task carries no performance contract.
+    pub performance_suite: Option<String>,
+}
+
+/// Projection of the Nodepool's validated `ExecutionObservation` payload into
+/// the shape the Master UI renders. The envelope carries a canonical JSON
+/// document of the typed models contract; the master only parses and re-checks
+/// it so an absent value stays `null` (unavailable) rather than being coerced
+/// to a fabricated 0. A mismatched version or unparseable payload degrades to
+/// "no observation" rather than a partially trusted reading.
+#[derive(Debug, Clone, Serialize)]
+pub struct ExecutionObservationView {
+    pub protocol_version: u32,
+    pub cpu_time_ms: Option<i64>,
+    pub wall_time_ms: Option<i64>,
+    pub peak_memory_mb: Option<i64>,
+    pub download_bytes: Option<i64>,
+    pub cache_hits: Option<i64>,
+    pub cpu_percent: Option<f64>,
+    pub memory_percent: Option<f64>,
+    pub gpu_percent: Option<f64>,
+    pub vram_percent: Option<f64>,
+}
+
+/// Parse and validate the observation envelope Nodepool attached to a task.
+/// Returns `None` when there is no observation or the payload fails the same
+/// version/bounds checks the Nodepool applies, so the UI never renders an
+/// unvalidated reading as fact.
+fn execution_observation_view(
+    envelope: Option<hivemind_proto::ExecutionObservation>,
+) -> Option<ExecutionObservationView> {
+    let envelope = envelope?;
+    if envelope.protocol_version != hivemind_proto::OBSERVATION_PROTOCOL_VERSION {
+        return None;
+    }
+    let inner: hivemind_models::observations::ExecutionObservation =
+        serde_json::from_str(&envelope.observation_json).ok()?;
+    if inner.validate().is_err() {
+        return None;
+    }
+    Some(ExecutionObservationView {
+        protocol_version: envelope.protocol_version,
+        cpu_time_ms: inner.cpu_time_ms,
+        wall_time_ms: inner.wall_time_ms,
+        peak_memory_mb: inner.peak_memory_mb,
+        download_bytes: inner.download_bytes,
+        cache_hits: inner.cache_hits,
+        cpu_percent: inner.cpu_percent,
+        memory_percent: inner.memory_percent,
+        gpu_percent: inner.gpu_percent,
+        vram_percent: inner.vram_percent,
+    })
+}
+
+fn performance_suite_view(suite: &str) -> Option<String> {
+    let trimmed = suite.trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_string())
 }
 
 impl From<hivemind_proto::PricingBreakdown> for PricingBreakdown {
@@ -1605,6 +1668,8 @@ pub async fn list_tasks(
                         settlement_id: consensus.settlement_id,
                         settlement_authorized: consensus.settlement_authorized,
                     }),
+                    execution_observation: execution_observation_view(t.execution_observation),
+                    performance_suite: performance_suite_view(&t.performance_suite),
                 })
                 .collect();
             (
@@ -2635,6 +2700,67 @@ mod tests {
             vpn_bootstrap_http_status(hivemind_client_runtime::VpnBootstrapState::RetryableFailure),
             StatusCode::BAD_GATEWAY
         );
+    }
+
+    fn observation_envelope(
+        observation: hivemind_models::observations::ExecutionObservation,
+    ) -> Option<hivemind_proto::ExecutionObservation> {
+        let payload = serde_json::to_string(&observation).ok()?;
+        Some(hivemind_proto::ExecutionObservation {
+            protocol_version: hivemind_proto::OBSERVATION_PROTOCOL_VERSION,
+            observation_json: payload,
+        })
+    }
+
+    #[test]
+    fn execution_observation_view_keeps_measured_values_and_absent_gauges_distinct() {
+        // A measured 0 is preserved; a gauge the worker never measured stays
+        // null. The DTO must not collapse the two into one value.
+        let observation = hivemind_models::observations::ExecutionObservation {
+            version: hivemind_models::observations::OBSERVATION_VERSION,
+            cpu_time_ms: None,     // managed DSL leaves CPU time unmeasured
+            wall_time_ms: Some(0), // a genuinely measured zero
+            peak_memory_mb: Some(128),
+            ..Default::default()
+        };
+        let view = execution_observation_view(observation_envelope(observation));
+        let value = view.as_ref().unwrap();
+        assert_eq!(value.cpu_time_ms, None);
+        assert_eq!(value.wall_time_ms, Some(0));
+        assert_eq!(value.peak_memory_mb, Some(128));
+
+        // Absent envelope -> absent observation, not a fabricated zero object.
+        assert!(execution_observation_view(None).is_none());
+    }
+
+    #[test]
+    fn execution_observation_view_rejects_a_mismatched_or_invalid_payload() {
+        // A payload whose internal version does not match the suite is not a
+        // trusted reading, so it degrades to "no observation".
+        let mismatched = hivemind_models::observations::ExecutionObservation {
+            version: hivemind_models::observations::OBSERVATION_VERSION + 1,
+            wall_time_ms: Some(5),
+            ..Default::default()
+        };
+        let envelope = observation_envelope(mismatched).unwrap();
+        assert!(execution_observation_view(Some(envelope)).is_none());
+
+        // A wrong envelope protocol version is rejected before parsing.
+        let envelope = hivemind_proto::ExecutionObservation {
+            protocol_version: hivemind_proto::OBSERVATION_PROTOCOL_VERSION + 1,
+            observation_json: "{}".into(),
+        };
+        assert!(execution_observation_view(Some(envelope)).is_none());
+    }
+
+    #[test]
+    fn performance_suite_view_collapses_blank_to_absent() {
+        assert_eq!(
+            performance_suite_view("hivemind-hardware-v1"),
+            Some("hivemind-hardware-v1".into())
+        );
+        assert_eq!(performance_suite_view("  "), None);
+        assert_eq!(performance_suite_view(""), None);
     }
 
     #[test]
