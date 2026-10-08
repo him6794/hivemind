@@ -1038,6 +1038,137 @@
   height: 188px;
 }
 
+.benchmark-card {
+  min-width: 0;
+}
+
+.computer-benchmark {
+  margin-top: 14px;
+}
+
+.benchmark-rerun {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-left: auto;
+}
+
+.benchmark-freshness {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.benchmark-freshness strong {
+  color: var(--foreground);
+}
+
+.benchmark-freshness.is-busy strong {
+  color: var(--primary);
+}
+
+.benchmark-separator {
+  margin: 12px 0;
+}
+
+.benchmark-measurement {
+  display: grid;
+  gap: 10px;
+}
+
+.benchmark-measurement-head {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+.benchmark-measurement-title {
+  font-size: 13px;
+  font-weight: 550;
+}
+
+.benchmark-measurement-meta {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+  margin: 0;
+}
+
+.benchmark-measurement-meta dt {
+  color: var(--muted-foreground);
+  font-size: 11px;
+  line-height: 1.35;
+}
+
+.benchmark-measurement-meta dd {
+  margin: 0;
+  font-size: 12px;
+  font-weight: 550;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+.benchmark-gpu {
+  margin-top: 14px;
+}
+
+.benchmark-gpu-title {
+  margin: 0 0 8px;
+  font-size: 12px;
+  font-weight: 550;
+  color: var(--muted-foreground);
+}
+
+.benchmark-case-list {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.benchmark-case {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: space-between;
+  font-size: 12px;
+}
+
+.benchmark-case-name {
+  color: var(--muted-foreground);
+}
+
+.benchmark-case-detail {
+  color: var(--foreground);
+  font-weight: 550;
+}
+
+.benchmark-reason {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--destructive);
+}
+
+.benchmark-message,
+.benchmark-loading {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--muted-foreground);
+}
+
+.benchmark-skeleton-line {
+  height: 12px;
+}
+
 .load-error-screen {
   display: grid;
   min-height: 100svh;

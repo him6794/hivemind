@@ -72,8 +72,6 @@ export function WorkerComputer({
                 <ProfileField label="Computer ID" className="profile-field-wide">{profile.worker_id || '(not connected yet)'}</ProfileField>
                 <ProfileField label="CPU cores">{profile.cpu_cores}</ProfileField>
                 <ProfileField label="Memory">{profile.memory_gb} GB</ProfileField>
-                <ProfileField label="CPU rating">{profile.cpu_score}</ProfileField>
-                <ProfileField label="Graphics rating">{profile.gpu_score}</ProfileField>
                 <ProfileField label="Graphics memory">{profile.gpu_memory_gb} GB</ProfileField>
                 <ProfileField label="Graphics card" className="profile-field-wide">{profile.gpu_name || 'Unknown'}</ProfileField>
                 <ProfileField label="Storage">{profile.storage_available_gb} / {profile.storage_total_gb} GB available</ProfileField>

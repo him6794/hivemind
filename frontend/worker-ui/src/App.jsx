@@ -7,11 +7,17 @@ import { Card, CardContent } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
+import { WorkerBenchmark } from './components/worker-benchmark.jsx';
 import { WorkerComputer } from './components/worker-computer.jsx';
 import { WorkerDashboard } from './components/worker-dashboard.jsx';
 import { LoadingPanel } from './components/worker-setup-panels.jsx';
 import { clearStoredSession, isExpiredJwt, readStoredSession, saveStoredSession } from './authSession.mjs';
 import { readThemePreference, writeThemePreference } from './themePreference.mjs';
+import {
+  buildBenchmarkRerunRequest,
+  buildBenchmarkStatusRequest,
+  normalizeBenchmark,
+} from './workerBenchmark.mjs';
 import {
   buildRegisterWorkerBody,
   buildRegisterWorkerRequest,
@@ -74,6 +80,10 @@ export default function WorkerApp() {
   const [dashboard, setDashboard] = useState(null);
   const [dashboardLoading, setDashboardLoading] = useState(false);
   const [dashboardError, setDashboardError] = useState('');
+  const [benchmark, setBenchmark] = useState(null);
+  const [benchmarkLoading, setBenchmarkLoading] = useState(false);
+  const [benchmarkError, setBenchmarkError] = useState('');
+  const [benchmarkRerunLoading, setBenchmarkRerunLoading] = useState(false);
   const [backendReady, setBackendReady] = useState(false);
   const [startupStatus, setStartupStatus] = useState({ state: 'initializing', phase: 'starting', code: null });
   const [startupError, setStartupError] = useState(null);
@@ -275,6 +285,94 @@ export default function WorkerApp() {
     };
   }, [token, workerControlBase, backendReady]);
 
+  // The benchmark is a slow, gated workload: poll it on the same cadence as the
+  // dashboard while signed in so a running measurement shows live progress and
+  // settles back to a cached report when it finishes.
+  useEffect(() => {
+    if (!token || !backendReady) {
+      if (!token) setBenchmark(null);
+      setBenchmarkError('');
+      setBenchmarkLoading(false);
+      return undefined;
+    }
+
+    let cancelled = false;
+    const refreshBenchmark = createNonOverlappingPoll(async () => {
+      if (cancelled || sessionTokenRef.current !== token) return;
+      setBenchmarkLoading(true);
+      try {
+        const request = buildBenchmarkStatusRequest(workerControlBase, token);
+        let res;
+        try {
+          res = await fetchJsonWithDeadline(request.url, request.options);
+        } catch {
+          throw new Error('The benchmark could not be reached.');
+        }
+        if (cancelled || sessionTokenRef.current !== token) return;
+        const data = res.data;
+        if (res.status === 401) {
+          if (!cancelled && sessionTokenRef.current === token) {
+            logout();
+            setStatus('Session expired. Please log in again.');
+          }
+          return;
+        }
+        if (!res.ok || !data.success) {
+          throw new Error(data.message || data.status_message || `Benchmark request failed (${res.status})`);
+        }
+        if (!cancelled && sessionTokenRef.current === token) {
+          setBenchmark(normalizeBenchmark(data));
+          setBenchmarkError('');
+        }
+      } catch (err) {
+        if (!cancelled && sessionTokenRef.current === token) {
+          setBenchmarkError(err.message || 'The benchmark could not be refreshed.');
+        }
+      } finally {
+        if (!cancelled && sessionTokenRef.current === token) setBenchmarkLoading(false);
+      }
+    });
+    void refreshBenchmark();
+    const id = setInterval(() => { void refreshBenchmark(); }, 15000);
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+    };
+  }, [token, workerControlBase, backendReady]);
+
+  async function handleBenchmarkRerun(component) {
+    if (benchmarkRerunLoading || !token) return;
+    setBenchmarkRerunLoading(true);
+    try {
+      const request = buildBenchmarkRerunRequest(workerControlBase, token, component);
+      const res = await fetchJsonWithDeadline(request.url, request.options);
+      if (res.status === 401) {
+        logout('Session expired. Please log in again.');
+        return;
+      }
+      const data = res.data;
+      if (!res.ok || !data.success) {
+        setBenchmarkError(data.message || data.status_message || 'The benchmark could not be started.');
+      } else {
+        setBenchmarkError('');
+      }
+    } catch (err) {
+      setBenchmarkError(err.message || 'The benchmark could not be started.');
+    } finally {
+      setBenchmarkRerunLoading(false);
+    }
+    // Surface the queued/running state immediately rather than waiting for the
+    // next poll tick.
+    const status = buildBenchmarkStatusRequest(workerControlBase, token);
+    fetchJsonWithDeadline(status.url, status.options)
+      .then((result) => {
+        if (result.ok && result.data.success && sessionTokenRef.current === token) {
+          setBenchmark(normalizeBenchmark(result.data));
+        }
+      })
+      .catch(() => {});
+  }
+
   async function runSetup(options = {}) {
     const {
       kind = 'profile',
@@ -409,6 +507,8 @@ export default function WorkerApp() {
     if (!backendReady || setupActive) return;
     setDashboard(null);
     setDashboardError('');
+    setBenchmark(null);
+    setBenchmarkError('');
     setRegistration(null);
     void runSetup({ kind: 'login', credentials: { username, password } });
   }
@@ -422,6 +522,10 @@ export default function WorkerApp() {
     setDashboard(null);
     setDashboardError('');
     setDashboardLoading(false);
+    setBenchmark(null);
+    setBenchmarkError('');
+    setBenchmarkLoading(false);
+    setBenchmarkRerunLoading(false);
     setRegistration(null);
     setSetupActive(false);
     setSetupError('');
@@ -651,6 +755,15 @@ export default function WorkerApp() {
                 setupActive={setupActive}
                 onRefresh={handleRefresh}
               />
+              <div className="computer-benchmark">
+                <WorkerBenchmark
+                  benchmark={benchmark}
+                  benchmarkError={benchmarkError}
+                  benchmarkLoading={benchmarkLoading}
+                  rerunLoading={benchmarkRerunLoading}
+                  onRerun={handleBenchmarkRerun}
+                />
+              </div>
             </TabsContent>
           </Tabs>
         ) : null}

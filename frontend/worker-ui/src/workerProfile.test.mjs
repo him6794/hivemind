@@ -152,6 +152,41 @@ describe('worker profile registration payload', () => {
     assert.equal(body.ip, '10.42.0.9:50053');
   });
 
+  it('treats an unmeasured 0 score as unknown and omits it from registration', () => {
+    const normalized = normalizeWorkerProfile({
+      worker_id: 'local-worker-42',
+      cpu_cores: 8,
+      memory_gb: 32,
+      cpu_score: 0,
+      gpu_score: 0,
+      gpu_memory_gb: 16,
+      gpu_name: 'RTX Test',
+      storage_total_gb: 1000,
+      storage_available_gb: 750,
+    });
+    assert.equal(normalized.cpu_score, null);
+    assert.equal(normalized.gpu_score, null);
+
+    // cpu_score is a required scalar (0 = not scored); gpu_score is omitted.
+    const body = buildRegisterWorkerBody('provider', normalized, '127.0.0.1:50053');
+    assert.equal(body.cpu_score, 0);
+    assert.equal('gpu_score' in body, false);
+  });
+
+  it('keeps a measured positive score through to registration', () => {
+    const normalized = normalizeWorkerProfile({
+      worker_id: 'local-worker-42',
+      cpu_score: 900,
+      gpu_score: 1200,
+    });
+    assert.equal(normalized.cpu_score, 900);
+    assert.equal(normalized.gpu_score, 1200);
+
+    const body = buildRegisterWorkerBody('provider', normalized, '127.0.0.1:50053');
+    assert.equal(body.cpu_score, 900);
+    assert.equal(body.gpu_score, 1200);
+  });
+
   it('rejects negative worker capacity values before registration', () => {
     assert.throws(
       () => buildRegisterWorkerBody(
