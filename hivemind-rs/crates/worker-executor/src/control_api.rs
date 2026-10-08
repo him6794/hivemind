@@ -7,6 +7,7 @@ use axum::{
 };
 use hivemind_client_runtime::{self as client_runtime, ClientRole};
 use hivemind_config::{HivemindConfig, WorkerAdmissionMode};
+use hivemind_models::observations::HardwareBenchmarkReport;
 use hivemind_models::ResourceSpec;
 use serde::{Deserialize, Serialize};
 use tower_http::cors::{AllowOrigin, CorsLayer};
@@ -246,6 +247,37 @@ struct WorkerDashboardResponse {
 }
 
 #[derive(Debug, Deserialize)]
+struct BenchmarkRerunBody {
+    #[serde(default)]
+    component: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct BenchmarkRerunResponse {
+    success: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    message: Option<String>,
+    started: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct BenchmarkStatusResponse {
+    success: bool,
+    busy: bool,
+    threads: u32,
+    /// Score derived from the raw CPU samples by the frozen suite formula.
+    /// `None` while the CPU suite is not a fresh, ready measurement (never run,
+    /// stale, or failed) — an unmeasured CPU is not a zero.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cpu_score: Option<i32>,
+    /// One entry per GPU in `report.gpus`, in the same order: the score derived
+    /// from that GPU's samples, or `None` when that GPU has no ready
+    /// measurement. Index-aligned with `report.gpus`.
+    gpu_scores: Vec<Option<i32>>,
+    report: HardwareBenchmarkReport,
+}
+
+#[derive(Debug, Deserialize)]
 struct LoginBody {
     username: String,
     password: String,
@@ -355,6 +387,8 @@ pub fn router_with_ui_dir(
     let app = Router::new()
         .route("/api/worker-info", get(worker_info))
         .route("/api/worker-dashboard", get(worker_dashboard))
+        .route("/api/benchmark", get(benchmark_status))
+        .route("/api/benchmark/rerun", post(benchmark_rerun))
         .route("/api/vpn/bootstrap", post(bootstrap_vpn))
         .route("/api/vpn/status", get(vpn_status))
         .route("/api/login", post(login))
@@ -564,6 +598,169 @@ fn resource_sample_is_stale(
     now: chrono::DateTime<chrono::Utc>,
 ) -> bool {
     sampled_at > now || now.signed_duration_since(sampled_at) > RESOURCE_SAMPLE_STALE_AFTER
+}
+
+/// Read the last measured hardware benchmark report. This is local, cached
+/// state, so it is protected by the same bearer + registered-identity gate as
+/// the rest of the control API but does not require a Nodepool round trip —
+/// the most recent measurement stays visible even when Nodepool is
+/// unreachable.
+async fn benchmark_status(
+    State(state): State<ControlApiState>,
+    headers: axum::http::HeaderMap,
+) -> std::result::Result<Json<BenchmarkStatusResponse>, (StatusCode, Json<StatusResponse>)> {
+    let _token = bearer_token(&headers).ok_or_else(|| {
+        (
+            StatusCode::UNAUTHORIZED,
+            Json(StatusResponse {
+                success: false,
+                status_message: "Bearer token is required".into(),
+            }),
+        )
+    })?;
+    let _worker_id = state.current_worker_identity().ok_or_else(|| {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(StatusResponse {
+                success: false,
+                status_message: "Worker is not registered with Nodepool".into(),
+            }),
+        )
+    })?;
+
+    let coordinator = &state.executor.benchmark;
+    let report = coordinator.snapshot();
+    // Derive the suite scores server-side from the raw samples so the UI
+    // never re-implements the frozen formula. An unmeasured (not-run / stale /
+    // failed) component yields `None`, not a fabricated zero.
+    let cpu_score = report.cpu.score(false).ok().flatten();
+    let gpu_scores = report
+        .gpus
+        .iter()
+        .map(|gpu| gpu.measurement.score(true).ok().flatten())
+        .collect();
+    Ok(Json(BenchmarkStatusResponse {
+        success: true,
+        busy: coordinator.busy(),
+        threads: coordinator.threads(),
+        cpu_score,
+        gpu_scores,
+        report,
+    }))
+}
+
+/// Trigger an authenticated benchmark rerun. Triggering a CPU/GPU workload is a
+/// privileged local action, so beyond the bearer + identity gate the request
+/// is verified against Nodepool before any work starts: the token must be one
+/// Nodepool issued, and the worker must belong to the account that presented
+/// it. A bare bearer string or a permissive CORS origin is not enough.
+async fn benchmark_rerun(
+    State(state): State<ControlApiState>,
+    headers: axum::http::HeaderMap,
+    Json(body): Json<BenchmarkRerunBody>,
+) -> (StatusCode, Json<BenchmarkRerunResponse>) {
+    let token = match bearer_token(&headers) {
+        Some(token) => token,
+        None => {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(BenchmarkRerunResponse {
+                    success: false,
+                    message: Some("Bearer token is required".into()),
+                    started: false,
+                }),
+            )
+        }
+    };
+    let worker_id = match state.current_worker_identity() {
+        Some(worker_id) => worker_id,
+        None => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(BenchmarkRerunResponse {
+                    success: false,
+                    message: Some("Worker is not registered with Nodepool".into()),
+                    started: false,
+                }),
+            )
+        }
+    };
+
+    // Validate the selector before spending a Nodepool round trip on it: a
+    // malformed component is a client error and should fail fast, regardless of
+    // whether Nodepool is reachable.
+    let component = body
+        .component
+        .map(|value| value.trim().to_ascii_lowercase())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "all".to_string());
+    if !matches!(component.as_str(), "all" | "cpu" | "gpu") {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(BenchmarkRerunResponse {
+                success: false,
+                message: Some("component must be one of: all, cpu, gpu".into()),
+                started: false,
+            }),
+        );
+    }
+
+    match nodepool_client::verify_worker_ownership(&state.nodepool_addr(), &token, &worker_id).await
+    {
+        nodepool_client::OwnershipCheck::Owned => {}
+        nodepool_client::OwnershipCheck::Unauthorized => {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(BenchmarkRerunResponse {
+                    success: false,
+                    message: Some("Bearer token was rejected by Nodepool".into()),
+                    started: false,
+                }),
+            )
+        }
+        nodepool_client::OwnershipCheck::NotOwned => {
+            return (
+                StatusCode::FORBIDDEN,
+                Json(BenchmarkRerunResponse {
+                    success: false,
+                    message: Some("Worker is not owned by the authenticated account".into()),
+                    started: false,
+                }),
+            )
+        }
+        nodepool_client::OwnershipCheck::Unavailable => {
+            return (
+                StatusCode::BAD_GATEWAY,
+                Json(BenchmarkRerunResponse {
+                    success: false,
+                    message: Some("Nodepool is unavailable; rerun deferred".into()),
+                    started: false,
+                }),
+            )
+        }
+    }
+
+    match state.executor.benchmark.start(&component) {
+        Ok(started) => (
+            StatusCode::ACCEPTED,
+            Json(BenchmarkRerunResponse {
+                success: true,
+                // A false `started` means a run is already in flight; the
+                // request was coalesced rather than rejected.
+                message: (!started)
+                    .then_some("Benchmark already running; request coalesced".into()),
+                started,
+            }),
+        ),
+        Err(error) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(BenchmarkRerunResponse {
+                success: false,
+                message: Some(format!("Benchmark rerun failed to start: {error}")),
+                started: false,
+            }),
+        ),
+    }
 }
 
 fn worker_dashboard_host(sample: &ResourceSample) -> WorkerDashboardHost {
@@ -1617,9 +1814,181 @@ mod tests {
         assert_eq!(profile.gpu_memory_gb, 24);
         assert_eq!(profile.cpu_score, 1200);
         assert_eq!(profile.gpu_score, 2400);
+        assert_eq!(profile.gpu_count, 1);
         assert_eq!(profile.gpu_name, "RTX 4090");
         assert_eq!(profile.storage_total_gb, 2000);
         assert_eq!(profile.storage_available_gb, 1500);
+    }
+
+    #[test]
+    fn worker_profile_carries_inventory_gpu_count_independent_of_score() {
+        // A discrete GPU that is present but not yet scored must still report
+        // a card count of one; the count comes from the inventory, not from a
+        // nonzero score, so this case is the one the old heuristic got wrong.
+        let spec = ResourceSpec {
+            cpu_cores: 8,
+            memory_mb: 16 * 1024,
+            gpu_count: 1,
+            gpu_name: String::new(),
+            vram_mb: 0,
+            cpu_score: 400,
+            gpu_score: 0,
+            storage_total_gb: 256,
+            storage_available_gb: 128,
+        };
+        let profile = super::WorkerProfile::from_resource_spec(
+            "worker-1".into(),
+            "127.0.0.1:50053".into(),
+            "local".into(),
+            spec,
+        );
+        assert_eq!(profile.gpu_count, 1);
+        let registered = profile.to_resource_spec();
+        assert_eq!(registered.gpu_count, 1);
+
+        // And a machine with no GPU reports zero even when a name or score is
+        // carried for another reason — no card is implied by reported fields.
+        let no_gpu = ResourceSpec {
+            cpu_cores: 8,
+            memory_mb: 16 * 1024,
+            gpu_count: 0,
+            gpu_name: "NVIDIA RTX 4090".into(),
+            vram_mb: 24 * 1024,
+            cpu_score: 400,
+            gpu_score: 2400,
+            storage_total_gb: 256,
+            storage_available_gb: 128,
+        };
+        let profile = super::WorkerProfile::from_resource_spec(
+            "worker-2".into(),
+            "127.0.0.1:50053".into(),
+            "local".into(),
+            no_gpu,
+        );
+        assert_eq!(profile.to_resource_spec().gpu_count, 0);
+    }
+
+    #[tokio::test]
+    async fn benchmark_status_requires_bearer_and_registered_identity() {
+        let app = super::router_with_allowed_origins(sample_state(), &[]);
+        let missing_bearer = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/benchmark")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(missing_bearer.status(), StatusCode::UNAUTHORIZED);
+
+        let mut state = sample_state();
+        state.worker_identity = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let app = super::router_with_allowed_origins(state, &[]);
+        let unregistered = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/benchmark")
+                    .header(axum::http::header::AUTHORIZATION, "Bearer account-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(unregistered.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[tokio::test]
+    async fn benchmark_status_returns_the_cached_report_shape() {
+        let app = super::router_with_allowed_origins(sample_state(), &[]);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/benchmark")
+                    .header(axum::http::header::AUTHORIZATION, "Bearer account-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let json: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["success"], true);
+        assert!(json["busy"].is_boolean());
+        assert!(json["threads"].is_number());
+        // A freshly-started coordinator reports a not-yet-run measurement rather
+        // than inventing a zero score: the report is present, the derived score
+        // fields are absent, and there are no GPUs to score.
+        let cpu = &json["report"]["cpu"];
+        assert_eq!(cpu["state"], "not-run");
+        assert!(cpu.get("score").is_none() || cpu["score"].is_null());
+        assert!(json.get("cpu_score").is_none());
+        assert_eq!(json["gpu_scores"], Value::Array(vec![]));
+    }
+
+    #[tokio::test]
+    async fn benchmark_rerun_requires_bearer_and_defers_when_nodepool_is_unreachable() {
+        // sample_state points the nodepool at 127.0.0.1:50051 with nothing
+        // listening, so the ownership gate fails closed and the rerun is
+        // deferred rather than started — a bare bearer token is not enough.
+        let app = super::router_with_allowed_origins(sample_state(), &[]);
+        let missing_bearer = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/benchmark/rerun")
+                    .header(axum::http::header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"component":"cpu"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(missing_bearer.status(), StatusCode::UNAUTHORIZED);
+
+        let deferred = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/benchmark/rerun")
+                    .header(axum::http::header::AUTHORIZATION, "Bearer account-token")
+                    .header(axum::http::header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"component":"cpu"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(deferred.status(), StatusCode::BAD_GATEWAY);
+        let body = to_bytes(deferred.into_body(), usize::MAX).await.unwrap();
+        let json: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["success"], false);
+        assert_eq!(json["started"], false);
+    }
+
+    #[tokio::test]
+    async fn benchmark_rerun_rejects_an_unknown_component_before_touching_nodepool() {
+        // The selector is validated before the ownership round trip, so an
+        // unknown component is a bad request even when Nodepool is unreachable.
+        let app = super::router_with_allowed_origins(sample_state(), &[]);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/benchmark/rerun")
+                    .header(axum::http::header::AUTHORIZATION, "Bearer account-token")
+                    .header(axum::http::header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"component":"disk"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let json: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["success"], false);
+        assert_eq!(json["started"], false);
     }
 
     #[test]

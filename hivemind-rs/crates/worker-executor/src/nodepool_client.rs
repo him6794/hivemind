@@ -331,6 +331,66 @@ pub async fn get_provider_worker_dashboard_once(
     Ok((assignments, earnings))
 }
 
+/// Verify that the Nodepool token is valid and that the worker belongs to the
+/// account it was issued to. This is the same ownership gate the provider
+/// dashboard uses, reduced to a single RPC so local control actions (for
+/// example a benchmark rerun) can be authorised without fetching the whole
+/// dashboard payload.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OwnershipCheck {
+    Owned,
+    Unauthorized,
+    NotOwned,
+    Unavailable,
+}
+
+pub async fn verify_worker_ownership(
+    endpoint: &str,
+    token: &str,
+    worker_id: &str,
+) -> OwnershipCheck {
+    let endpoint = match Endpoint::from_shared(nodepool_endpoint(endpoint)) {
+        Ok(endpoint) => endpoint,
+        Err(_) => return OwnershipCheck::Unavailable,
+    };
+    let channel = match tokio::time::timeout(
+        Duration::from_secs(10),
+        endpoint.connect_timeout(Duration::from_secs(5)).connect(),
+    )
+    .await
+    {
+        Ok(Ok(channel)) => channel,
+        _ => return OwnershipCheck::Unavailable,
+    };
+    let mut client = MasterNodeServiceClient::new(channel);
+    let result = tokio::time::timeout(
+        Duration::from_secs(10),
+        client.get_provider_worker_assignments(
+            hivemind_proto::GetProviderWorkerAssignmentsRequest {
+                token: token.to_string(),
+                worker_id: worker_id.to_string(),
+            },
+        ),
+    )
+    .await;
+    match result {
+        Ok(Ok(response)) => {
+            let inner = response.into_inner();
+            if inner.success && inner.worker_id == worker_id {
+                OwnershipCheck::Owned
+            } else {
+                OwnershipCheck::NotOwned
+            }
+        }
+        Ok(Err(status)) => match status.code() {
+            tonic::Code::Unauthenticated => OwnershipCheck::Unauthorized,
+            tonic::Code::PermissionDenied => OwnershipCheck::NotOwned,
+            _ => OwnershipCheck::Unavailable,
+        },
+        Err(_) => OwnershipCheck::Unavailable,
+    }
+}
+
 pub async fn resolve_nodepool_token(
     nodepool_addr: &str,
     worker_id: &str,
