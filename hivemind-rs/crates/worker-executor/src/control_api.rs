@@ -28,6 +28,7 @@ pub struct WorkerProfile {
     pub cpu_score: i32,
     pub gpu_score: i32,
     pub gpu_memory_gb: i64,
+    pub gpu_count: i32,
     pub storage_total_gb: i64,
     pub storage_available_gb: i64,
     pub gpu_name: String,
@@ -49,6 +50,7 @@ impl WorkerProfile {
             cpu_score: spec.cpu_score,
             gpu_score: spec.gpu_score,
             gpu_memory_gb: spec.vram_mb / 1024,
+            gpu_count: spec.gpu_count,
             storage_total_gb: spec.storage_total_gb,
             storage_available_gb: spec.storage_available_gb,
             gpu_name: spec.gpu_name,
@@ -59,12 +61,10 @@ impl WorkerProfile {
         ResourceSpec {
             cpu_cores: self.cpu_cores,
             memory_mb: self.memory_gb * 1024,
-            gpu_count: if self.gpu_score > 0 || self.gpu_memory_gb > 0 || !self.gpu_name.is_empty()
-            {
-                1
-            } else {
-                0
-            },
+            // The count comes from the local GPU inventory, not from whether a
+            // score, VRAM figure, or name was reported: a present-but-unscored
+            // GPU still counts, and a reported score never implies a card.
+            gpu_count: self.gpu_count,
             gpu_name: self.gpu_name.clone(),
             vram_mb: self.gpu_memory_gb * 1024,
             cpu_score: self.cpu_score,
@@ -1178,6 +1178,11 @@ async fn register_worker(
         cpu_score: body.cpu_score,
         gpu_score: body.gpu_score.unwrap_or(0),
         gpu_memory_gb: body.gpu_memory_gb.unwrap_or(0),
+        // The card count cannot come from the registration body: the UI reports
+        // a score and a name, but only the local OS enumeration knows how many
+        // discrete GPUs are present. Reuse the startup inventory reading rather
+        // than re-probing hardware inside this handler.
+        gpu_count: state.profile.gpu_count,
         storage_total_gb: storage_total,
         storage_available_gb: storage_available,
         gpu_name: body
@@ -1365,6 +1370,7 @@ mod tests {
             cpu_score: 1,
             gpu_score: 0,
             gpu_memory_gb: 0,
+            gpu_count: 0,
             storage_total_gb: 1,
             storage_available_gb: 1,
             gpu_name: String::new(),

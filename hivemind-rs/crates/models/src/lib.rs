@@ -388,21 +388,6 @@ pub struct WorkerNode {
 }
 
 impl WorkerNode {
-    /// Derive a ResourceSpec from this worker node for scheduling
-    pub fn to_resource_spec(&self) -> ResourceSpec {
-        ResourceSpec {
-            cpu_cores: self.cpu_cores,
-            memory_mb: self.memory_gb as i64 * 1024,
-            gpu_count: if self.gpu_score > 0 { 1 } else { 0 },
-            gpu_name: self.gpu_name.clone().unwrap_or_default(),
-            vram_mb: self.gpu_memory_gb as i64 * 1024,
-            cpu_score: self.cpu_score,
-            gpu_score: self.gpu_score,
-            storage_total_gb: self.storage_total_gb,
-            storage_available_gb: self.storage_available_gb,
-        }
-    }
-
     pub fn to_resource_usage(&self) -> ResourceUsage {
         ResourceUsage {
             cpu_percent: self.cpu_usage,
@@ -523,23 +508,6 @@ pub struct Task {
     pub created_at: DateTime<Utc>,
     pub last_update: DateTime<Utc>,
     pub completed_at: Option<DateTime<Utc>>,
-}
-
-impl Task {
-    /// Derive required ResourceSpec from task requirements
-    pub fn to_resource_requirements(&self) -> ResourceSpec {
-        ResourceSpec {
-            cpu_cores: 1, // minimum
-            memory_mb: self.req_memory_gb as i64 * 1024,
-            gpu_count: if self.req_gpu_score > 0 { 1 } else { 0 },
-            gpu_name: String::new(),
-            vram_mb: self.req_gpu_memory_gb as i64 * 1024,
-            cpu_score: self.req_cpu_score,
-            gpu_score: self.req_gpu_score,
-            storage_total_gb: self.req_storage_gb,
-            storage_available_gb: 0,
-        }
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
