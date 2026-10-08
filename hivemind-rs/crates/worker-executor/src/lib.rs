@@ -883,9 +883,13 @@ pub struct TaskResult {
     pub output: Option<String>,
     pub error: Option<String>,
     pub exit_code: i32,
-    pub cpu_time_ms: i64,
-    pub wall_time_ms: i64,
-    pub peak_memory_mb: i64,
+    /// Measured task CPU time. Managed DSL does not yet measure this, so it
+    /// stays `None` rather than reporting a fabricated zero.
+    pub cpu_time_ms: Option<i64>,
+    pub wall_time_ms: Option<i64>,
+    /// Measured task peak memory. Managed DSL does not yet measure this, so it
+    /// stays `None` rather than substituting whole-worker RSS or a zero.
+    pub peak_memory_mb: Option<i64>,
     pub managed_executed_ops: i64,
     pub managed_output_bytes: i64,
     pub managed_receipt_json: Option<String>,

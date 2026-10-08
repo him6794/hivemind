@@ -208,7 +208,7 @@ fn managed_receipt_json(
 
 fn failed_managed_task_result(
     task: &Task,
-    elapsed_ms: i64,
+    start: Instant,
     error_code: &str,
     error_message: String,
     partial_receipt: Option<&ExecutionReceipt>,
@@ -235,9 +235,9 @@ fn failed_managed_task_result(
         output: None,
         error: Some(error_message),
         exit_code: 1,
-        cpu_time_ms: 0,
-        wall_time_ms: elapsed_ms,
-        peak_memory_mb: 0,
+        cpu_time_ms: None,
+        wall_time_ms: Some(start.elapsed().as_millis() as i64),
+        peak_memory_mb: None,
         managed_executed_ops: usage_units,
         managed_output_bytes: output_bytes,
         managed_receipt_json: Some(receipt_json),
@@ -248,7 +248,7 @@ fn failed_managed_task_result(
 
 fn execute_managed_function_task(
     task: &Task,
-    elapsed_ms: i64,
+    start: Instant,
     cancelled: &AtomicBool,
 ) -> Result<super::TaskResult> {
     let runtime = MANAGED_DSL_V1_RUNTIME_VERSION;
@@ -275,7 +275,7 @@ fn execute_managed_function_task(
                 };
                 return failed_managed_task_result(
                     task,
-                    elapsed_ms,
+                    start,
                     error.code(),
                     error_message,
                     error.partial_receipt(),
@@ -290,7 +290,7 @@ fn execute_managed_function_task(
                 let error_message = error.to_string();
                 return failed_managed_task_result(
                     task,
-                    elapsed_ms,
+                    start,
                     error.code(),
                     error_message,
                     Some(&execution.receipt),
@@ -321,9 +321,9 @@ fn execute_managed_function_task(
         output: Some(output),
         error: None,
         exit_code: 0,
-        cpu_time_ms: 0,
-        wall_time_ms: elapsed_ms,
-        peak_memory_mb: 0,
+        cpu_time_ms: None,
+        wall_time_ms: Some(start.elapsed().as_millis() as i64),
+        peak_memory_mb: None,
         managed_executed_ops: checked_managed_i64(execution.receipt.usage_units, "usage units")?,
         managed_output_bytes: output_bytes,
         managed_receipt_json: Some(receipt),
@@ -334,7 +334,7 @@ fn execute_managed_function_task(
 
 fn execute_managed_dsl_task(
     task: &Task,
-    elapsed_ms: i64,
+    start: Instant,
     cancelled: &AtomicBool,
     registry: &ManagedDslBackendRegistry,
 ) -> Result<super::TaskResult> {
@@ -386,7 +386,7 @@ fn execute_managed_dsl_task(
                 };
                 return failed_managed_task_result(
                     task,
-                    elapsed_ms,
+                    start,
                     error.code(),
                     error_message,
                     error.partial_receipt(),
@@ -406,7 +406,7 @@ fn execute_managed_dsl_task(
                 let error_message = error.to_string();
                 return failed_managed_task_result(
                     task,
-                    elapsed_ms,
+                    start,
                     error.code(),
                     error_message,
                     Some(&execution.receipt),
@@ -446,9 +446,9 @@ fn execute_managed_dsl_task(
         output: Some(output),
         error: None,
         exit_code: 0,
-        cpu_time_ms: 0,
-        wall_time_ms: elapsed_ms,
-        peak_memory_mb: 0,
+        cpu_time_ms: None,
+        wall_time_ms: Some(start.elapsed().as_millis() as i64),
+        peak_memory_mb: None,
         managed_executed_ops: checked_managed_i64(execution.receipt.usage_units, "usage units")?,
         managed_output_bytes: output_bytes,
         managed_receipt_json: Some(receipt),
@@ -644,12 +644,7 @@ pub(crate) async fn run_task_with_cancel_and_backends_and_trusted_registration_a
         let cancelled = Arc::new(AtomicBool::new(false));
         let execution_cancelled = cancelled.clone();
         let mut execution = tokio::task::spawn_blocking(move || {
-            execute_managed_dsl_task(
-                &task,
-                start.elapsed().as_millis() as i64,
-                &execution_cancelled,
-                &registry,
-            )
+            execute_managed_dsl_task(&task, start, &execution_cancelled, &registry)
         });
         return tokio::select! {
             result = &mut execution => result.map_err(anyhow::Error::from)?,
@@ -665,11 +660,7 @@ pub(crate) async fn run_task_with_cancel_and_backends_and_trusted_registration_a
         let cancelled = Arc::new(AtomicBool::new(false));
         let execution_cancelled = cancelled.clone();
         let mut execution = tokio::task::spawn_blocking(move || {
-            execute_managed_function_task(
-                &task,
-                start.elapsed().as_millis() as i64,
-                &execution_cancelled,
-            )
+            execute_managed_function_task(&task, start, &execution_cancelled)
         });
         return tokio::select! {
             result = &mut execution => result.map_err(anyhow::Error::from)?,
@@ -1219,9 +1210,11 @@ fn typed_managed_gpu_task_result(
                 .unwrap_or_else(|| "backend_unavailable".into())
         }),
         exit_code: typed.exit_code.unwrap_or(1),
-        cpu_time_ms: 0,
-        wall_time_ms: typed.usage.wall_time_ms.min(i64::MAX as u64) as i64,
-        peak_memory_mb: (typed.usage.gpu_memory_bytes / (1024 * 1024)).min(i64::MAX as u64) as i64,
+        cpu_time_ms: None,
+        wall_time_ms: Some(typed.usage.wall_time_ms.min(i64::MAX as u64) as i64),
+        peak_memory_mb: Some(
+            (typed.usage.gpu_memory_bytes / (1024 * 1024)).min(i64::MAX as u64) as i64,
+        ),
         managed_executed_ops: typed.usage.executed_operations.min(i64::MAX as u64) as i64,
         managed_output_bytes: typed.usage.output_bytes.min(i64::MAX as u64) as i64,
         managed_receipt_json: None,
@@ -1237,9 +1230,9 @@ fn failed_managed_gpu_task(task: &Task, error: String) -> super::TaskResult {
         output: None,
         error: Some(error),
         exit_code: 1,
-        cpu_time_ms: 0,
-        wall_time_ms: 0,
-        peak_memory_mb: 0,
+        cpu_time_ms: None,
+        wall_time_ms: None,
+        peak_memory_mb: None,
         managed_executed_ops: 0,
         managed_output_bytes: 0,
         managed_receipt_json: None,
@@ -1435,9 +1428,11 @@ fn typed_task_result(task: &Task, typed: GeneralComputeResult) -> Result<super::
                 .unwrap_or_else(|| "backend_unavailable".into())
         }),
         exit_code: typed.exit_code.unwrap_or(1),
-        cpu_time_ms: typed.usage.cpu_time_ms.min(i64::MAX as u64) as i64,
-        wall_time_ms: typed.usage.wall_time_ms.min(i64::MAX as u64) as i64,
-        peak_memory_mb: (typed.usage.peak_memory_bytes / (1024 * 1024)).min(i64::MAX as u64) as i64,
+        cpu_time_ms: Some(typed.usage.cpu_time_ms.min(i64::MAX as u64) as i64),
+        wall_time_ms: Some(typed.usage.wall_time_ms.min(i64::MAX as u64) as i64),
+        peak_memory_mb: Some(
+            (typed.usage.peak_memory_bytes / (1024 * 1024)).min(i64::MAX as u64) as i64,
+        ),
         managed_executed_ops: 0,
         managed_output_bytes: typed.usage.output_bytes.min(i64::MAX as u64) as i64,
         managed_receipt_json: None,
@@ -2262,8 +2257,9 @@ mod tests {
         ])
         .unwrap();
 
-        let result = execute_managed_dsl_task(&task, 0, &AtomicBool::new(false), &registry)
-            .expect("closed DSL execution should return a task result");
+        let result =
+            execute_managed_dsl_task(&task, Instant::now(), &AtomicBool::new(false), &registry)
+                .expect("closed DSL execution should return a task result");
 
         assert!(result.success);
         assert_eq!(result.output.as_deref(), Some("6"));
@@ -2285,8 +2281,9 @@ mod tests {
         task.managed_dsl_semantics_manifest_sha256 =
             Some(general_compute_runtime::MANAGED_DSL_SEMANTICS_MANIFEST_SHA256.into());
         let registry = ManagedDslBackendRegistry::new(Vec::new()).unwrap();
-        let error = execute_managed_dsl_task(&task, 0, &AtomicBool::new(false), &registry)
-            .expect_err("closed DSL must fail closed without operator configuration");
+        let error =
+            execute_managed_dsl_task(&task, Instant::now(), &AtomicBool::new(false), &registry)
+                .expect_err("closed DSL must fail closed without operator configuration");
         assert!(error
             .to_string()
             .contains("production_sandboxed_dsl backend is not operator-approved"));

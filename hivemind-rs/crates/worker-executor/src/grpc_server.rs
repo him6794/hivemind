@@ -13,8 +13,8 @@ use hivemind_proto::{
     TaskOutputResponse, TaskOutputUploadRequest, TaskOutputUploadResponse, TaskResultUploadRequest,
     TaskResultUploadResponse, TaskUsageRequest, TaskUsageResponse,
     GENERAL_COMPUTE_CHUNK_RPC_MESSAGE_MAX_BYTES, GENERAL_COMPUTE_RESULT_MAX_BYTES,
-    LEGACY_MANAGED_RECEIPT_MAX_BYTES, MANAGED_GPU_RESULT_MAX_BYTES, WORKER_RPC_MESSAGE_MAX_BYTES,
-    WORKER_STATUS_MESSAGE_MAX_BYTES,
+    LEGACY_MANAGED_RECEIPT_MAX_BYTES, MANAGED_GPU_RESULT_MAX_BYTES, OBSERVATION_PROTOCOL_VERSION,
+    WORKER_RPC_MESSAGE_MAX_BYTES, WORKER_STATUS_MESSAGE_MAX_BYTES,
 };
 use prost::Message;
 use std::collections::HashMap;
@@ -1926,6 +1926,29 @@ fn execute_response_from_result(
         .unwrap_or_else(|status| failed_execute_response(status.message(), identity))
 }
 
+/// Build the presence-aware execution observation from the metrics a task
+/// actually measured. Managed DSL leaves CPU time and peak memory unmeasured,
+/// so those stay absent (JSON null) rather than reporting a fabricated zero;
+/// a genuinely measured value, including zero, is preserved.
+fn execution_observation_from_metrics(
+    cpu_time_ms: Option<i64>,
+    wall_time_ms: Option<i64>,
+    peak_memory_mb: Option<i64>,
+) -> Option<hivemind_proto::ExecutionObservation> {
+    let observation = hivemind_models::observations::ExecutionObservation {
+        version: hivemind_models::observations::OBSERVATION_VERSION,
+        cpu_time_ms,
+        wall_time_ms,
+        peak_memory_mb,
+        ..Default::default()
+    };
+    let payload = serde_json::to_string(&observation).ok()?;
+    Some(hivemind_proto::ExecutionObservation {
+        protocol_version: OBSERVATION_PROTOCOL_VERSION,
+        observation_json: payload,
+    })
+}
+
 #[allow(clippy::result_large_err)]
 fn execute_response_from_result_for_runtime(
     result: TaskResult,
@@ -1936,6 +1959,9 @@ fn execute_response_from_result_for_runtime(
         success,
         output,
         error,
+        cpu_time_ms,
+        wall_time_ms,
+        peak_memory_mb,
         managed_executed_ops,
         managed_output_bytes,
         managed_receipt_json,
@@ -1970,7 +1996,11 @@ fn execute_response_from_result_for_runtime(
         attempt_id: identity.attempt_id.clone(),
         idempotency_key: identity.idempotency_key.clone(),
         request_digest: identity.request_digest.clone(),
-        execution_observation: None,
+        execution_observation: execution_observation_from_metrics(
+            cpu_time_ms,
+            wall_time_ms,
+            peak_memory_mb,
+        ),
     };
     if managed_gpu {
         let Some(payload) = (!response.managed_gpu_result_json.is_empty())
@@ -2283,6 +2313,30 @@ mod tests {
     const ASSIGNED_OWNER: &str = "task-owner";
     const OTHER_OWNER: &str = "other-owner";
     const TEST_WORKER_ID: &str = "worker-1";
+
+    #[test]
+    fn execution_observation_preserves_presence_of_measured_metrics() {
+        let envelope = execution_observation_from_metrics(None, Some(123), None)
+            .expect("a measured wall time must produce an observation envelope");
+        assert_eq!(envelope.protocol_version, OBSERVATION_PROTOCOL_VERSION);
+
+        let payload: serde_json::Value =
+            serde_json::from_str(&envelope.observation_json).expect("observation must be JSON");
+        assert_eq!(payload["wall_time_ms"], 123);
+        assert_eq!(payload["cpu_time_ms"], serde_json::Value::Null);
+        assert_eq!(payload["peak_memory_mb"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn execution_observation_keeps_an_explicit_zero_measured() {
+        let envelope = execution_observation_from_metrics(Some(0), Some(0), Some(0))
+            .expect("an all-zero measurement still produces an observation envelope");
+        let payload: serde_json::Value =
+            serde_json::from_str(&envelope.observation_json).expect("observation must be JSON");
+        assert_eq!(payload["cpu_time_ms"], 0);
+        assert_eq!(payload["wall_time_ms"], 0);
+        assert_eq!(payload["peak_memory_mb"], 0);
+    }
 
     fn test_key_pair() -> &'static (String, String) {
         static KEY_PAIR: OnceLock<(String, String)> = OnceLock::new();
@@ -3397,9 +3451,9 @@ mod tests {
                         output: None,
                         error: None,
                         exit_code: 0,
-                        cpu_time_ms: 0,
-                        wall_time_ms: 1,
-                        peak_memory_mb: 0,
+                        cpu_time_ms: None,
+                        wall_time_ms: Some(1),
+                        peak_memory_mb: None,
                         managed_executed_ops: 0,
                         managed_output_bytes: 0,
                         managed_receipt_json: None,
@@ -4607,9 +4661,9 @@ mod tests {
             output: Some("42".into()),
             error: None,
             exit_code: 0,
-            cpu_time_ms: 0,
-            wall_time_ms: 0,
-            peak_memory_mb: 0,
+            cpu_time_ms: None,
+            wall_time_ms: Some(0),
+            peak_memory_mb: None,
             managed_executed_ops: 17,
             managed_output_bytes: 2,
             managed_receipt_json: Some("{}".into()),
@@ -4669,9 +4723,9 @@ mod tests {
                         output: None,
                         error: Some("Task execution stopped".into()),
                         exit_code: 1,
-                        cpu_time_ms: 0,
-                        wall_time_ms: 0,
-                        peak_memory_mb: 0,
+                        cpu_time_ms: None,
+                        wall_time_ms: None,
+                        peak_memory_mb: None,
                         managed_executed_ops: 0,
                         managed_output_bytes: 0,
                         managed_receipt_json: None,
