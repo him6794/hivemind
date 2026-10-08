@@ -13,7 +13,8 @@ use hivemind_proto::{
     worker_node_service_server::WorkerNodeService, worker_session_client_frame,
     worker_session_server_frame, worker_session_service_client::WorkerSessionServiceClient,
     ExecuteTaskRequest, ExecuteTaskResponse, GetProviderEarningsRequest,
-    GetProviderEarningsResponse, GetProviderWorkerAssignmentsResponse, LoginRequest,
+    GetProviderEarningsResponse, GetProviderWorkerAssignmentsResponse,
+    HardwareBenchmarkReport as ProtoHardwareBenchmarkReport, LoginRequest,
     RegisterWorkerNodeRequest, ResourceSpec as ProtoResourceSpec,
     ResourceUsage as ProtoResourceUsage, RunningStatusRequest, TaskOutputUploadRequest,
     TaskResultUploadRequest, TaskUsageRequest, ValidateGeneralComputeTransferLeaseRequest,
@@ -436,6 +437,22 @@ pub fn capability_report_to_proto(
     })
 }
 
+/// Serializes the worker's measured hardware benchmark report into the
+/// Nodepool-bound envelope. The report (including its per-component states) is
+/// always sent: Nodepool validates it from the raw samples and stores it only
+/// when it passes, so an all-not-run report is a legitimate "nothing measured
+/// yet" claim rather than a fabricated zero.
+pub fn benchmark_report_to_proto(
+    report: &hivemind_models::observations::HardwareBenchmarkReport,
+) -> Option<ProtoHardwareBenchmarkReport> {
+    let payload = serde_json::to_string(report).ok()?;
+    Some(ProtoHardwareBenchmarkReport {
+        protocol_version: hivemind_proto::OBSERVATION_PROTOCOL_VERSION,
+        report_json: payload,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
 pub fn build_register_request_with_capability_report(
     worker_id: &str,
     username: &str,
@@ -444,6 +461,7 @@ pub fn build_register_request_with_capability_report(
     location: &str,
     token: &str,
     capability_report: Option<ProtoWorkerCapabilityReport>,
+    benchmark_report: Option<ProtoHardwareBenchmarkReport>,
 ) -> RegisterWorkerNodeRequest {
     RegisterWorkerNodeRequest {
         username: username.to_string(),
@@ -453,7 +471,7 @@ pub fn build_register_request_with_capability_report(
         location: location.to_string(),
         token: token.to_string(),
         capability_report,
-        benchmark_report: None,
+        benchmark_report,
         resource_observation: None,
     }
 }
@@ -465,6 +483,7 @@ pub fn build_register_request(
     resources: ResourceSpec,
     location: &str,
     token: &str,
+    benchmark_report: Option<ProtoHardwareBenchmarkReport>,
 ) -> RegisterWorkerNodeRequest {
     build_register_request_with_capability_report(
         worker_id,
@@ -474,6 +493,7 @@ pub fn build_register_request(
         location,
         token,
         None,
+        benchmark_report,
     )
 }
 
@@ -505,6 +525,7 @@ pub fn build_status_request(
     build_status_request_with_capability_report(worker_id, status, usage, token, None)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn register_once(
     endpoint: &str,
     worker_id: &str,
@@ -513,6 +534,7 @@ pub async fn register_once(
     resources: ResourceSpec,
     location: &str,
     token: &str,
+    benchmark_report: Option<ProtoHardwareBenchmarkReport>,
 ) -> anyhow::Result<()> {
     register_once_with_capability_report(
         endpoint,
@@ -523,6 +545,7 @@ pub async fn register_once(
         location,
         token,
         None,
+        benchmark_report,
     )
     .await
 }
@@ -537,6 +560,7 @@ pub async fn register_once_with_capability_report(
     location: &str,
     token: &str,
     capability_report: Option<ProtoWorkerCapabilityReport>,
+    benchmark_report: Option<ProtoHardwareBenchmarkReport>,
 ) -> anyhow::Result<()> {
     let channel = Endpoint::from_shared(nodepool_endpoint(endpoint))?
         .connect_timeout(Duration::from_secs(5))
@@ -553,6 +577,7 @@ pub async fn register_once_with_capability_report(
             location,
             token,
             capability_report,
+            benchmark_report,
         )),
     )
     .await
@@ -807,6 +832,8 @@ pub fn start_registration_loop(
                         .await
                         {
                             Ok(Ok(mut connected)) => {
+                                let benchmark_report =
+                                    benchmark_report_to_proto(&executor.benchmark.snapshot());
                                 let request = build_register_request_with_capability_report(
                                     &registration.worker_id,
                                     &registration.username,
@@ -815,6 +842,7 @@ pub fn start_registration_loop(
                                     &registration.location,
                                     &registration.token,
                                     Some(capability_report.clone()),
+                                    benchmark_report,
                                 );
                                 match tokio::time::timeout(
                                     Duration::from_secs(10),
@@ -1588,6 +1616,7 @@ mod tests {
             spec,
             "local",
             "token",
+            None,
         );
         let resources = request.resources.unwrap();
 
@@ -1598,6 +1627,7 @@ mod tests {
         assert_eq!(resources.cpu_cores, 8);
         assert_eq!(resources.memory_mb, 32768);
         assert_eq!(resources.vram_mb, 12288);
+        assert!(request.benchmark_report.is_none());
     }
 
     #[test]

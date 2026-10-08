@@ -227,6 +227,7 @@ async fn run_migrations_inner(pool: &PgPool) -> Result<()> {
             dynamic_admission_ready BOOLEAN NOT NULL DEFAULT false,
             dynamic_readiness_reason VARCHAR(255),
             dynamic_observed_at TIMESTAMPTZ,
+            benchmark_report_json TEXT,
             last_heartbeat TIMESTAMPTZ NOT NULL DEFAULT NOW(),
             registered_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
             updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
@@ -1563,6 +1564,9 @@ async fn run_migrations_inner(pool: &PgPool) -> Result<()> {
     )
     .execute(&mut *tx)
     .await?;
+    sqlx::query("ALTER TABLE worker_nodes ADD COLUMN IF NOT EXISTS benchmark_report_json TEXT;")
+        .execute(&mut *tx)
+        .await?;
     sqlx::query(
         "ALTER TABLE tasks ADD COLUMN IF NOT EXISTS req_storage_gb BIGINT NOT NULL DEFAULT 0;",
     )

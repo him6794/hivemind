@@ -365,6 +365,7 @@ mod tests {
             dynamic_admission_ready: false,
             dynamic_readiness_reason: None,
             dynamic_observed_at: None,
+            benchmark_report_json: None,
             last_heartbeat: chrono::Utc::now(),
             registered_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),

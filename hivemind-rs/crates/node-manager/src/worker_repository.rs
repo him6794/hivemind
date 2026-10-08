@@ -35,8 +35,9 @@ impl WorkerRepository {
                  dynamic_admission_ready = COALESCE($21, dynamic_admission_ready),
                  dynamic_readiness_reason = COALESCE($22, dynamic_readiness_reason),
                  dynamic_observed_at = COALESCE($23, dynamic_observed_at),
+                 benchmark_report_json = COALESCE($24, benchmark_report_json),
                  last_heartbeat = NOW(), updated_at = NOW()
-                 WHERE worker_id = $24 RETURNING *",
+                 WHERE worker_id = $25 RETURNING *",
             )
             .bind(&worker.username)
             .bind(&worker.ip)
@@ -61,6 +62,7 @@ impl WorkerRepository {
             .bind(dynamic_ready)
             .bind(&worker.dynamic_readiness_reason)
             .bind(worker.dynamic_observed_at)
+            .bind(&worker.benchmark_report_json)
             .bind(&worker.worker_id)
             .fetch_one(&self.pool)
             .await
@@ -74,9 +76,10 @@ impl WorkerRepository {
                 admission_mode, general_compute_capabilities_json,
                 managed_dsl_capabilities_json, dynamic_capabilities_json,
                 dynamic_capabilities_digest, dynamic_admission_ready,
-                dynamic_readiness_reason, dynamic_observed_at)
+                dynamic_readiness_reason, dynamic_observed_at,
+                benchmark_report_json)
                  VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,
-                         $17,$18,$19,$20,$21,$22,$23,$24) RETURNING *",
+                         $17,$18,$19,$20,$21,$22,$23,$24,$25) RETURNING *",
             )
             .bind(&worker.worker_id)
             .bind(&worker.username)
@@ -102,6 +105,7 @@ impl WorkerRepository {
             .bind(worker.dynamic_admission_ready)
             .bind(&worker.dynamic_readiness_reason)
             .bind(worker.dynamic_observed_at)
+            .bind(&worker.benchmark_report_json)
             .fetch_one(&self.pool)
             .await
             .map_err(Into::into)
@@ -159,8 +163,9 @@ impl WorkerRepository {
              dynamic_admission_ready = COALESCE($21, dynamic_admission_ready),
              dynamic_readiness_reason = $22,
              dynamic_observed_at = $23,
+             benchmark_report_json = COALESCE($24, benchmark_report_json),
              last_heartbeat = NOW(), updated_at = NOW()
-             WHERE worker_id = $24 AND (username = $25 OR $26)
+             WHERE worker_id = $25 AND (username = $26 OR $27)
              RETURNING *",
         )
         .bind(&worker.username)
@@ -186,6 +191,7 @@ impl WorkerRepository {
         .bind(dynamic_ready)
         .bind(&worker.dynamic_readiness_reason)
         .bind(worker.dynamic_observed_at)
+        .bind(&worker.benchmark_report_json)
         .bind(&worker.worker_id)
         .bind(owner)
         .bind(is_admin)
@@ -206,9 +212,10 @@ impl WorkerRepository {
              admission_mode, general_compute_capabilities_json,
              managed_dsl_capabilities_json, dynamic_capabilities_json,
              dynamic_capabilities_digest, dynamic_admission_ready,
-             dynamic_readiness_reason, dynamic_observed_at)
+             dynamic_readiness_reason, dynamic_observed_at,
+             benchmark_report_json)
              VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,
-                     $17,$18,$19,$20,$21,$22,$23,$24)
+                     $17,$18,$19,$20,$21,$22,$23,$24,$25)
              RETURNING *",
         )
         .bind(&worker.worker_id)
@@ -235,6 +242,7 @@ impl WorkerRepository {
         .bind(worker.dynamic_admission_ready)
         .bind(&worker.dynamic_readiness_reason)
         .bind(worker.dynamic_observed_at)
+        .bind(&worker.benchmark_report_json)
         .fetch_one(&self.pool)
         .await
         .map_err(Into::into)
@@ -445,6 +453,7 @@ mod tests {
             dynamic_admission_ready: false,
             dynamic_readiness_reason: None,
             dynamic_observed_at: None,
+            benchmark_report_json: None,
             last_heartbeat: chrono::Utc::now(),
             registered_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
@@ -694,6 +703,7 @@ mod tests {
             dynamic_admission_ready: false,
             dynamic_readiness_reason: None,
             dynamic_observed_at: None,
+            benchmark_report_json: None,
             last_heartbeat: chrono::Utc::now(),
             registered_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),

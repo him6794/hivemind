@@ -382,6 +382,10 @@ pub struct WorkerNode {
     pub dynamic_admission_ready: bool,
     pub dynamic_readiness_reason: Option<String>,
     pub dynamic_observed_at: Option<DateTime<Utc>>,
+    /// Last benchmark report Nodepool verified from raw samples (recomputed
+    /// score, validated suite/identity). A worker's claim is not stored until
+    /// it passes Nodepool validation; `None` means no verified report yet.
+    pub benchmark_report_json: Option<String>,
     pub last_heartbeat: DateTime<Utc>,
     pub registered_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,

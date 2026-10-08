@@ -13,6 +13,11 @@ pub struct WorkerRegistration {
     pub managed_dsl_capabilities_json: Option<String>,
     pub admission_mode: String,
     pub dynamic_capability_report: Option<WorkerCapabilityReport>,
+    /// Canonical JSON of the last hardware benchmark report Nodepool verified
+    /// from raw samples (scores recomputed, suite/identity validated). `None`
+    /// means the worker did not send a report this registration, so any
+    /// previously verified report is preserved.
+    pub benchmark_report_json: Option<String>,
 }
 
 pub fn dynamic_capability_observation(
@@ -141,6 +146,7 @@ impl NodeManagerService {
                 .as_ref()
                 .and_then(|observation| observation.3.clone()),
             dynamic_observed_at: dynamic_observation.as_ref().map(|_| chrono::Utc::now()),
+            benchmark_report_json: reg.benchmark_report_json.clone(),
             last_heartbeat: chrono::Utc::now(),
             registered_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),

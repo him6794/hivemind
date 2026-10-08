@@ -42,6 +42,7 @@ use hivemind_proto::{
     GetTaskResultResponse,
     GetWorkerTrustProfileRequest,
     GetWorkerTrustProfileResponse,
+    HardwareBenchmarkReport as ProtoHardwareBenchmarkReport,
     HeartbeatRequest,
     HeartbeatResponse,
     IssueEnrollmentCredentialRequest,
@@ -191,6 +192,27 @@ pub(crate) fn parse_worker_capability_report(
         return Err("worker capability list must use canonical JSON".into());
     }
     Ok(Some(model))
+}
+
+/// Verifies a worker's hardware benchmark claim from its raw samples and
+/// returns the canonical JSON to persist. Nodepool recomputes every score and
+/// re-checks suite/identity/correctness here; a report is stored only after it
+/// passes, so callers cannot supply a rating or a partial measurement.
+/// `None` means the worker sent no report this registration, which preserves
+/// any previously verified report (the upsert uses COALESCE).
+pub(crate) fn verify_worker_benchmark_report(
+    report: Option<ProtoHardwareBenchmarkReport>,
+) -> Result<Option<String>, String> {
+    let Some(report) = report else {
+        return Ok(None);
+    };
+    let payload = hivemind_proto::validate_hardware_benchmark_envelope(&report)
+        .map_err(|message| format!("invalid benchmark report envelope: {message}"))?;
+    let parsed = hivemind_models::observations::HardwareBenchmarkReport::parse(payload.as_bytes())
+        .map_err(|message| format!("invalid benchmark report: {message}"))?;
+    serde_json::to_string(&parsed)
+        .map(Some)
+        .map_err(|error| format!("invalid benchmark report: {error}"))
 }
 
 pub struct NodepoolState {
@@ -1218,6 +1240,17 @@ impl NodeManagerService for GrpcNodeManagerService {
         } else {
             None
         };
+        let benchmark_report_json = match verify_worker_benchmark_report(req.benchmark_report) {
+            Ok(json) => json,
+            Err(message) => {
+                return Ok(Response::new(StatusResponse {
+                    success: false,
+                    status_message: message,
+                    effective_cpu_threads: None,
+                    worker_policy_generation: 0,
+                }));
+            }
+        };
         let svc = NmSvc::new((*self.state.node_manager).clone());
         let (general_compute_capabilities_json, managed_dsl_capabilities_json) = if public_dynamic {
             (None, None)
@@ -1247,6 +1280,7 @@ impl NodeManagerService for GrpcNodeManagerService {
             managed_dsl_capabilities_json,
             admission_mode: self.state.node_manager.admission_mode().to_string(),
             dynamic_capability_report,
+            benchmark_report_json,
         };
         match svc
             .register_worker_for_owner(&reg, &claims.sub, admin)
@@ -4112,11 +4146,28 @@ fn worker_info_from_model(worker: WorkerNode) -> WorkerInfo {
         memory_usage: worker.memory_usage,
         gpu_usage: worker.gpu_usage,
         gpu_memory_usage: worker.gpu_memory_usage,
-        benchmark_report: None,
+        benchmark_report: stored_benchmark_report_envelope(worker.benchmark_report_json.as_deref()),
         resource_observation: None,
         effective_cpu_threads: None,
         worker_policy_generation: 0,
     }
+}
+
+/// Projects the Nodepool-verified benchmark report back onto the wire. The JSON
+/// is stored canonical (it passed `parse` at registration); re-validating here
+/// keeps a hand-edited or legacy row from leaking a stale/invalid claim.
+fn stored_benchmark_report_envelope(
+    report_json: Option<&str>,
+) -> Option<ProtoHardwareBenchmarkReport> {
+    let report_json = report_json?;
+    let parsed =
+        hivemind_models::observations::HardwareBenchmarkReport::parse(report_json.as_bytes())
+            .ok()?;
+    let payload = serde_json::to_string(&parsed).ok()?;
+    Some(ProtoHardwareBenchmarkReport {
+        protocol_version: hivemind_proto::OBSERVATION_PROTOCOL_VERSION,
+        report_json: payload,
+    })
 }
 
 fn provider_settings_from_worker(worker: &WorkerNode) -> ProviderWorkerSettings {
@@ -6932,6 +6983,290 @@ mod tests {
             .general_compute_capabilities_json
             .as_deref()
             .is_some_and(|json| json.contains("python-cpython-312")));
+    }
+
+    /// Builds a valid, Ready CPU benchmark report the way the worker runtime
+    /// produces it: a fixed case set with five calibrated batches each.
+    fn ready_cpu_benchmark_report() -> hivemind_models::observations::HardwareBenchmarkReport {
+        use hivemind_models::observations::{
+            BenchmarkBatch, BenchmarkCase, BenchmarkMeasurement, BenchmarkState,
+            HardwareBenchmarkReport,
+        };
+        let ready = |name: &str, threads: u32| BenchmarkCase {
+            name: name.into(),
+            dimension: 128,
+            threads,
+            batches: vec![
+                BenchmarkBatch {
+                    repetitions: 1,
+                    elapsed_ns: 4_194_304,
+                };
+                5
+            ],
+        };
+        let mut report = HardwareBenchmarkReport::empty("a".repeat(64), true);
+        report.cpu = BenchmarkMeasurement {
+            measurement_id: Some(uuid::Uuid::new_v4()),
+            state: BenchmarkState::Ready,
+            measured_at: Some(Utc::now()),
+            identity: "test CPU".into(),
+            threads: 2,
+            correctness_passed: true,
+            reason: None,
+            cases: vec![
+                ready("cpu-f32-single", 1),
+                ready("cpu-f64-single", 1),
+                ready("cpu-f32-allocated", 2),
+                ready("cpu-f64-allocated", 2),
+            ],
+        };
+        report
+    }
+
+    fn benchmark_envelope(
+        report: &hivemind_models::observations::HardwareBenchmarkReport,
+    ) -> hivemind_proto::HardwareBenchmarkReport {
+        let payload = serde_json::to_string(report).unwrap();
+        hivemind_proto::HardwareBenchmarkReport {
+            protocol_version: hivemind_proto::OBSERVATION_PROTOCOL_VERSION,
+            report_json: payload,
+        }
+    }
+
+    #[test]
+    fn verify_worker_benchmark_report_round_trips_a_valid_claim() {
+        let report = ready_cpu_benchmark_report();
+        let verified = verify_worker_benchmark_report(Some(benchmark_envelope(&report))).unwrap();
+        let stored = verified.expect("a valid report is stored");
+        let parsed: hivemind_models::observations::HardwareBenchmarkReport =
+            serde_json::from_str(&stored).unwrap();
+        // Nodepool recomputes the score from the raw samples, not from any
+        // caller-supplied rating.
+        assert_eq!(parsed.cpu.score(false), Ok(Some(200)));
+        assert_eq!(parsed.cpu.identity, "test CPU");
+    }
+
+    #[test]
+    fn verify_worker_benchmark_report_keeps_absence_distinct_from_absent() {
+        assert!(verify_worker_benchmark_report(None).unwrap().is_none());
+    }
+
+    #[test]
+    fn verify_worker_benchmark_report_rejects_mismatched_envelope_version() {
+        let report = ready_cpu_benchmark_report();
+        let mut envelope = benchmark_envelope(&report);
+        envelope.protocol_version = 2;
+        assert!(verify_worker_benchmark_report(Some(envelope)).is_err());
+    }
+
+    #[test]
+    fn verify_worker_benchmark_report_rejects_a_claim_that_fails_score_recomputation() {
+        let report = ready_cpu_benchmark_report();
+        // Corrupt one sample so recomputed throughput no longer matches a Ready
+        // measurement: zero elapsed time must fail, not saturate.
+        let mut stored = serde_json::to_string(&report).unwrap();
+        stored = stored.replace("4194304", "0");
+        let envelope = hivemind_proto::HardwareBenchmarkReport {
+            protocol_version: hivemind_proto::OBSERVATION_PROTOCOL_VERSION,
+            report_json: stored,
+        };
+        assert!(verify_worker_benchmark_report(Some(envelope)).is_err());
+    }
+
+    #[test]
+    fn worker_info_projects_the_stored_verified_benchmark() {
+        let report = ready_cpu_benchmark_report();
+        let stored = serde_json::to_string(&report).unwrap();
+        let mut worker = WorkerNode {
+            id: uuid::Uuid::new_v4(),
+            worker_id: "w".into(),
+            username: "u".into(),
+            ip: "1.2.3.4".into(),
+            virtual_ip: None,
+            hostname: None,
+            cpu_cores: 4,
+            memory_gb: 16,
+            cpu_score: 200,
+            gpu_score: 0,
+            gpu_memory_gb: 0,
+            gpu_name: None,
+            vram_mb: 0,
+            storage_total_gb: 500,
+            storage_available_gb: 250,
+            provider_enabled: true,
+            cpu_cores_limit: 0,
+            memory_gb_limit: 0,
+            gpu_memory_gb_limit: 0,
+            storage_gb_limit: 0,
+            min_cpt_per_hour: 0,
+            location: "local".into(),
+            status: hivemind_models::WorkerStatus::Active,
+            cpu_usage: 0.0,
+            memory_usage: 0.0,
+            gpu_usage: 0.0,
+            gpu_memory_usage: 0.0,
+            available_memory_gb: 16,
+            queue_capacity: 4,
+            general_compute_capabilities_json: None,
+            managed_dsl_capabilities_json: None,
+            admission_mode: hivemind_models::PRIVATE_STATIC_ADMISSION_MODE.into(),
+            dynamic_capabilities_json: None,
+            dynamic_capabilities_digest: None,
+            dynamic_admission_ready: false,
+            dynamic_readiness_reason: None,
+            dynamic_observed_at: None,
+            benchmark_report_json: Some(stored),
+            last_heartbeat: Utc::now(),
+            registered_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        let info = worker_info_from_model(worker.clone());
+        let envelope = info.benchmark_report.expect("stored report is projected");
+        let projected: hivemind_models::observations::HardwareBenchmarkReport =
+            serde_json::from_str(&envelope.report_json).unwrap();
+        assert_eq!(projected.cpu.score(false), Ok(Some(200)));
+
+        worker.benchmark_report_json = None;
+        assert!(worker_info_from_model(worker).benchmark_report.is_none());
+    }
+
+    #[tokio::test]
+    async fn register_worker_node_stores_verified_benchmark_and_preserves_it_on_reconnect() {
+        let lock = grpc_db_lock();
+        let _guard = lock.lock().await;
+        let (master_service, task_id, _other_token, owner) = match test_service().await {
+            Some(parts) => parts,
+            None => return,
+        };
+        let node_service = GrpcNodeManagerService::new(master_service.state.clone());
+        let worker_id = format!("grpc-benchmark-{task_id}");
+        let owner_token = token_for(&master_service.state.auth, &owner);
+        let report = ready_cpu_benchmark_report();
+
+        let register = |benchmark_report: Option<hivemind_proto::HardwareBenchmarkReport>| async {
+            node_service
+                .register_worker_node(Request::new(RegisterWorkerNodeRequest {
+                    capability_report: None,
+                    benchmark_report,
+                    resource_observation: None,
+                    username: owner.clone(),
+                    worker_id: worker_id.clone(),
+                    ip: "10.77.11.11:50053".into(),
+                    resources: Some(ProtoResourceSpec {
+                        cpu_cores: 4,
+                        memory_mb: 16 * 1024,
+                        gpu_count: 0,
+                        gpu_name: String::new(),
+                        vram_mb: 0,
+                        cpu_score: 200,
+                        gpu_score: 0,
+                        storage_total_gb: 500,
+                        storage_available_gb: 250,
+                        score_suite: None,
+                    }),
+                    location: "local".into(),
+                    token: owner_token.clone(),
+                }))
+                .await
+                .unwrap()
+                .into_inner()
+        };
+
+        let first = register(Some(benchmark_envelope(&report))).await;
+        assert!(first.success, "{}", first.status_message);
+        let stored = master_service
+            .state
+            .node_manager
+            .get_worker(&worker_id)
+            .await
+            .unwrap()
+            .expect("first registration persists");
+        let stored_json = stored
+            .benchmark_report_json
+            .as_deref()
+            .expect("report stored");
+        let parsed: hivemind_models::observations::HardwareBenchmarkReport =
+            serde_json::from_str(stored_json).unwrap();
+        assert_eq!(parsed.cpu.score(false), Ok(Some(200)));
+
+        // A reconnect that sends no report must preserve the verified one
+        // rather than clearing it.
+        let reconnect = register(None).await;
+        assert!(reconnect.success, "{}", reconnect.status_message);
+        let preserved = master_service
+            .state
+            .node_manager
+            .get_worker(&worker_id)
+            .await
+            .unwrap()
+            .expect("reconnect preserves the worker");
+        assert_eq!(
+            preserved.benchmark_report_json.as_deref(),
+            Some(stored_json),
+            "re-registration without a report must not clear a verified benchmark"
+        );
+
+        cleanup_report_worker(&master_service, &worker_id).await;
+        cleanup(&master_service.state.scheduler, &task_id, &owner).await;
+    }
+
+    #[tokio::test]
+    async fn register_worker_node_rejects_an_invalid_benchmark_report() {
+        let lock = grpc_db_lock();
+        let _guard = lock.lock().await;
+        let (master_service, task_id, _other_token, owner) = match test_service().await {
+            Some(parts) => parts,
+            None => return,
+        };
+        let node_service = GrpcNodeManagerService::new(master_service.state.clone());
+        let worker_id = format!("grpc-benchmark-bad-{task_id}");
+        let owner_token = token_for(&master_service.state.auth, &owner);
+        // Not a Ready measurement but claiming a score: an empty report has no
+        // valid score, so it must be rejected rather than stored as a rating.
+        let report = ready_cpu_benchmark_report();
+        let mut envelope = benchmark_envelope(&report);
+        envelope.protocol_version = 2;
+
+        let response = node_service
+            .register_worker_node(Request::new(RegisterWorkerNodeRequest {
+                capability_report: None,
+                benchmark_report: Some(envelope),
+                resource_observation: None,
+                username: owner.clone(),
+                worker_id: worker_id.clone(),
+                ip: "10.77.12.12:50053".into(),
+                resources: Some(ProtoResourceSpec {
+                    cpu_cores: 4,
+                    memory_mb: 16 * 1024,
+                    gpu_count: 0,
+                    gpu_name: String::new(),
+                    vram_mb: 0,
+                    cpu_score: 200,
+                    gpu_score: 0,
+                    storage_total_gb: 500,
+                    storage_available_gb: 250,
+                    score_suite: None,
+                }),
+                location: "local".into(),
+                token: owner_token,
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+
+        assert!(!response.success);
+        assert!(response.status_message.contains("benchmark"));
+        let stored = master_service
+            .state
+            .node_manager
+            .get_worker(&worker_id)
+            .await
+            .unwrap();
+        assert!(
+            stored.is_none(),
+            "an invalid benchmark must not persist a worker"
+        );
+        cleanup(&master_service.state.scheduler, &task_id, &owner).await;
     }
 
     #[tokio::test]
