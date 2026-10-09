@@ -1400,8 +1400,10 @@ async fn register_worker(
                 );
             }
         };
-    let benchmark_report =
-        crate::nodepool_client::benchmark_report_to_proto(&state.executor.benchmark.snapshot());
+    let benchmark_report = crate::nodepool_client::benchmark_report_to_proto(
+        &profile.worker_id,
+        &state.executor.benchmark.snapshot(),
+    );
     match register_once_with_capability_report(
         &state.nodepool_addr(),
         &profile.worker_id,

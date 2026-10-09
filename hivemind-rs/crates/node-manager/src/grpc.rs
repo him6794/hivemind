@@ -4148,6 +4148,10 @@ fn worker_info_from_model(worker: WorkerNode) -> WorkerInfo {
     // the zeroed legacy scalar. An unmeasured component projects to 0, which the
     // frontend treats as "absent" (not a real zero).
     let (measured_cpu, measured_gpu) = worker.measured_scores();
+    let benchmark_report = stored_benchmark_report_envelope(
+        &worker.worker_id,
+        worker.benchmark_report_json.as_deref(),
+    );
     WorkerInfo {
         worker_id: worker.worker_id,
         username: worker.username,
@@ -4173,7 +4177,7 @@ fn worker_info_from_model(worker: WorkerNode) -> WorkerInfo {
         memory_usage: worker.memory_usage,
         gpu_usage: worker.gpu_usage,
         gpu_memory_usage: worker.gpu_memory_usage,
-        benchmark_report: stored_benchmark_report_envelope(worker.benchmark_report_json.as_deref()),
+        benchmark_report,
         resource_observation: None,
         effective_cpu_threads: None,
         worker_policy_generation: 0,
@@ -4183,14 +4187,40 @@ fn worker_info_from_model(worker: WorkerNode) -> WorkerInfo {
 /// Projects the Nodepool-verified benchmark report back onto the wire. The JSON
 /// is stored canonical (it passed `parse` at registration); re-validating here
 /// keeps a hand-edited or legacy row from leaking a stale/invalid claim.
+///
+/// `None` means "this worker has no usable stored report." A stored report that
+/// fails re-validation also projects to `None`, but the failure is logged with
+/// the worker's identity so an operator can tell a genuinely absent report from
+/// one that was stored and then dropped on projection.
 fn stored_benchmark_report_envelope(
+    worker_id: &str,
     report_json: Option<&str>,
 ) -> Option<ProtoHardwareBenchmarkReport> {
     let report_json = report_json?;
-    let parsed =
-        hivemind_models::observations::HardwareBenchmarkReport::parse(report_json.as_bytes())
-            .ok()?;
-    let payload = serde_json::to_string(&parsed).ok()?;
+    let parsed = match hivemind_models::observations::HardwareBenchmarkReport::parse(
+        report_json.as_bytes(),
+    ) {
+        Ok(report) => report,
+        Err(message) => {
+            tracing::warn!(
+                worker_id = %worker_id,
+                error = %message,
+                "stored benchmark report failed re-validation and was dropped from the projection"
+            );
+            return None;
+        }
+    };
+    let payload = match serde_json::to_string(&parsed) {
+        Ok(payload) => payload,
+        Err(error) => {
+            tracing::warn!(
+                worker_id = %worker_id,
+                error = %error,
+                "stored benchmark report failed re-serialization and was dropped from the projection"
+            );
+            return None;
+        }
+    };
     Some(ProtoHardwareBenchmarkReport {
         protocol_version: hivemind_proto::OBSERVATION_PROTOCOL_VERSION,
         report_json: payload,

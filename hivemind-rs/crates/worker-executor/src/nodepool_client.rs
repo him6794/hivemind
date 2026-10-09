@@ -442,10 +442,21 @@ pub fn capability_report_to_proto(
 /// always sent: Nodepool validates it from the raw samples and stores it only
 /// when it passes, so an all-not-run report is a legitimate "nothing measured
 /// yet" claim rather than a fabricated zero.
+///
+/// The report is a real, populated value at every call site, so `None` here can
+/// only mean serialization failed; that failure is logged with the worker's
+/// identity rather than collapsed into an indistinguishable absence.
 pub fn benchmark_report_to_proto(
+    worker_id: &str,
     report: &hivemind_models::observations::HardwareBenchmarkReport,
 ) -> Option<ProtoHardwareBenchmarkReport> {
-    let payload = serde_json::to_string(report).ok()?;
+    let payload = match serde_json::to_string(report) {
+        Ok(payload) => payload,
+        Err(error) => {
+            warn!(worker_id = %worker_id, error = %error, "failed to serialize the benchmark report");
+            return None;
+        }
+    };
     Some(ProtoHardwareBenchmarkReport {
         protocol_version: hivemind_proto::OBSERVATION_PROTOCOL_VERSION,
         report_json: payload,
@@ -839,7 +850,10 @@ pub fn start_registration_loop(
                         {
                             Ok(Ok(mut connected)) => {
                                 let benchmark_report =
-                                    benchmark_report_to_proto(&executor.benchmark.snapshot());
+                                    benchmark_report_to_proto(
+                                        &registration.worker_id,
+                                        &executor.benchmark.snapshot(),
+                                    );
                                 let requested_payload = benchmark_report
                                     .as_ref()
                                     .map(|report| report.report_json.clone());
@@ -881,7 +895,10 @@ pub fn start_registration_loop(
                         // measurement finishing on a live connection is recorded
                         // without a re-registration.
                         let benchmark_snapshot =
-                            benchmark_report_to_proto(&executor.benchmark.snapshot());
+                            benchmark_report_to_proto(
+                                &registration.worker_id,
+                                &executor.benchmark.snapshot(),
+                            );
                         let current_payload =
                             benchmark_snapshot.as_ref().map(|report| report.report_json.clone());
                         let request = build_status_request_with_capability_report(
