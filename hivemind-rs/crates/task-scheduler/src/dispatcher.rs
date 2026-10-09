@@ -6775,6 +6775,7 @@ mod tests {
         let mut task = make_task("share-selection", TaskStatus::Pending, 0);
         task.runtime = Some(MANAGED_DSL_V1_RUNTIME_VERSION.into());
         task.max_cpt = 100;
+        task.req_cpu_score = 0;
         let mut worker = make_worker("w1", 4, 16, WorkerStatus::Idle);
         let mut report = hivemind_models::WorkerCapabilityReport::public_managed_dsl();
         for capability in &mut report.capabilities {
@@ -9251,7 +9252,8 @@ mod tests {
         ];
         reserve_worker_for_batch(&mut workers, "worker-a");
 
-        let task = make_task("batch-fairness", TaskStatus::Pending, 0);
+        let mut task = make_task("batch-fairness", TaskStatus::Pending, 0);
+        task.req_cpu_score = 0;
         let runtime = tokio::runtime::Runtime::new().unwrap();
         let selected = runtime.block_on(scheduler::find_best_worker(&task, &workers));
 

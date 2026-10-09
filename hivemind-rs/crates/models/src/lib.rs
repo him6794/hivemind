@@ -401,6 +401,32 @@ impl WorkerNode {
             storage_percent: 0.0,
         }
     }
+
+    /// The verified benchmark's current CPU and GPU scores, recomputed from the
+    /// Nodepool-persisted report. Each element is `Some(score)` only when that
+    /// measurement is Ready, fresh within its TTL, and (for CPU) taken at the
+    /// recorded thread budget; `None` means the worker has no usable measured
+    /// score for that component. The historical `cpu_score`/`gpu_score` scalar
+    /// columns are deliberately not consulted — a missing measurement is
+    /// "no performance claim," never a fabricated zero.
+    pub fn measured_scores(&self) -> (Option<i32>, Option<i32>) {
+        let Some(report) = self
+            .benchmark_report_json
+            .as_deref()
+            .and_then(|json| observations::HardwareBenchmarkReport::parse(json.as_bytes()).ok())
+        else {
+            return (None, None);
+        };
+        let now = Utc::now();
+        let cpu = report.cpu_score(report.cpu.threads, now);
+        let gpu = report
+            .gpus
+            .iter()
+            .filter(|gpu| gpu.measurement.fresh(now))
+            .filter_map(|gpu| gpu.measurement.score(true).ok().flatten())
+            .max();
+        (cpu, gpu)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

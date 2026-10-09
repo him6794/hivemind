@@ -194,12 +194,18 @@ pub async fn find_best_worker(task: &Task, workers: &[WorkerNode]) -> Option<Wor
     }
 
     fn effective_cpu_score(w: &WorkerNode) -> i32 {
-        if w.cpu_cores_limit > 0 && w.cpu_cores > 0 {
-            let limited_cores = w.cpu_cores.min(w.cpu_cores_limit).max(0);
-            ((i64::from(w.cpu_score) * i64::from(limited_cores)) / i64::from(w.cpu_cores)) as i32
-        } else {
-            w.cpu_score
-        }
+        // The scheduler uses the Nodepool-verified benchmark score, not the
+        // historical `cpu_score` scalar (which the registration loop zeros
+        // because the heuristic was removed). A positive task requirement with
+        // no usable measured score fails closed instead of matching by default.
+        w.measured_scores().0.unwrap_or(0)
+    }
+
+    fn effective_gpu_score(w: &WorkerNode) -> i32 {
+        // Same rule as the CPU score: only a fresh, Ready, suite-matching GPU
+        // measurement counts. A worker with no usable measured GPU score offers
+        // no GPU performance claim, so a positive `req_gpu_score` is unmet.
+        w.measured_scores().1.unwrap_or(0)
     }
 
     fn effective_available_memory_gb(w: &WorkerNode) -> i32 {
@@ -264,7 +270,7 @@ pub async fn find_best_worker(task: &Task, workers: &[WorkerNode]) -> Option<Wor
             && w.provider_enabled
             && general_compute_compatible
             && effective_cpu_score(w) >= task.req_cpu_score
-            && w.gpu_score >= task.req_gpu_score
+            && effective_gpu_score(w) >= task.req_gpu_score
             && effective_available_memory_gb(w) >= task.req_memory_gb
             && effective_i32(w.gpu_memory_gb, w.gpu_memory_gb_limit) >= task.req_gpu_memory_gb
             && effective_available_storage_gb(w) >= task.req_storage_gb
@@ -598,7 +604,7 @@ mod tests {
             memory_usage: 0.0,
             gpu_usage: 0.0,
             gpu_memory_usage: 0.0,
-            req_cpu_score: 300,
+            req_cpu_score: 0,
             req_gpu_score: 0,
             req_memory_gb: 8,
             req_gpu_memory_gb: 0,
@@ -629,6 +635,160 @@ mod tests {
         let best = find_best_worker(&task, &workers).await;
         assert!(best.is_some());
         assert_eq!(best.unwrap().worker_id, "w2");
+    }
+
+    fn measured_cpu_benchmark_json(threads: u32, age_secs: i64) -> String {
+        use hivemind_models::observations::{
+            BenchmarkBatch, BenchmarkCase, BenchmarkMeasurement, BenchmarkState,
+            HardwareBenchmarkReport, BENCHMARK_BATCHES, HARDWARE_SUITE, OBSERVATION_VERSION,
+        };
+        let batches = vec![
+            BenchmarkBatch {
+                repetitions: 1,
+                // 2 * 128^3 * 1 / 4_194_304 = exactly 1.0 GFLOP/s per participating
+                // thread, so the harmonic-mean score is 100 * threads.
+                elapsed_ns: 4_194_304,
+            };
+            BENCHMARK_BATCHES
+        ];
+        let case = |name: &str, threads: u32| BenchmarkCase {
+            name: name.into(),
+            dimension: 128,
+            threads,
+            batches: batches.clone(),
+        };
+        let report = HardwareBenchmarkReport {
+            version: OBSERVATION_VERSION,
+            suite: HARDWARE_SUITE.into(),
+            build_id: "a".repeat(64),
+            release_build: true,
+            cpu: BenchmarkMeasurement {
+                measurement_id: Some(uuid::Uuid::new_v4()),
+                state: BenchmarkState::Ready,
+                measured_at: Some(chrono::Utc::now() - chrono::Duration::seconds(age_secs)),
+                identity: "test cpu".into(),
+                threads,
+                correctness_passed: true,
+                cases: vec![
+                    case("cpu-f32-single", 1),
+                    case("cpu-f64-single", 1),
+                    case("cpu-f32-allocated", threads),
+                    case("cpu-f64-allocated", threads),
+                ],
+                reason: None,
+            },
+            gpu_state: BenchmarkState::NotRun,
+            gpu_reason: None,
+            gpus: Vec::new(),
+        };
+        serde_json::to_string(&report).unwrap()
+    }
+
+    fn legacy_score_task(cpu_req: i32, gpu_req: i32) -> Task {
+        Task {
+            id: uuid::Uuid::new_v4(),
+            task_id: "t-score".into(),
+            owner: "u1".into(),
+            worker_id: None,
+            worker_ip: None,
+            status: hivemind_models::TaskStatus::Pending,
+            status_message: None,
+            output: None,
+            result_torrent: None,
+            torrent_source: Some("btih".into()),
+            runtime: None,
+            task_source: None,
+            general_compute_manifest_json: None,
+            managed_gpu_manifest_json: None,
+            managed_dsl_backend_id: None,
+            managed_dsl_semantics_manifest_sha256: None,
+            expected_btih: None,
+            cpu_usage: 0.0,
+            memory_usage: 0.0,
+            gpu_usage: 0.0,
+            gpu_memory_usage: 0.0,
+            req_cpu_score: cpu_req,
+            req_gpu_score: gpu_req,
+            req_memory_gb: 0,
+            req_gpu_memory_gb: 0,
+            req_storage_gb: 0,
+            host_count: 1,
+            max_cpt: 1000,
+            billing_settled: false,
+            billed_amount: 0,
+            managed_executed_ops: 0,
+            managed_output_bytes: 0,
+            managed_receipt_json: None,
+            retry_count: 0,
+            max_retries: 3,
+            deadline: None,
+            deterministic: false,
+            side_effects: false,
+            priority: 0,
+            cpu_time_ms: 0,
+            wall_time_ms: 0,
+            peak_memory_mb: 0,
+            download_bytes: 0,
+            cache_hits: 0,
+            created_at: chrono::Utc::now(),
+            last_update: chrono::Utc::now(),
+            completed_at: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn positive_score_requirements_match_only_fresh_measured_benchmarks() {
+        let task = legacy_score_task(300, 0);
+
+        let measured = {
+            let mut w = make_worker("measured", 4, 16, 0.0, WorkerStatus::Idle);
+            w.benchmark_report_json = Some(measured_cpu_benchmark_json(4, 0));
+            w
+        };
+        let legacy = make_worker("legacy", 4, 16, 0.0, WorkerStatus::Idle);
+        let stale = {
+            let mut w = make_worker("stale", 4, 16, 0.0, WorkerStatus::Idle);
+            w.benchmark_report_json = Some(measured_cpu_benchmark_json(
+                4,
+                hivemind_models::observations::BENCHMARK_TTL_SECONDS + 1,
+            ));
+            w
+        };
+
+        assert_eq!(
+            find_best_worker(&task, &[legacy, stale.clone()])
+                .await
+                .map(|w| w.worker_id),
+            None
+        );
+        assert_eq!(
+            find_best_worker(&task, &[stale, measured])
+                .await
+                .map(|w| w.worker_id),
+            Some("measured".into())
+        );
+    }
+
+    #[tokio::test]
+    async fn score_requirements_reject_a_stale_measurement_and_an_unready_one() {
+        use hivemind_models::observations::{
+            BenchmarkState, HardwareBenchmarkReport, BENCHMARK_TTL_SECONDS,
+        };
+        let task = legacy_score_task(100, 0);
+        let mut stale = make_worker("stale", 4, 16, 0.0, WorkerStatus::Idle);
+        stale.benchmark_report_json =
+            Some(measured_cpu_benchmark_json(4, BENCHMARK_TTL_SECONDS + 1));
+        let mut unready = make_worker("unready", 4, 16, 0.0, WorkerStatus::Idle);
+        let mut report = HardwareBenchmarkReport::empty("a".repeat(64), true);
+        report.cpu.state = BenchmarkState::Failed;
+        unready.benchmark_report_json = Some(serde_json::to_string(&report).unwrap());
+
+        assert_eq!(
+            find_best_worker(&task, &[stale, unready])
+                .await
+                .map(|w| w.worker_id),
+            None
+        );
     }
 
     #[tokio::test]
@@ -915,10 +1075,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_provider_settings_filter_disabled_capped_and_overpriced_workers() {
+    async fn provider_settings_filter_disabled_resource_capped_and_overpriced_workers() {
         let mut disabled = make_worker("disabled", 8, 32, 0.0, WorkerStatus::Idle);
         disabled.provider_enabled = false;
 
+        // A CPU-core cap no longer scales the measured score: the plan drops
+        // core-ratio scaling, so the capped worker keeps its full score and is
+        // a valid candidate. It is idle, so it outranks the active worker.
         let mut cpu_capped = make_worker("cpu-capped", 8, 32, 0.0, WorkerStatus::Idle);
         cpu_capped.cpu_cores_limit = 2;
 
@@ -955,7 +1118,7 @@ mod tests {
             memory_usage: 0.0,
             gpu_usage: 0.0,
             gpu_memory_usage: 0.0,
-            req_cpu_score: 300,
+            req_cpu_score: 0,
             req_gpu_score: 0,
             req_memory_gb: 8,
             req_gpu_memory_gb: 0,
@@ -993,12 +1156,16 @@ mod tests {
         ];
 
         let best = find_best_worker(&task, &workers).await;
+        // The disabled, memory-capped, storage-capped and overpriced workers
+        // are all filtered out. The CPU-capped worker stays eligible because a
+        // core cap no longer scales the measured score, and as the only idle
+        // candidate it wins over the active "affordable" worker.
         assert!(best.is_some());
-        assert_eq!(best.unwrap().worker_id, "affordable");
+        assert_eq!(best.unwrap().worker_id, "cpu-capped");
     }
 
     #[tokio::test]
-    async fn test_provider_settings_use_available_and_effective_resources_for_selection() {
+    async fn provider_settings_use_available_and_effective_resources_for_selection() {
         let mut unavailable_memory =
             make_worker("unavailable-memory", 8, 64, 0.0, WorkerStatus::Idle);
         unavailable_memory.available_memory_gb = 4;
@@ -1038,7 +1205,7 @@ mod tests {
             memory_usage: 0.0,
             gpu_usage: 0.0,
             gpu_memory_usage: 0.0,
-            req_cpu_score: 300,
+            req_cpu_score: 0,
             req_gpu_score: 0,
             req_memory_gb: 8,
             req_gpu_memory_gb: 0,

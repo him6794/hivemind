@@ -4121,6 +4121,10 @@ fn validate_worker_registration_resources(
 }
 
 fn worker_info_from_model(worker: WorkerNode) -> WorkerInfo {
+    // The displayed score is the Nodepool-verified, fresh benchmark score, not
+    // the zeroed legacy scalar. An unmeasured component projects to 0, which the
+    // frontend treats as "absent" (not a real zero).
+    let (measured_cpu, measured_gpu) = worker.measured_scores();
     WorkerInfo {
         worker_id: worker.worker_id,
         username: worker.username,
@@ -4128,8 +4132,8 @@ fn worker_info_from_model(worker: WorkerNode) -> WorkerInfo {
         status: worker.status.as_str().into(),
         cpu_cores: worker.cpu_cores,
         memory_gb: worker.memory_gb,
-        cpu_score: worker.cpu_score,
-        gpu_score: worker.gpu_score,
+        cpu_score: measured_cpu.unwrap_or(0),
+        gpu_score: measured_gpu.unwrap_or(0),
         gpu_memory_gb: worker.gpu_memory_gb,
         gpu_name: worker.gpu_name.unwrap_or_default(),
         vram_mb: worker.vram_mb,
