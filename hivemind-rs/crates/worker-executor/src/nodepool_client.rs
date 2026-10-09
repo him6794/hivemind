@@ -503,6 +503,7 @@ pub fn build_status_request_with_capability_report(
     usage: ResourceUsage,
     token: &str,
     capability_report: Option<ProtoWorkerCapabilityReport>,
+    benchmark_report: Option<ProtoHardwareBenchmarkReport>,
 ) -> RunningStatusRequest {
     RunningStatusRequest {
         username: worker_id.to_string(),
@@ -511,7 +512,7 @@ pub fn build_status_request_with_capability_report(
         usage: Some(resource_usage_to_proto(usage)),
         token: token.to_string(),
         capability_report,
-        benchmark_report: None,
+        benchmark_report,
         resource_observation: None,
     }
 }
@@ -522,7 +523,7 @@ pub fn build_status_request(
     usage: ResourceUsage,
     token: &str,
 ) -> RunningStatusRequest {
-    build_status_request_with_capability_report(worker_id, status, usage, token, None)
+    build_status_request_with_capability_report(worker_id, status, usage, token, None, None)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -745,6 +746,11 @@ pub fn start_registration_loop(
         let mut endpoint = String::new();
         let mut client: Option<NodeManagerServiceClient<Channel>> = None;
         let mut registered_worker_addr: Option<String> = None;
+        // Last benchmark payload Nodepool accepted. The beat re-sends the report
+        // only when this changes, so a measurement that finishes on a live
+        // connection is pushed without a re-registration while a stable report
+        // is not rewritten every tick.
+        let mut last_sent_benchmark: Option<String> = None;
         let mut tick = tokio::time::interval(registration.interval);
 
         loop {
@@ -834,6 +840,9 @@ pub fn start_registration_loop(
                             Ok(Ok(mut connected)) => {
                                 let benchmark_report =
                                     benchmark_report_to_proto(&executor.benchmark.snapshot());
+                                let requested_payload = benchmark_report
+                                    .as_ref()
+                                    .map(|report| report.report_json.clone());
                                 let request = build_register_request_with_capability_report(
                                     &registration.worker_id,
                                     &registration.username,
@@ -853,6 +862,7 @@ pub fn start_registration_loop(
                                     Ok(Ok(response)) if response.get_ref().success => {
                                         info!("Worker {} registered with nodepool {}", registration.worker_id, current_endpoint);
                                         registered_worker_addr = Some(worker_addr.clone());
+                                        last_sent_benchmark = requested_payload;
                                         client = Some(connected);
                                     }
                                     Ok(Ok(response)) => warn!("Worker registration rejected: {}", response.get_ref().status_message),
@@ -866,12 +876,21 @@ pub fn start_registration_loop(
                     }
 
                     if let Some(connected) = client.as_mut() {
+                        // Push a benchmark report on the periodic beat only when
+                        // it has changed since Nodepool last accepted one, so a
+                        // measurement finishing on a live connection is recorded
+                        // without a re-registration.
+                        let benchmark_snapshot =
+                            benchmark_report_to_proto(&executor.benchmark.snapshot());
+                        let current_payload =
+                            benchmark_snapshot.as_ref().map(|report| report.report_json.clone());
                         let request = build_status_request_with_capability_report(
                             &registration.worker_id,
                             "IDLE",
                             executor.get_resource_usage(),
                             &registration.token,
                             Some(capability_report),
+                            benchmark_snapshot.filter(|_| current_payload != last_sent_benchmark),
                         );
                         match tokio::time::timeout(
                             Duration::from_secs(10),
@@ -879,7 +898,9 @@ pub fn start_registration_loop(
                         )
                         .await
                         {
-                            Ok(Ok(response)) if response.get_ref().success => {}
+                            Ok(Ok(response)) if response.get_ref().success => {
+                                last_sent_benchmark = current_payload;
+                            }
                             Ok(Ok(response)) => {
                                 warn!("Worker heartbeat rejected: {}", response.get_ref().status_message);
                                 client = None;

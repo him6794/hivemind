@@ -195,6 +195,19 @@ impl NodeManager {
             .await
     }
 
+    /// Persist a Nodepool-verified benchmark report delivered on a heartbeat.
+    /// Returns `true` when a registered worker row was updated, so the caller
+    /// can warn on a report that found no worker rather than dropping it.
+    pub async fn update_worker_benchmark(
+        &self,
+        worker_id: &str,
+        report_json: &str,
+    ) -> Result<bool> {
+        self.repo
+            .update_benchmark_report(worker_id, report_json)
+            .await
+    }
+
     pub async fn client_instance_id_for_worker(
         &self,
         worker_id: &str,

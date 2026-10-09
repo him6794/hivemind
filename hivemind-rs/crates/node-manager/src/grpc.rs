@@ -1363,6 +1363,29 @@ impl NodeManagerService for GrpcNodeManagerService {
                 }));
             }
         };
+        // A benchmark report carried on a heartbeat is a verified claim, not a
+        // liveness signal. Nodepool re-validates it from the raw samples: a
+        // malformed report fails the beat (mirroring the capability report above)
+        // so a bad claim is never silently dropped, and a valid one updates the
+        // stored report without requiring a full re-registration.
+        let heartbeat_benchmark = match verify_worker_benchmark_report(req.benchmark_report) {
+            Ok(json) => json,
+            Err(message) => {
+                return Ok(Response::new(RunningStatusResponse {
+                    success: false,
+                    status_message: message,
+                    effective_cpu_threads: None,
+                    worker_policy_generation: 0,
+                }));
+            }
+        };
+        if let Some(json) = heartbeat_benchmark {
+            self.state
+                .node_manager
+                .update_worker_benchmark(&worker_id, &json)
+                .await
+                .map_err(|e| Status::internal(e.to_string()))?;
+        }
         let heartbeat_result = if let Some((capabilities_json, digest, ready, readiness_reason)) =
             dynamic_observation.as_ref()
         {
@@ -7271,6 +7294,83 @@ mod tests {
             "an invalid benchmark must not persist a worker"
         );
         cleanup(&master_service.state.scheduler, &task_id, &owner).await;
+    }
+
+    #[tokio::test]
+    async fn report_status_records_a_valid_benchmark_and_rejects_a_malformed_one() {
+        let lock = grpc_db_lock();
+        let _guard = lock.lock().await;
+        let (master_service, _task_id, _other_token, owner) = match test_service().await {
+            Some(parts) => parts,
+            None => return,
+        };
+        let node_service = GrpcNodeManagerService::new(master_service.state.clone());
+        let worker_id = format!("grpc-heartbeat-benchmark-{}", uuid::Uuid::new_v4());
+        let owner_token = token_for(&master_service.state.auth, &owner);
+        register_report_worker(&node_service, &owner, &worker_id).await;
+
+        let beat = |benchmark_report: Option<hivemind_proto::HardwareBenchmarkReport>| async {
+            node_service
+                .report_status(Request::new(RunningStatusRequest {
+                    username: owner.clone(),
+                    worker_id: worker_id.clone(),
+                    status: "IDLE".into(),
+                    usage: Some(hivemind_proto::ResourceUsage {
+                        cpu_percent: 10.0,
+                        memory_percent: 20.0,
+                        gpu_percent: 0.0,
+                        vram_percent: 0.0,
+                        storage_percent: 0.0,
+                    }),
+                    token: owner_token.clone(),
+                    capability_report: None,
+                    benchmark_report,
+                    resource_observation: None,
+                }))
+                .await
+                .unwrap()
+                .into_inner()
+        };
+
+        // A valid report carried on a heartbeat updates the stored claim.
+        let report = ready_cpu_benchmark_report();
+        let accepted = beat(Some(benchmark_envelope(&report))).await;
+        assert!(accepted.success, "{}", accepted.status_message);
+        let stored = master_service
+            .state
+            .node_manager
+            .get_worker(&worker_id)
+            .await
+            .unwrap()
+            .expect("worker still present after a successful heartbeat");
+        let stored_report = stored
+            .benchmark_report_json
+            .as_deref()
+            .expect("heartbeat stored the report");
+        let parsed: hivemind_models::observations::HardwareBenchmarkReport =
+            serde_json::from_str(stored_report).unwrap();
+        assert_eq!(parsed.cpu.score(false), Ok(Some(200)));
+
+        // A malformed report fails the beat and must not clobber the valid one.
+        let mut bad = benchmark_envelope(&report);
+        bad.protocol_version = 2;
+        let rejected = beat(Some(bad)).await;
+        assert!(!rejected.success);
+        assert!(rejected.status_message.contains("benchmark"));
+        let preserved = master_service
+            .state
+            .node_manager
+            .get_worker(&worker_id)
+            .await
+            .unwrap()
+            .expect("worker survives a rejected heartbeat");
+        assert_eq!(
+            preserved.benchmark_report_json.as_deref(),
+            Some(stored_report),
+            "a rejected heartbeat benchmark must not overwrite a verified one"
+        );
+
+        cleanup_report_worker(&master_service, &worker_id).await;
     }
 
     #[tokio::test]

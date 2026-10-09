@@ -368,6 +368,25 @@ impl WorkerRepository {
         Ok(())
     }
 
+    /// Replace the stored benchmark report for a registered worker. Returns
+    /// whether a row matched, so the caller can tell a heartbeat against an
+    /// unknown worker from one that actually updated the stored claim.
+    pub async fn update_benchmark_report(
+        &self,
+        worker_id: &str,
+        report_json: &str,
+    ) -> Result<bool> {
+        let result = sqlx::query(
+            "UPDATE worker_nodes SET benchmark_report_json = $1,
+             updated_at = NOW() WHERE worker_id = $2",
+        )
+        .bind(report_json)
+        .bind(worker_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
     pub async fn delete(&self, worker_id: &str) -> Result<u64> {
         let result = sqlx::query("DELETE FROM worker_nodes WHERE worker_id = $1")
             .bind(worker_id)
