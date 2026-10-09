@@ -174,6 +174,11 @@ pub struct RegisterWorkerBody {
     pub cpu_score: i32,
     pub gpu_score: Option<i32>,
     pub gpu_memory_gb: Option<i32>,
+    /// GPU count as the caller's own machine reports it. It is never inferred
+    /// from the score, VRAM, or name — a reported figure never implies a card.
+    /// Defaults to 0 for callers that do not report an inventory count.
+    #[serde(default)]
+    pub gpu_count: i32,
     pub gpu_name: Option<String>,
     pub storage_total_gb: Option<i64>,
     pub storage_available_gb: Option<i64>,
@@ -942,12 +947,16 @@ fn worker_registration_resources(body: &RegisterWorkerBody) -> ProtoResourceSpec
         .map(str::trim)
         .unwrap_or_default()
         .to_string();
-    let has_gpu = gpu_score > 0 || gpu_memory_gb > 0 || !gpu_name.is_empty();
 
     ProtoResourceSpec {
         cpu_cores: body.cpu_cores,
         memory_mb: i64::from(body.memory_gb) * 1024,
-        gpu_count: if has_gpu { 1 } else { 0 },
+        // The count is what the caller's inventory reports. The old
+        // `score > 0 || vram > 0 || name` heuristic inferred a card from
+        // self-reported figures, so a score alone implied hardware and an
+        // unscored card disappeared — the same rule the worker control API
+        // already follows.
+        gpu_count: body.gpu_count,
         gpu_name,
         vram_mb: i64::from(gpu_memory_gb) * 1024,
         cpu_score: body.cpu_score,
@@ -2935,6 +2944,7 @@ mod tests {
             cpu_score: 900,
             gpu_score: Some(1200),
             gpu_memory_gb: Some(16),
+            gpu_count: 1,
             gpu_name: Some("RTX Test".into()),
             storage_total_gb: Some(1000),
             storage_available_gb: Some(750),
@@ -2952,6 +2962,43 @@ mod tests {
         assert_eq!(resources.gpu_score, 1200);
         assert_eq!(resources.storage_total_gb, 1000);
         assert_eq!(resources.storage_available_gb, 750);
+    }
+
+    #[test]
+    fn worker_registration_gpu_count_never_inferred_from_reported_figures() {
+        // A score, VRAM figure, and name alone describe self-reported claims;
+        // none of them implies physical hardware.
+        let mut body = RegisterWorkerBody {
+            username: Some("provider".into()),
+            worker_id: Some("worker-43".into()),
+            ip: "127.0.0.1:50053".into(),
+            cpu_cores: 8,
+            memory_gb: 32,
+            cpu_score: 900,
+            gpu_score: Some(1200),
+            gpu_memory_gb: Some(16),
+            gpu_count: 0,
+            gpu_name: Some("RTX Test".into()),
+            storage_total_gb: Some(1000),
+            storage_available_gb: Some(750),
+            location: Some("taipei".into()),
+        };
+
+        let resources = worker_registration_resources(&body);
+        assert_eq!(resources.gpu_count, 0);
+        assert_eq!(resources.gpu_score, 1200);
+        assert_eq!(resources.vram_mb, 16 * 1024);
+
+        // A present-but-unscored card still counts when the inventory says so.
+        body.gpu_score = None;
+        body.gpu_memory_gb = None;
+        body.gpu_name = None;
+        body.gpu_count = 2;
+
+        let resources = worker_registration_resources(&body);
+        assert_eq!(resources.gpu_count, 2);
+        assert_eq!(resources.gpu_score, 0);
+        assert_eq!(resources.vram_mb, 0);
     }
 
     fn task_body(
