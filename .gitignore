@@ -57,6 +57,7 @@ test_tasks/
 /.claude/worktrees/
 /.claude/scheduled_tasks.lock
 /.codegraph/
+/.review/
 
 # Misc local state
 *.db
