@@ -9,6 +9,9 @@ pub const BENCHMARK_TTL_SECONDS: i64 = 24 * 60 * 60;
 pub const RESOURCE_TTL_SECONDS: i64 = 30;
 pub const BENCHMARK_MAX_THREADS: u32 = 32;
 pub const BENCHMARK_BATCHES: usize = 5;
+/// Maximum serialized size accepted for a resource or execution observation.
+/// Matches the observation envelope bound on the wire.
+pub const RESOURCE_OBSERVATION_MAX_BYTES: usize = 64 * 1024;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -349,6 +352,20 @@ impl ResourceObservation {
         self.sampled_at.is_some_and(|time| {
             time <= now && now.signed_duration_since(time).num_seconds() <= RESOURCE_TTL_SECONDS
         })
+    }
+
+    /// Parse and validate a resource observation from a canonical JSON payload.
+    /// Mirrors the benchmark report's `parse`: a size bound, well-formed JSON,
+    /// and the full field checks. Nodepool stores the report only after this
+    /// passes, so a malformed observation is never persisted.
+    pub fn parse(bytes: &[u8]) -> Result<Self, &'static str> {
+        if bytes.len() > RESOURCE_OBSERVATION_MAX_BYTES {
+            return Err("resource observation too large");
+        }
+        let observation: Self =
+            serde_json::from_slice(bytes).map_err(|_| "invalid resource observation JSON")?;
+        observation.validate()?;
+        Ok(observation)
     }
 }
 

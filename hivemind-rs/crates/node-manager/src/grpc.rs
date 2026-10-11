@@ -74,6 +74,7 @@ use hivemind_proto::{
     RegisterUserResponse,
     RegisterWorkerNodeRequest,
     RemoveWorkerRequest,
+    ResourceObservation as ProtoResourceObservation,
     ResourceSpec as ProtoResourceSpec,
     RunningStatusRequest,
     RunningStatusResponse,
@@ -213,6 +214,26 @@ pub(crate) fn verify_worker_benchmark_report(
     serde_json::to_string(&parsed)
         .map(Some)
         .map_err(|error| format!("invalid benchmark report: {error}"))
+}
+
+/// Verifies a worker's resource observation from its envelope and returns the
+/// canonical JSON to persist. The observation is a bounded, versioned,
+/// presence-aware snapshot (absent gauges stay absent); Nodepool stores it only
+/// after it passes the envelope and field checks, mirroring the benchmark
+/// report's fail-closed path. `None` means the worker sent no observation.
+pub(crate) fn verify_worker_resource_observation(
+    report: Option<ProtoResourceObservation>,
+) -> Result<Option<String>, String> {
+    let Some(report) = report else {
+        return Ok(None);
+    };
+    let payload = hivemind_proto::validate_resource_observation_envelope(&report)
+        .map_err(|message| format!("invalid resource observation envelope: {message}"))?;
+    let parsed = hivemind_models::observations::ResourceObservation::parse(payload.as_bytes())
+        .map_err(|message| format!("invalid resource observation: {message}"))?;
+    serde_json::to_string(&parsed)
+        .map(Some)
+        .map_err(|error| format!("invalid resource observation: {error}"))
 }
 
 pub struct NodepoolState {
@@ -1251,6 +1272,18 @@ impl NodeManagerService for GrpcNodeManagerService {
                 }));
             }
         };
+        let resource_observation_json =
+            match verify_worker_resource_observation(req.resource_observation) {
+                Ok(json) => json,
+                Err(message) => {
+                    return Ok(Response::new(StatusResponse {
+                        success: false,
+                        status_message: message,
+                        effective_cpu_threads: None,
+                        worker_policy_generation: 0,
+                    }));
+                }
+            };
         let svc = NmSvc::new((*self.state.node_manager).clone());
         let (general_compute_capabilities_json, managed_dsl_capabilities_json) = if public_dynamic {
             (None, None)
@@ -1281,6 +1314,7 @@ impl NodeManagerService for GrpcNodeManagerService {
             admission_mode: self.state.node_manager.admission_mode().to_string(),
             dynamic_capability_report,
             benchmark_report_json,
+            resource_observation_json,
         };
         match svc
             .register_worker_for_owner(&reg, &claims.sub, admin)
@@ -1383,6 +1417,30 @@ impl NodeManagerService for GrpcNodeManagerService {
             self.state
                 .node_manager
                 .update_worker_benchmark(&worker_id, &json)
+                .await
+                .map_err(|e| Status::internal(e.to_string()))?;
+        }
+        // A resource observation on a heartbeat is a fresh host snapshot.
+        // Nodepool validates it from the envelope and field checks; a valid one
+        // refreshes the stored snapshot, a malformed one fails the beat. A beat
+        // without one leaves the prior snapshot untouched (it is short-lived and
+        // its own TTL decides freshness downstream).
+        let heartbeat_observation =
+            match verify_worker_resource_observation(req.resource_observation) {
+                Ok(json) => json,
+                Err(message) => {
+                    return Ok(Response::new(RunningStatusResponse {
+                        success: false,
+                        status_message: message,
+                        effective_cpu_threads: None,
+                        worker_policy_generation: 0,
+                    }));
+                }
+            };
+        if let Some(json) = heartbeat_observation {
+            self.state
+                .node_manager
+                .update_worker_resource_observation(&worker_id, &json)
                 .await
                 .map_err(|e| Status::internal(e.to_string()))?;
         }
@@ -4152,6 +4210,10 @@ fn worker_info_from_model(worker: WorkerNode) -> WorkerInfo {
         &worker.worker_id,
         worker.benchmark_report_json.as_deref(),
     );
+    let resource_observation = stored_resource_observation_envelope(
+        &worker.worker_id,
+        worker.resource_observation_json.as_deref(),
+    );
     WorkerInfo {
         worker_id: worker.worker_id,
         username: worker.username,
@@ -4178,7 +4240,7 @@ fn worker_info_from_model(worker: WorkerNode) -> WorkerInfo {
         gpu_usage: worker.gpu_usage,
         gpu_memory_usage: worker.gpu_memory_usage,
         benchmark_report,
-        resource_observation: None,
+        resource_observation,
         effective_cpu_threads: None,
         worker_policy_generation: 0,
     }
@@ -4224,6 +4286,50 @@ fn stored_benchmark_report_envelope(
     Some(ProtoHardwareBenchmarkReport {
         protocol_version: hivemind_proto::OBSERVATION_PROTOCOL_VERSION,
         report_json: payload,
+    })
+}
+
+/// Projects the stored resource observation onto the wire, but only while it is
+/// fresh. The observation is a short-lived host snapshot (30-second TTL); once
+/// it is stale the worker's last-known state no longer represents the present,
+/// so the projection is `None` ("absent") rather than a dated reading. A stored
+/// value that fails re-validation is likewise projected as absent, with a warn
+/// naming the worker.
+fn stored_resource_observation_envelope(
+    worker_id: &str,
+    observation_json: Option<&str>,
+) -> Option<ProtoResourceObservation> {
+    let observation_json = observation_json?;
+    let parsed = match hivemind_models::observations::ResourceObservation::parse(
+        observation_json.as_bytes(),
+    ) {
+        Ok(observation) => observation,
+        Err(message) => {
+            tracing::warn!(
+                worker_id = %worker_id,
+                error = %message,
+                "stored resource observation failed re-validation and was dropped from the projection"
+            );
+            return None;
+        }
+    };
+    if !parsed.fresh(chrono::Utc::now()) {
+        return None;
+    }
+    let payload = match serde_json::to_string(&parsed) {
+        Ok(payload) => payload,
+        Err(error) => {
+            tracing::warn!(
+                worker_id = %worker_id,
+                error = %error,
+                "stored resource observation failed re-serialization and was dropped from the projection"
+            );
+            return None;
+        }
+    };
+    Some(ProtoResourceObservation {
+        protocol_version: hivemind_proto::OBSERVATION_PROTOCOL_VERSION,
+        observation_json: payload,
     })
 }
 
@@ -7090,6 +7196,40 @@ mod tests {
         }
     }
 
+    /// A presence-aware resource observation: the gauges a CPU-only worker
+    /// reports are set, the GPU ones stay absent, and the sample time controls
+    /// freshness.
+    fn resource_observation(
+        sampled_at: chrono::DateTime<chrono::Utc>,
+    ) -> hivemind_models::observations::ResourceObservation {
+        hivemind_models::observations::ResourceObservation {
+            version: hivemind_models::observations::OBSERVATION_VERSION,
+            sampled_at: Some(sampled_at),
+            cpu_percent: Some(12.5),
+            memory_percent: Some(30.0),
+            gpu_percent: None,
+            vram_percent: None,
+            storage_percent: Some(45.0),
+            cpu_cores: Some(4),
+            total_memory_mb: Some(16 * 1024),
+            available_memory_mb: Some(10 * 1024),
+            gpu_count: Some(0),
+            storage_total_gb: Some(500),
+            storage_available_gb: Some(250),
+            queue_capacity: None,
+        }
+    }
+
+    fn resource_observation_envelope(
+        observation: &hivemind_models::observations::ResourceObservation,
+    ) -> hivemind_proto::ResourceObservation {
+        let payload = serde_json::to_string(observation).unwrap();
+        hivemind_proto::ResourceObservation {
+            protocol_version: hivemind_proto::OBSERVATION_PROTOCOL_VERSION,
+            observation_json: payload,
+        }
+    }
+
     #[test]
     fn verify_worker_benchmark_report_round_trips_a_valid_claim() {
         let report = ready_cpu_benchmark_report();
@@ -7173,6 +7313,7 @@ mod tests {
             dynamic_readiness_reason: None,
             dynamic_observed_at: None,
             benchmark_report_json: Some(stored),
+            resource_observation_json: None,
             last_heartbeat: Utc::now(),
             registered_at: Utc::now(),
             updated_at: Utc::now(),
@@ -7185,6 +7326,75 @@ mod tests {
 
         worker.benchmark_report_json = None;
         assert!(worker_info_from_model(worker).benchmark_report.is_none());
+    }
+
+    #[test]
+    fn worker_info_projects_a_fresh_resource_observation_and_drops_a_stale_one() {
+        let fresh = resource_observation(Utc::now());
+        let stale = resource_observation(Utc::now() - chrono::Duration::seconds(60));
+        let worker = |observation_json: Option<String>| WorkerNode {
+            id: uuid::Uuid::new_v4(),
+            worker_id: "w".into(),
+            username: "u".into(),
+            ip: "1.2.3.4".into(),
+            virtual_ip: None,
+            hostname: None,
+            cpu_cores: 4,
+            memory_gb: 16,
+            cpu_score: 0,
+            gpu_score: 0,
+            gpu_memory_gb: 0,
+            gpu_name: None,
+            vram_mb: 0,
+            storage_total_gb: 500,
+            storage_available_gb: 250,
+            provider_enabled: true,
+            cpu_cores_limit: 0,
+            memory_gb_limit: 0,
+            gpu_memory_gb_limit: 0,
+            storage_gb_limit: 0,
+            min_cpt_per_hour: 0,
+            location: "local".into(),
+            status: hivemind_models::WorkerStatus::Active,
+            cpu_usage: 0.0,
+            memory_usage: 0.0,
+            gpu_usage: 0.0,
+            gpu_memory_usage: 0.0,
+            available_memory_gb: 16,
+            queue_capacity: 4,
+            general_compute_capabilities_json: None,
+            managed_dsl_capabilities_json: None,
+            admission_mode: hivemind_models::PRIVATE_STATIC_ADMISSION_MODE.into(),
+            dynamic_capabilities_json: None,
+            dynamic_capabilities_digest: None,
+            dynamic_admission_ready: false,
+            dynamic_readiness_reason: None,
+            dynamic_observed_at: None,
+            benchmark_report_json: None,
+            resource_observation_json: observation_json,
+            last_heartbeat: Utc::now(),
+            registered_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+
+        let fresh_payload = serde_json::to_string(&fresh).unwrap();
+        let info = worker_info_from_model(worker(Some(fresh_payload.clone())));
+        let envelope = info
+            .resource_observation
+            .expect("a fresh observation is projected");
+        let projected: hivemind_models::observations::ResourceObservation =
+            serde_json::from_str(&envelope.observation_json).unwrap();
+        assert_eq!(projected, fresh);
+
+        // The same snapshot, once past its 30-second TTL, no longer
+        // represents the present and projects as absent.
+        let stale_payload = serde_json::to_string(&stale).unwrap();
+        assert!(worker_info_from_model(worker(Some(stale_payload)))
+            .resource_observation
+            .is_none());
+        assert!(worker_info_from_model(worker(None))
+            .resource_observation
+            .is_none());
     }
 
     #[tokio::test]
@@ -7400,6 +7610,143 @@ mod tests {
             "a rejected heartbeat benchmark must not overwrite a verified one"
         );
 
+        cleanup_report_worker(&master_service, &worker_id).await;
+    }
+
+    #[tokio::test]
+    async fn report_status_records_a_valid_resource_observation_and_rejects_a_malformed_one() {
+        let lock = grpc_db_lock();
+        let _guard = lock.lock().await;
+        let (master_service, _task_id, _other_token, owner) = match test_service().await {
+            Some(parts) => parts,
+            None => return,
+        };
+        let node_service = GrpcNodeManagerService::new(master_service.state.clone());
+        let worker_id = format!("grpc-heartbeat-resource-{}", uuid::Uuid::new_v4());
+        let owner_token = token_for(&master_service.state.auth, &owner);
+        register_report_worker(&node_service, &owner, &worker_id).await;
+
+        let beat = |resource_observation: Option<hivemind_proto::ResourceObservation>| async {
+            node_service
+                .report_status(Request::new(RunningStatusRequest {
+                    username: owner.clone(),
+                    worker_id: worker_id.clone(),
+                    status: "IDLE".into(),
+                    usage: Some(hivemind_proto::ResourceUsage {
+                        cpu_percent: 10.0,
+                        memory_percent: 20.0,
+                        gpu_percent: 0.0,
+                        vram_percent: 0.0,
+                        storage_percent: 0.0,
+                    }),
+                    token: owner_token.clone(),
+                    capability_report: None,
+                    benchmark_report: None,
+                    resource_observation,
+                }))
+                .await
+                .unwrap()
+                .into_inner()
+        };
+
+        // A valid, fresh observation carried on a heartbeat refreshes the
+        // stored snapshot.
+        let observation = resource_observation(chrono::Utc::now());
+        let accepted = beat(Some(resource_observation_envelope(&observation))).await;
+        assert!(accepted.success, "{}", accepted.status_message);
+        let stored = master_service
+            .state
+            .node_manager
+            .get_worker(&worker_id)
+            .await
+            .unwrap()
+            .expect("worker still present after a successful heartbeat");
+        let stored_observation = stored
+            .resource_observation_json
+            .as_deref()
+            .expect("heartbeat stored the resource observation");
+        let parsed: hivemind_models::observations::ResourceObservation =
+            serde_json::from_str(stored_observation).unwrap();
+        assert_eq!(parsed.cpu_percent, Some(12.5));
+        assert_eq!(parsed.gpu_percent, None, "absent gauges stay absent");
+
+        // A malformed observation fails the beat and must not clobber the
+        // valid snapshot.
+        let mut bad = resource_observation_envelope(&observation);
+        bad.protocol_version = 2;
+        let rejected = beat(Some(bad)).await;
+        assert!(!rejected.success);
+        assert!(rejected.status_message.contains("resource"));
+        let preserved = master_service
+            .state
+            .node_manager
+            .get_worker(&worker_id)
+            .await
+            .unwrap()
+            .expect("worker survives a rejected heartbeat");
+        assert_eq!(
+            preserved.resource_observation_json.as_deref(),
+            Some(stored_observation),
+            "a rejected heartbeat observation must not overwrite a verified one"
+        );
+
+        cleanup_report_worker(&master_service, &worker_id).await;
+    }
+
+    #[tokio::test]
+    async fn register_worker_node_rejects_an_invalid_resource_observation() {
+        let lock = grpc_db_lock();
+        let _guard = lock.lock().await;
+        let (master_service, _task_id, _other_token, owner) = match test_service().await {
+            Some(parts) => parts,
+            None => return,
+        };
+        let node_service = GrpcNodeManagerService::new(master_service.state.clone());
+        let worker_id = format!("grpc-bad-resource-{}", uuid::Uuid::new_v4());
+        let owner_token = token_for(&master_service.state.auth, &owner);
+
+        let observation = resource_observation(chrono::Utc::now());
+        let mut bad = resource_observation_envelope(&observation);
+        bad.protocol_version = 2;
+        let response = node_service
+            .register_worker_node(Request::new(RegisterWorkerNodeRequest {
+                capability_report: None,
+                benchmark_report: None,
+                resource_observation: Some(bad),
+                username: owner.clone(),
+                worker_id: worker_id.clone(),
+                ip: "10.77.12.13:50053".into(),
+                resources: Some(ProtoResourceSpec {
+                    cpu_cores: 4,
+                    memory_mb: 16 * 1024,
+                    gpu_count: 0,
+                    gpu_name: String::new(),
+                    vram_mb: 0,
+                    cpu_score: 200,
+                    gpu_score: 0,
+                    storage_total_gb: 500,
+                    storage_available_gb: 250,
+                    score_suite: None,
+                }),
+                location: "local".into(),
+                token: owner_token,
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+
+        assert!(!response.success);
+        assert!(response.status_message.contains("resource"));
+        let stored = master_service
+            .state
+            .node_manager
+            .get_worker(&worker_id)
+            .await
+            .unwrap();
+        assert!(
+            stored.is_none(),
+            "an invalid resource observation must not persist a worker"
+        );
         cleanup_report_worker(&master_service, &worker_id).await;
     }
 

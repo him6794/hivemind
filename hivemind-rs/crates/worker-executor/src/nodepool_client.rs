@@ -15,9 +15,10 @@ use hivemind_proto::{
     ExecuteTaskRequest, ExecuteTaskResponse, GetProviderEarningsRequest,
     GetProviderEarningsResponse, GetProviderWorkerAssignmentsResponse,
     HardwareBenchmarkReport as ProtoHardwareBenchmarkReport, LoginRequest,
-    RegisterWorkerNodeRequest, ResourceSpec as ProtoResourceSpec,
-    ResourceUsage as ProtoResourceUsage, RunningStatusRequest, TaskOutputUploadRequest,
-    TaskResultUploadRequest, TaskUsageRequest, ValidateGeneralComputeTransferLeaseRequest,
+    RegisterWorkerNodeRequest, ResourceObservation as ProtoResourceObservation,
+    ResourceSpec as ProtoResourceSpec, ResourceUsage as ProtoResourceUsage, RunningStatusRequest,
+    TaskOutputUploadRequest, TaskResultUploadRequest, TaskUsageRequest,
+    ValidateGeneralComputeTransferLeaseRequest,
     WorkerCapabilityReport as ProtoWorkerCapabilityReport, WorkerSessionAck,
     WorkerSessionCancelAck, WorkerSessionClientFrame, WorkerSessionClose, WorkerSessionHeartbeat,
     WorkerSessionHello, WorkerSessionResult,
@@ -463,6 +464,29 @@ pub fn benchmark_report_to_proto(
     })
 }
 
+/// Serializes a presence-aware resource observation into the Nodepool-bound
+/// envelope. `None` means the worker has no usable sample right now, so the
+/// field stays absent (a distinct state from an all-absent observation); a
+/// serialization failure is logged with the worker's identity rather than
+/// collapsed into that absence.
+pub fn resource_observation_to_proto(
+    worker_id: &str,
+    observation: Option<&hivemind_models::observations::ResourceObservation>,
+) -> Option<ProtoResourceObservation> {
+    let observation = observation?;
+    let payload = match serde_json::to_string(observation) {
+        Ok(payload) => payload,
+        Err(error) => {
+            warn!(worker_id = %worker_id, error = %error, "failed to serialize the resource observation");
+            return None;
+        }
+    };
+    Some(ProtoResourceObservation {
+        protocol_version: hivemind_proto::OBSERVATION_PROTOCOL_VERSION,
+        observation_json: payload,
+    })
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn build_register_request_with_capability_report(
     worker_id: &str,
@@ -473,6 +497,7 @@ pub fn build_register_request_with_capability_report(
     token: &str,
     capability_report: Option<ProtoWorkerCapabilityReport>,
     benchmark_report: Option<ProtoHardwareBenchmarkReport>,
+    resource_observation: Option<ProtoResourceObservation>,
 ) -> RegisterWorkerNodeRequest {
     RegisterWorkerNodeRequest {
         username: username.to_string(),
@@ -483,7 +508,7 @@ pub fn build_register_request_with_capability_report(
         token: token.to_string(),
         capability_report,
         benchmark_report,
-        resource_observation: None,
+        resource_observation,
     }
 }
 
@@ -505,6 +530,7 @@ pub fn build_register_request(
         token,
         None,
         benchmark_report,
+        None,
     )
 }
 
@@ -515,6 +541,7 @@ pub fn build_status_request_with_capability_report(
     token: &str,
     capability_report: Option<ProtoWorkerCapabilityReport>,
     benchmark_report: Option<ProtoHardwareBenchmarkReport>,
+    resource_observation: Option<ProtoResourceObservation>,
 ) -> RunningStatusRequest {
     RunningStatusRequest {
         username: worker_id.to_string(),
@@ -524,7 +551,7 @@ pub fn build_status_request_with_capability_report(
         token: token.to_string(),
         capability_report,
         benchmark_report,
-        resource_observation: None,
+        resource_observation,
     }
 }
 
@@ -534,7 +561,7 @@ pub fn build_status_request(
     usage: ResourceUsage,
     token: &str,
 ) -> RunningStatusRequest {
-    build_status_request_with_capability_report(worker_id, status, usage, token, None, None)
+    build_status_request_with_capability_report(worker_id, status, usage, token, None, None, None)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -558,6 +585,7 @@ pub async fn register_once(
         token,
         None,
         benchmark_report,
+        None,
     )
     .await
 }
@@ -573,6 +601,7 @@ pub async fn register_once_with_capability_report(
     token: &str,
     capability_report: Option<ProtoWorkerCapabilityReport>,
     benchmark_report: Option<ProtoHardwareBenchmarkReport>,
+    resource_observation: Option<ProtoResourceObservation>,
 ) -> anyhow::Result<()> {
     let channel = Endpoint::from_shared(nodepool_endpoint(endpoint))?
         .connect_timeout(Duration::from_secs(5))
@@ -590,6 +619,7 @@ pub async fn register_once_with_capability_report(
             token,
             capability_report,
             benchmark_report,
+            resource_observation,
         )),
     )
     .await
@@ -866,6 +896,10 @@ pub fn start_registration_loop(
                                     &registration.token,
                                     Some(capability_report.clone()),
                                     benchmark_report,
+                                    resource_observation_to_proto(
+                                    &registration.worker_id,
+                                    executor.resource_observation().as_ref(),
+                                ),
                                 );
                                 match tokio::time::timeout(
                                     Duration::from_secs(10),
@@ -908,6 +942,10 @@ pub fn start_registration_loop(
                             &registration.token,
                             Some(capability_report),
                             benchmark_snapshot.filter(|_| current_payload != last_sent_benchmark),
+                            resource_observation_to_proto(
+                                    &registration.worker_id,
+                                    executor.resource_observation().as_ref(),
+                                ),
                         );
                         match tokio::time::timeout(
                             Duration::from_secs(10),

@@ -18,6 +18,10 @@ pub struct WorkerRegistration {
     /// means the worker did not send a report this registration, so any
     /// previously verified report is preserved.
     pub benchmark_report_json: Option<String>,
+    /// Canonical JSON of the last resource observation Nodepool verified
+    /// (bounded, versioned, presence-aware gauges with a sample time). `None`
+    /// means the worker sent no usable observation this registration.
+    pub resource_observation_json: Option<String>,
 }
 
 pub fn dynamic_capability_observation(
@@ -147,6 +151,7 @@ impl NodeManagerService {
                 .and_then(|observation| observation.3.clone()),
             dynamic_observed_at: dynamic_observation.as_ref().map(|_| chrono::Utc::now()),
             benchmark_report_json: reg.benchmark_report_json.clone(),
+            resource_observation_json: reg.resource_observation_json.clone(),
             last_heartbeat: chrono::Utc::now(),
             registered_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),

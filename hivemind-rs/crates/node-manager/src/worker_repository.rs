@@ -36,8 +36,9 @@ impl WorkerRepository {
                  dynamic_readiness_reason = COALESCE($22, dynamic_readiness_reason),
                  dynamic_observed_at = COALESCE($23, dynamic_observed_at),
                  benchmark_report_json = COALESCE($24, benchmark_report_json),
+                 resource_observation_json = COALESCE($25, resource_observation_json),
                  last_heartbeat = NOW(), updated_at = NOW()
-                 WHERE worker_id = $25 RETURNING *",
+                 WHERE worker_id = $26 RETURNING *",
             )
             .bind(&worker.username)
             .bind(&worker.ip)
@@ -63,6 +64,7 @@ impl WorkerRepository {
             .bind(&worker.dynamic_readiness_reason)
             .bind(worker.dynamic_observed_at)
             .bind(&worker.benchmark_report_json)
+            .bind(&worker.resource_observation_json)
             .bind(&worker.worker_id)
             .fetch_one(&self.pool)
             .await
@@ -77,9 +79,9 @@ impl WorkerRepository {
                 managed_dsl_capabilities_json, dynamic_capabilities_json,
                 dynamic_capabilities_digest, dynamic_admission_ready,
                 dynamic_readiness_reason, dynamic_observed_at,
-                benchmark_report_json)
+                benchmark_report_json, resource_observation_json)
                  VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,
-                         $17,$18,$19,$20,$21,$22,$23,$24,$25) RETURNING *",
+                         $17,$18,$19,$20,$21,$22,$23,$24,$25,$26) RETURNING *",
             )
             .bind(&worker.worker_id)
             .bind(&worker.username)
@@ -106,6 +108,7 @@ impl WorkerRepository {
             .bind(&worker.dynamic_readiness_reason)
             .bind(worker.dynamic_observed_at)
             .bind(&worker.benchmark_report_json)
+            .bind(&worker.resource_observation_json)
             .fetch_one(&self.pool)
             .await
             .map_err(Into::into)
@@ -164,8 +167,9 @@ impl WorkerRepository {
              dynamic_readiness_reason = $22,
              dynamic_observed_at = $23,
              benchmark_report_json = COALESCE($24, benchmark_report_json),
+             resource_observation_json = COALESCE($25, resource_observation_json),
              last_heartbeat = NOW(), updated_at = NOW()
-             WHERE worker_id = $25 AND (username = $26 OR $27)
+             WHERE worker_id = $26 AND (username = $27 OR $28)
              RETURNING *",
         )
         .bind(&worker.username)
@@ -192,6 +196,7 @@ impl WorkerRepository {
         .bind(&worker.dynamic_readiness_reason)
         .bind(worker.dynamic_observed_at)
         .bind(&worker.benchmark_report_json)
+        .bind(&worker.resource_observation_json)
         .bind(&worker.worker_id)
         .bind(owner)
         .bind(is_admin)
@@ -213,9 +218,9 @@ impl WorkerRepository {
              managed_dsl_capabilities_json, dynamic_capabilities_json,
              dynamic_capabilities_digest, dynamic_admission_ready,
              dynamic_readiness_reason, dynamic_observed_at,
-             benchmark_report_json)
+             benchmark_report_json, resource_observation_json)
              VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,
-                     $17,$18,$19,$20,$21,$22,$23,$24,$25)
+                     $17,$18,$19,$20,$21,$22,$23,$24,$25,$26)
              RETURNING *",
         )
         .bind(&worker.worker_id)
@@ -243,6 +248,7 @@ impl WorkerRepository {
         .bind(&worker.dynamic_readiness_reason)
         .bind(worker.dynamic_observed_at)
         .bind(&worker.benchmark_report_json)
+        .bind(&worker.resource_observation_json)
         .fetch_one(&self.pool)
         .await
         .map_err(Into::into)
@@ -387,6 +393,26 @@ impl WorkerRepository {
         Ok(result.rows_affected() > 0)
     }
 
+    /// Replace the stored resource observation for a registered worker. Unlike
+    /// the benchmark report, this is a short-lived host snapshot refreshed on
+    /// the heartbeat, so a beat without one leaves the prior value untouched
+    /// rather than clearing it.
+    pub async fn update_resource_observation(
+        &self,
+        worker_id: &str,
+        observation_json: &str,
+    ) -> Result<bool> {
+        let result = sqlx::query(
+            "UPDATE worker_nodes SET resource_observation_json = $1,
+             updated_at = NOW() WHERE worker_id = $2",
+        )
+        .bind(observation_json)
+        .bind(worker_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
     pub async fn delete(&self, worker_id: &str) -> Result<u64> {
         let result = sqlx::query("DELETE FROM worker_nodes WHERE worker_id = $1")
             .bind(worker_id)
@@ -473,6 +499,7 @@ mod tests {
             dynamic_readiness_reason: None,
             dynamic_observed_at: None,
             benchmark_report_json: None,
+            resource_observation_json: None,
             last_heartbeat: chrono::Utc::now(),
             registered_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
@@ -723,6 +750,7 @@ mod tests {
             dynamic_readiness_reason: None,
             dynamic_observed_at: None,
             benchmark_report_json: None,
+            resource_observation_json: None,
             last_heartbeat: chrono::Utc::now(),
             registered_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),

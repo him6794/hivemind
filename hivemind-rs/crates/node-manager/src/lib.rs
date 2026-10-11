@@ -208,6 +208,19 @@ impl NodeManager {
             .await
     }
 
+    /// Persist a Nodepool-verified resource observation delivered on a
+    /// heartbeat. This is a short-lived host snapshot, so it is refreshed on the
+    /// beat and a beat without one leaves the prior value untouched.
+    pub async fn update_worker_resource_observation(
+        &self,
+        worker_id: &str,
+        observation_json: &str,
+    ) -> Result<bool> {
+        self.repo
+            .update_resource_observation(worker_id, observation_json)
+            .await
+    }
+
     pub async fn client_instance_id_for_worker(
         &self,
         worker_id: &str,

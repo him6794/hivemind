@@ -15876,6 +15876,7 @@ mod tests {
             dynamic_readiness_reason: None,
             dynamic_observed_at: None,
             benchmark_report_json: None,
+            resource_observation_json: None,
             last_heartbeat: Utc::now(),
             registered_at: Utc::now(),
             updated_at: Utc::now(),

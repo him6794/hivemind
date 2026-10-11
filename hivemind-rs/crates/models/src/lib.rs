@@ -386,6 +386,11 @@ pub struct WorkerNode {
     /// score, validated suite/identity). A worker's claim is not stored until
     /// it passes Nodepool validation; `None` means no verified report yet.
     pub benchmark_report_json: Option<String>,
+    /// Last resource observation Nodepool verified (bounded, versioned gauges
+    /// with a sample time). `None` means the worker has not sent a usable
+    /// observation; a stored value is a presence-aware snapshot, never a
+    /// fabricated zero.
+    pub resource_observation_json: Option<String>,
     pub last_heartbeat: DateTime<Utc>,
     pub registered_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,

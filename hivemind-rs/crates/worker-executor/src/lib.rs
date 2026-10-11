@@ -566,6 +566,18 @@ impl WorkerExecutor {
         resource_monitor::to_resource_usage(&self.get_system_resources())
     }
 
+    /// The freshest presence-aware host observation, or `None` when no sample
+    /// exists yet. Built from the resource monitor's own support flags so an
+    /// absent gauge stays absent rather than a fabricated zero; Nodepool applies
+    /// the observation's own TTL from `sampled_at`.
+    pub fn resource_observation(
+        &self,
+    ) -> Option<hivemind_models::observations::ResourceObservation> {
+        self.latest_resource_sample().map(|sample| {
+            resource_monitor::to_resource_observation(&sample.resources, sample.sampled_at)
+        })
+    }
+
     #[must_use]
     pub fn dynamic_capability_report(&self) -> WorkerCapabilityReport {
         self.dynamic_capability_report.clone()

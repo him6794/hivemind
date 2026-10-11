@@ -203,6 +203,68 @@ pub fn to_resource_usage(resources: &SystemResources) -> ResourceUsage {
     }
 }
 
+/// Derive a presence-aware ResourceObservation from collected system resources.
+/// A gauge is `Some` only when its source reported a usable reading; an
+/// unsupported or absent source stays `None` (never a fabricated zero), so
+/// Nodepool can distinguish "not measured" from a true 0. The sample time is
+/// carried through so Nodepool can apply the observation's own TTL.
+pub fn to_resource_observation(
+    resources: &SystemResources,
+    sampled_at: chrono::DateTime<chrono::Utc>,
+) -> hivemind_models::observations::ResourceObservation {
+    let gpu_util = resources
+        .gpu_infos
+        .iter()
+        .map(|g| g.gpu_utilization_percent)
+        .fold(0.0_f64, |a, b| a.max(b));
+    let gpu_percent =
+        (resources.gpu_utilization_supported && resources.gpu_count > 0).then_some(gpu_util);
+    let vram_percent = (resources.vram_total_supported && resources.gpu_count > 0)
+        .then(|| {
+            resources.gpu_infos.first().and_then(|g| {
+                (g.vram_total_mb > 0)
+                    .then_some((g.vram_used_mb as f64 / g.vram_total_mb as f64) * 100.0)
+            })
+        })
+        .flatten();
+    let storage_percent =
+        (resources.storage_supported && resources.storage_total_gb > 0).then(|| {
+            ((resources.storage_total_gb - resources.storage_available_gb) as f64
+                / resources.storage_total_gb as f64)
+                * 100.0
+        });
+    let memory_mb = |gb: i32| gb as i64 * 1024;
+
+    hivemind_models::observations::ResourceObservation {
+        version: hivemind_models::observations::OBSERVATION_VERSION,
+        sampled_at: Some(sampled_at),
+        cpu_percent: resources
+            .cpu_usage_supported
+            .then_some(resources.cpu_usage_percent),
+        memory_percent: resources
+            .memory_supported
+            .then_some(resources.memory_usage_percent),
+        gpu_percent,
+        vram_percent,
+        storage_percent,
+        cpu_cores: Some(resources.cpu_cores),
+        total_memory_mb: resources
+            .memory_supported
+            .then_some(memory_mb(resources.total_memory_gb)),
+        available_memory_mb: resources
+            .memory_supported
+            .then_some(memory_mb(resources.available_memory_gb)),
+        gpu_count: Some(resources.gpu_count),
+        storage_total_gb: resources
+            .storage_supported
+            .then_some(resources.storage_total_gb),
+        storage_available_gb: resources
+            .storage_supported
+            .then_some(resources.storage_available_gb),
+        queue_capacity: None,
+    }
+}
+
 /// Detect NVIDIA GPUs via nvidia-smi
 fn detect_gpus() -> (Vec<GpuInfo>, bool, bool, bool, bool) {
     let output = run_bounded(

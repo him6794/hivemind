@@ -1404,6 +1404,10 @@ async fn register_worker(
         &profile.worker_id,
         &state.executor.benchmark.snapshot(),
     );
+    let resource_observation = crate::nodepool_client::resource_observation_to_proto(
+        &profile.worker_id,
+        state.executor.resource_observation().as_ref(),
+    );
     match register_once_with_capability_report(
         &state.nodepool_addr(),
         &profile.worker_id,
@@ -1414,6 +1418,7 @@ async fn register_worker(
         &token,
         capability_report,
         benchmark_report,
+        resource_observation,
     )
     .await
     {
