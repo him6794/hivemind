@@ -564,6 +564,87 @@ pub fn build_status_request(
     build_status_request_with_capability_report(worker_id, status, usage, token, None, None, None)
 }
 
+/// Resolves the worker's CPU benchmark thread budget from Nodepool's
+/// performance contract. Nodepool is the scheduling authority, so its
+/// `max_cpu_threads` bounds how many of the worker's threads a benchmark may
+/// use; the worker's own `available_parallelism` caps that in turn. The
+/// result is clamped to the contract's valid range so the coordinator never
+/// receives a budget it would reject, and is `None` when either side is
+/// absent — the coordinator then keeps its own default budget.
+fn resolve_cpu_budget(contract_max_threads: Option<i32>, available_threads: u32) -> Option<u32> {
+    let contract_max = contract_max_threads.filter(|value| *value > 0)? as u32;
+    let max_threads = hivemind_models::observations::BENCHMARK_MAX_THREADS;
+    let capped = contract_max.min(max_threads).min(available_threads);
+    Some(capped.max(1))
+}
+
+/// Fetches Nodepool's performance contract once, authenticated by the worker's
+/// token. Returns the contract on success, or `None` when Nodepool is
+/// unreachable or reports the contract unsupported — the worker then falls
+/// back to its own local budget rather than deferring registration.
+pub async fn fetch_performance_contract(
+    endpoint: &str,
+    token: &str,
+) -> Option<hivemind_proto::GetPerformanceContractResponse> {
+    let channel = Endpoint::from_shared(nodepool_endpoint(endpoint))
+        .ok()?
+        .connect_timeout(Duration::from_secs(5))
+        .connect()
+        .await
+        .ok()?;
+    let mut client = NodeManagerServiceClient::new(channel);
+    let response = tokio::time::timeout(
+        Duration::from_secs(10),
+        client.get_performance_contract(hivemind_proto::GetPerformanceContractRequest {
+            token: token.to_string(),
+        }),
+    )
+    .await
+    .ok()?;
+    let response = response.ok()?.into_inner();
+    response.success.then_some(response)
+}
+
+/// Applies Nodepool's performance contract to the benchmark coordinator. This
+/// is the production caller of `GetPerformanceContract`: on (re)connect the
+/// worker asks Nodepool for the contract and, when it supports the suite,
+/// re-bounds the CPU benchmark thread budget to the contract's `max_cpu_threads`
+/// (clamped by this host's parallelism). A changed budget invalidates and
+/// re-runs the CPU measurement under the new budget; an unsupported or
+/// unreachable contract leaves the current budget in place rather than
+/// fabricating one.
+pub async fn apply_performance_contract(
+    executor: &WorkerExecutor,
+    worker_id: &str,
+    endpoint: &str,
+    token: &str,
+) {
+    let Some(contract) = fetch_performance_contract(endpoint, token).await else {
+        return;
+    };
+    if !contract.supported {
+        return;
+    }
+    let available = crate::benchmark::available_threads();
+    let Some(budget) = resolve_cpu_budget(Some(contract.max_cpu_threads), available) else {
+        return;
+    };
+    if executor.benchmark.threads() != budget {
+        match executor.benchmark.update_budget(budget) {
+            Ok(()) => info!(
+                worker_id = %worker_id,
+                budget,
+                "applied Nodepool CPU budget to the benchmark coordinator"
+            ),
+            Err(error) => warn!(
+                worker_id = %worker_id,
+                error = %error,
+                "failed to apply the Nodepool CPU budget"
+            ),
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub async fn register_once(
     endpoint: &str,
@@ -911,6 +992,26 @@ pub fn start_registration_loop(
                                         info!("Worker {} registered with nodepool {}", registration.worker_id, current_endpoint);
                                         registered_worker_addr = Some(worker_addr.clone());
                                         last_sent_benchmark = requested_payload;
+                                        // On (re)connect, fetch Nodepool's performance contract
+                                        // and apply its CPU thread budget to the benchmark
+                                        // coordinator. Nodepool is the scheduling authority, so
+                                        // its max_cpu_threads bounds how many of this worker's
+                                        // threads a benchmark may use. Spawned so a slow or
+                                        // unreachable Nodepool never delays the registration
+                                        // loop's first heartbeat.
+                                        let endpoint = current_endpoint.clone();
+                                        let token = registration.token.clone();
+                                        let worker_id = registration.worker_id.clone();
+                                        let executor = Arc::clone(&executor);
+                                        tokio::spawn(async move {
+                                            apply_performance_contract(
+                                                &executor,
+                                                &worker_id,
+                                                &endpoint,
+                                                &token,
+                                            )
+                                            .await;
+                                        });
                                         client = Some(connected);
                                     }
                                     Ok(Ok(response)) => warn!("Worker registration rejected: {}", response.get_ref().status_message),
@@ -1534,11 +1635,14 @@ fn resource_usage_to_proto(usage: ResourceUsage) -> ProtoResourceUsage {
 
 #[cfg(test)]
 mod tests {
+    use crate::WorkerExecutor;
+    use hivemind_config::HivemindConfig;
     use hivemind_models::{ResourceSpec, ResourceUsage};
     use hivemind_proto::{
         node_manager_service_server::{NodeManagerService, NodeManagerServiceServer},
-        ListWorkersRequest, ListWorkersResponse, RemoveWorkerRequest, RunningStatusResponse,
-        StatusResponse, TaskOutputUploadRequest, TaskOutputUploadResponse, TaskResultUploadRequest,
+        GetPerformanceContractRequest, GetPerformanceContractResponse, ListWorkersRequest,
+        ListWorkersResponse, RemoveWorkerRequest, RunningStatusResponse, StatusResponse,
+        TaskOutputUploadRequest, TaskOutputUploadResponse, TaskResultUploadRequest,
         TaskResultUploadResponse, TaskUsageRequest, TaskUsageResponse,
         ValidateGeneralComputeTransferLeaseRequest,
     };
@@ -2166,6 +2270,199 @@ mod tests {
             )
             .unwrap(),
             "worker.example:50053"
+        );
+    }
+
+    #[test]
+    fn resolve_cpu_budget_clamps_to_nodepool_and_local_capacity() {
+        // The contract caps the worker's own thread capacity.
+        assert_eq!(super::resolve_cpu_budget(Some(32), 8), Some(8));
+        // A smaller Nodepool budget is applied as-is.
+        assert_eq!(super::resolve_cpu_budget(Some(4), 8), Some(4));
+        // A contract above the suite cap is folded to the cap, then the host.
+        assert_eq!(super::resolve_cpu_budget(Some(64), 8), Some(8));
+        // A host with more than the cap is folded to the cap.
+        assert_eq!(super::resolve_cpu_budget(Some(64), 64), Some(32));
+        // A host with no usable parallelism still gets a minimum of one thread.
+        assert_eq!(super::resolve_cpu_budget(Some(8), 0), Some(1));
+        // An absent, zero, or negative Nodepool budget means "keep the
+        // worker's own default" rather than a fabricated budget.
+        assert_eq!(super::resolve_cpu_budget(None, 8), None);
+        assert_eq!(super::resolve_cpu_budget(Some(0), 8), None);
+        assert_eq!(super::resolve_cpu_budget(Some(-1), 8), None);
+    }
+
+    /// A Nodepool mock that returns a configurable performance contract and
+    /// records the authenticated request, so a test can prove the worker
+    /// actually issued `GetPerformanceContract`.
+    struct ContractServer {
+        addr: SocketAddr,
+        request_rx: mpsc::Receiver<GetPerformanceContractRequest>,
+    }
+
+    struct ContractMockService {
+        request_tx: mpsc::Sender<GetPerformanceContractRequest>,
+        max_cpu_threads: i32,
+    }
+
+    #[tonic::async_trait]
+    impl NodeManagerService for ContractMockService {
+        async fn get_performance_contract(
+            &self,
+            request: Request<GetPerformanceContractRequest>,
+        ) -> Result<Response<GetPerformanceContractResponse>, Status> {
+            self.request_tx
+                .send(request.into_inner())
+                .await
+                .map_err(|_| Status::internal("contract receiver dropped"))?;
+            Ok(Response::new(GetPerformanceContractResponse {
+                success: true,
+                status_message: "OK".into(),
+                supported: true,
+                protocol_version: hivemind_proto::OBSERVATION_PROTOCOL_VERSION,
+                score_suite: hivemind_models::observations::HARDWARE_SUITE.to_string(),
+                max_cpu_threads: self.max_cpu_threads,
+                benchmark_ttl_seconds: hivemind_models::observations::BENCHMARK_TTL_SECONDS,
+                resource_ttl_seconds: hivemind_models::observations::RESOURCE_TTL_SECONDS,
+            }))
+        }
+
+        async fn register_worker_node(
+            &self,
+            _request: Request<hivemind_proto::RegisterWorkerNodeRequest>,
+        ) -> Result<Response<StatusResponse>, Status> {
+            Err(Status::unimplemented("not used by this test"))
+        }
+
+        async fn report_status(
+            &self,
+            _request: Request<hivemind_proto::RunningStatusRequest>,
+        ) -> Result<Response<RunningStatusResponse>, Status> {
+            Err(Status::unimplemented("not used by this test"))
+        }
+
+        async fn validate_general_compute_transfer_lease(
+            &self,
+            _request: Request<ValidateGeneralComputeTransferLeaseRequest>,
+        ) -> Result<Response<hivemind_proto::ValidateGeneralComputeTransferLeaseResponse>, Status>
+        {
+            Err(Status::unimplemented("not used by this test"))
+        }
+
+        async fn task_output_upload(
+            &self,
+            _request: Request<TaskOutputUploadRequest>,
+        ) -> Result<Response<TaskOutputUploadResponse>, Status> {
+            Err(Status::unimplemented("not used by this test"))
+        }
+
+        async fn task_result_upload(
+            &self,
+            _request: Request<TaskResultUploadRequest>,
+        ) -> Result<Response<TaskResultUploadResponse>, Status> {
+            Err(Status::unimplemented("not used by this test"))
+        }
+
+        async fn task_usage(
+            &self,
+            _request: Request<TaskUsageRequest>,
+        ) -> Result<Response<TaskUsageResponse>, Status> {
+            Err(Status::unimplemented("not used by this test"))
+        }
+
+        async fn list_workers(
+            &self,
+            _request: Request<ListWorkersRequest>,
+        ) -> Result<Response<ListWorkersResponse>, Status> {
+            Err(Status::unimplemented("not used by this test"))
+        }
+
+        async fn remove_worker(
+            &self,
+            _request: Request<RemoveWorkerRequest>,
+        ) -> Result<Response<StatusResponse>, Status> {
+            Err(Status::unimplemented("not used by this test"))
+        }
+    }
+
+    async fn contract_node_manager(max_cpu_threads: i32) -> Option<ContractServer> {
+        let addr = reserve_loopback_addr()?;
+        let (request_tx, request_rx) = mpsc::channel(1);
+        let service = NodeManagerServiceServer::new(ContractMockService {
+            request_tx,
+            max_cpu_threads,
+        });
+        tokio::spawn(async move {
+            let _ = tonic::transport::Server::builder()
+                .add_service(service)
+                .serve(addr)
+                .await;
+        });
+        for _ in 0..30 {
+            if hivemind_proto::node_manager_service_client::NodeManagerServiceClient::connect(
+                format!("http://{addr}"),
+            )
+            .await
+            .is_ok()
+            {
+                return Some(ContractServer { addr, request_rx });
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        None
+    }
+
+    #[tokio::test]
+    async fn worker_applies_the_nodepool_performance_contract_budget_on_connect() {
+        let executor = WorkerExecutor::new(HivemindConfig::default());
+        let current = executor.benchmark.threads();
+        let available = crate::benchmark::available_threads();
+        assert!(current > 0);
+        // A contract whose max equals this host's available parallelism
+        // resolves to the coordinator's existing budget, so no re-run is
+        // triggered.
+        let mut server = contract_node_manager(available as i32)
+            .await
+            .expect("contract server should bind");
+        super::apply_performance_contract(
+            &executor,
+            "worker-contract",
+            &server.addr.to_string(),
+            "contract-token",
+        )
+        .await;
+        let request = tokio::time::timeout(Duration::from_secs(2), server.request_rx.recv())
+            .await
+            .expect("worker should issue the contract request")
+            .expect("contract request should arrive");
+        assert_eq!(request.token, "contract-token");
+        assert_eq!(
+            executor.benchmark.threads(),
+            current,
+            "matching budget leaves the coordinator unchanged"
+        );
+    }
+
+    #[tokio::test]
+    async fn worker_clamps_the_benchmark_budget_to_the_nodepool_contract() {
+        let executor = WorkerExecutor::new(HivemindConfig::default());
+        let available = crate::benchmark::available_threads();
+        // A contract smaller than the host's parallelism is applied as-is;
+        // the coordinator re-bounds its CPU suite to the contracted threads.
+        let server = contract_node_manager(1)
+            .await
+            .expect("contract server should bind");
+        super::apply_performance_contract(
+            &executor,
+            "worker-contract-2",
+            &server.addr.to_string(),
+            "contract-token",
+        )
+        .await;
+        assert_eq!(
+            executor.benchmark.threads(),
+            1.min(available),
+            "the coordinator adopts the contracted budget"
         );
     }
 }
