@@ -855,6 +855,11 @@ fn execution_observation_view(
     if envelope.protocol_version != hivemind_proto::OBSERVATION_PROTOCOL_VERSION {
         return None;
     }
+    // The same size bound Nodepool applies on ingest, kept here so the master
+    // projection cannot parse a payload that outruns the envelope contract.
+    if envelope.observation_json.len() > hivemind_proto::OBSERVATION_ENVELOPE_MAX_BYTES {
+        return None;
+    }
     let inner: hivemind_models::observations::ExecutionObservation =
         serde_json::from_str(&envelope.observation_json).ok()?;
     if inner.validate().is_err() {
