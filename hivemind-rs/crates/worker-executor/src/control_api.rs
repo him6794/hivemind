@@ -601,15 +601,16 @@ fn resource_sample_is_stale(
 }
 
 /// Read the last measured hardware benchmark report. This is local, cached
-/// state, so it is protected by the same bearer + registered-identity gate as
-/// the rest of the control API but does not require a Nodepool round trip —
-/// the most recent measurement stays visible even when Nodepool is
-/// unreachable.
+/// state: when Nodepool is reachable the token must be one Nodepool issued
+/// and the worker must belong to the presenting account (the same ownership
+/// proof the rerun endpoint enforces), so a bare bearer string on another
+/// account cannot read this worker; when Nodepool is unreachable the read
+/// fails open so the most recent measurement stays visible offline.
 async fn benchmark_status(
     State(state): State<ControlApiState>,
     headers: axum::http::HeaderMap,
 ) -> std::result::Result<Json<BenchmarkStatusResponse>, (StatusCode, Json<StatusResponse>)> {
-    let _token = bearer_token(&headers).ok_or_else(|| {
+    let token = bearer_token(&headers).ok_or_else(|| {
         (
             StatusCode::UNAUTHORIZED,
             Json(StatusResponse {
@@ -618,7 +619,7 @@ async fn benchmark_status(
             }),
         )
     })?;
-    let _worker_id = state.current_worker_identity().ok_or_else(|| {
+    let worker_id = state.current_worker_identity().ok_or_else(|| {
         (
             StatusCode::SERVICE_UNAVAILABLE,
             Json(StatusResponse {
@@ -627,6 +628,32 @@ async fn benchmark_status(
             }),
         )
     })?;
+    // Ownership is enforced against Nodepool when it is reachable. An
+    // Unavailable Nodepool fails open (the report is local, cached state and
+    // stays readable offline); a token Nodepool rejects, or one that does not
+    // own this worker, fails closed exactly as the rerun endpoint does.
+    match nodepool_client::verify_worker_ownership(&state.nodepool_addr(), &token, &worker_id).await
+    {
+        nodepool_client::OwnershipCheck::Owned | nodepool_client::OwnershipCheck::Unavailable => {}
+        nodepool_client::OwnershipCheck::Unauthorized => {
+            return Err((
+                StatusCode::UNAUTHORIZED,
+                Json(StatusResponse {
+                    success: false,
+                    status_message: "Bearer token was rejected by Nodepool".into(),
+                }),
+            ))
+        }
+        nodepool_client::OwnershipCheck::NotOwned => {
+            return Err((
+                StatusCode::FORBIDDEN,
+                Json(StatusResponse {
+                    success: false,
+                    status_message: "Worker is not owned by the authenticated account".into(),
+                }),
+            ))
+        }
+    }
 
     let coordinator = &state.executor.benchmark;
     let report = coordinator.snapshot();
@@ -2191,5 +2218,267 @@ mod tests {
         }
 
         assert_eq!(loaded.server.worker_control_http_addr, "127.0.0.1:19090");
+    }
+
+    // --- Ownership-gate coverage for GET /api/benchmark -------------------
+    // The read endpoint verifies ownership against Nodepool when it is
+    // reachable (Owned and Unavailable fail open, Unauthorized/NotOwned fail
+    // closed). A small MasterNodeService mock stands in for Nodepool so the
+    // reachable path can be exercised deterministically.
+    fn reserve_loopback_addr() -> Option<std::net::SocketAddr> {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").ok()?;
+        let addr = listener.local_addr().ok()?;
+        drop(listener);
+        Some(addr)
+    }
+
+    /// Stands in for Nodepool's assignments endpoint. `None` answers with an
+    /// `unauthenticated` gRPC status (a token Nodepool rejects); `Some`
+    /// returns the given assignment mapping (owned by this worker or another).
+    struct OwnershipMockService {
+        response: Option<hivemind_proto::GetProviderWorkerAssignmentsResponse>,
+    }
+
+    #[tonic::async_trait]
+    impl hivemind_proto::MasterNodeService for OwnershipMockService {
+        async fn get_provider_worker_assignments(
+            &self,
+            _request: tonic::Request<hivemind_proto::GetProviderWorkerAssignmentsRequest>,
+        ) -> Result<
+            tonic::Response<hivemind_proto::GetProviderWorkerAssignmentsResponse>,
+            tonic::Status,
+        > {
+            match self.response.clone() {
+                Some(response) => Ok(tonic::Response::new(response)),
+                None => Err(tonic::Status::unauthenticated("Invalid token")),
+            }
+        }
+        async fn upload_task(
+            &self,
+            _request: tonic::Request<hivemind_proto::UploadTaskRequest>,
+        ) -> Result<tonic::Response<hivemind_proto::UploadTaskResponse>, tonic::Status> {
+            Err(tonic::Status::unimplemented("not used by this test"))
+        }
+        async fn get_task_result(
+            &self,
+            _request: tonic::Request<hivemind_proto::GetTaskResultRequest>,
+        ) -> Result<tonic::Response<hivemind_proto::GetTaskResultResponse>, tonic::Status> {
+            Err(tonic::Status::unimplemented("not used by this test"))
+        }
+        async fn get_all_user_tasks(
+            &self,
+            _request: tonic::Request<hivemind_proto::GetAllUserTasksRequest>,
+        ) -> Result<tonic::Response<hivemind_proto::GetAllUserTasksResponse>, tonic::Status>
+        {
+            Err(tonic::Status::unimplemented("not used by this test"))
+        }
+        async fn stop_task(
+            &self,
+            _request: tonic::Request<hivemind_proto::StopTaskRequest>,
+        ) -> Result<tonic::Response<hivemind_proto::StopTaskResponse>, tonic::Status> {
+            Err(tonic::Status::unimplemented("not used by this test"))
+        }
+        async fn get_tasklog(
+            &self,
+            _request: tonic::Request<hivemind_proto::TasklogRequest>,
+        ) -> Result<tonic::Response<hivemind_proto::TasklogResponse>, tonic::Status> {
+            Err(tonic::Status::unimplemented("not used by this test"))
+        }
+        async fn download_task_artifact(
+            &self,
+            _request: tonic::Request<hivemind_proto::DownloadTaskArtifactRequest>,
+        ) -> Result<tonic::Response<hivemind_proto::DownloadTaskArtifactResponse>, tonic::Status>
+        {
+            Err(tonic::Status::unimplemented("not used by this test"))
+        }
+        async fn quote_task(
+            &self,
+            _request: tonic::Request<hivemind_proto::QuoteTaskRequest>,
+        ) -> Result<tonic::Response<hivemind_proto::QuoteTaskResponse>, tonic::Status> {
+            Err(tonic::Status::unimplemented("not used by this test"))
+        }
+        async fn get_provider_earnings(
+            &self,
+            _request: tonic::Request<hivemind_proto::GetProviderEarningsRequest>,
+        ) -> Result<tonic::Response<hivemind_proto::GetProviderEarningsResponse>, tonic::Status>
+        {
+            Err(tonic::Status::unimplemented("not used by this test"))
+        }
+        async fn get_provider_worker_settings(
+            &self,
+            _request: tonic::Request<hivemind_proto::GetProviderWorkerSettingsRequest>,
+        ) -> Result<tonic::Response<hivemind_proto::GetProviderWorkerSettingsResponse>, tonic::Status>
+        {
+            Err(tonic::Status::unimplemented("not used by this test"))
+        }
+        async fn update_provider_worker_settings(
+            &self,
+            _request: tonic::Request<hivemind_proto::UpdateProviderWorkerSettingsRequest>,
+        ) -> Result<
+            tonic::Response<hivemind_proto::UpdateProviderWorkerSettingsResponse>,
+            tonic::Status,
+        > {
+            Err(tonic::Status::unimplemented("not used by this test"))
+        }
+        async fn get_admin_billing_overview(
+            &self,
+            _request: tonic::Request<hivemind_proto::GetAdminBillingOverviewRequest>,
+        ) -> Result<tonic::Response<hivemind_proto::GetAdminBillingOverviewResponse>, tonic::Status>
+        {
+            Err(tonic::Status::unimplemented("not used by this test"))
+        }
+        async fn get_admin_artifact_overview(
+            &self,
+            _request: tonic::Request<hivemind_proto::GetAdminArtifactOverviewRequest>,
+        ) -> Result<tonic::Response<hivemind_proto::GetAdminArtifactOverviewResponse>, tonic::Status>
+        {
+            Err(tonic::Status::unimplemented("not used by this test"))
+        }
+        async fn cleanup_admin_artifacts(
+            &self,
+            _request: tonic::Request<hivemind_proto::CleanupAdminArtifactsRequest>,
+        ) -> Result<tonic::Response<hivemind_proto::CleanupAdminArtifactsResponse>, tonic::Status>
+        {
+            Err(tonic::Status::unimplemented("not used by this test"))
+        }
+        async fn get_admin_scheduling_cache_metrics(
+            &self,
+            _request: tonic::Request<hivemind_proto::GetAdminSchedulingCacheMetricsRequest>,
+        ) -> Result<
+            tonic::Response<hivemind_proto::GetAdminSchedulingCacheMetricsResponse>,
+            tonic::Status,
+        > {
+            Err(tonic::Status::unimplemented("not used by this test"))
+        }
+        async fn get_admin_scheduling_cache_alert(
+            &self,
+            _request: tonic::Request<hivemind_proto::GetAdminSchedulingCacheAlertRequest>,
+        ) -> Result<
+            tonic::Response<hivemind_proto::GetAdminSchedulingCacheAlertResponse>,
+            tonic::Status,
+        > {
+            Err(tonic::Status::unimplemented("not used by this test"))
+        }
+        async fn list_admin_scheduling_cache_anomalies(
+            &self,
+            _request: tonic::Request<hivemind_proto::ListAdminSchedulingCacheAnomaliesRequest>,
+        ) -> Result<
+            tonic::Response<hivemind_proto::ListAdminSchedulingCacheAnomaliesResponse>,
+            tonic::Status,
+        > {
+            Err(tonic::Status::unimplemented("not used by this test"))
+        }
+        async fn get_worker_trust_profile(
+            &self,
+            _request: tonic::Request<hivemind_proto::GetWorkerTrustProfileRequest>,
+        ) -> Result<tonic::Response<hivemind_proto::GetWorkerTrustProfileResponse>, tonic::Status>
+        {
+            Err(tonic::Status::unimplemented("not used by this test"))
+        }
+        async fn update_worker_trust_control(
+            &self,
+            _request: tonic::Request<hivemind_proto::UpdateWorkerTrustControlRequest>,
+        ) -> Result<tonic::Response<hivemind_proto::UpdateWorkerTrustControlResponse>, tonic::Status>
+        {
+            Err(tonic::Status::unimplemented("not used by this test"))
+        }
+        async fn list_admin_worker_trust(
+            &self,
+            _request: tonic::Request<hivemind_proto::ListAdminWorkerTrustRequest>,
+        ) -> Result<tonic::Response<hivemind_proto::ListAdminWorkerTrustResponse>, tonic::Status>
+        {
+            Err(tonic::Status::unimplemented("not used by this test"))
+        }
+        async fn list_admin_audit_logs(
+            &self,
+            _request: tonic::Request<hivemind_proto::ListAdminAuditLogsRequest>,
+        ) -> Result<tonic::Response<hivemind_proto::ListAdminAuditLogsResponse>, tonic::Status>
+        {
+            Err(tonic::Status::unimplemented("not used by this test"))
+        }
+    }
+
+    async fn ownership_master_node(
+        response: Option<hivemind_proto::GetProviderWorkerAssignmentsResponse>,
+    ) -> Option<std::net::SocketAddr> {
+        let addr = reserve_loopback_addr()?;
+        let service =
+            hivemind_proto::MasterNodeServiceServer::new(OwnershipMockService { response });
+        tokio::spawn(async move {
+            let _ = tonic::transport::Server::builder()
+                .add_service(service)
+                .serve(addr)
+                .await;
+        });
+        for _ in 0..30 {
+            if tonic::transport::Endpoint::from_shared(format!("http://{addr}"))
+                .unwrap()
+                .connect()
+                .await
+                .is_ok()
+            {
+                return Some(addr);
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        None
+    }
+
+    async fn benchmark_status_for_ownership(
+        response: Option<hivemind_proto::GetProviderWorkerAssignmentsResponse>,
+    ) -> Option<StatusCode> {
+        let addr = ownership_master_node(response).await?;
+        let state = sample_state();
+        state.set_nodepool_addr(addr.to_string());
+        let app = super::router_with_allowed_origins(state, &[]);
+        let http = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/benchmark")
+                    .header(axum::http::header::AUTHORIZATION, "Bearer account-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        Some(http.status())
+    }
+
+    #[tokio::test]
+    async fn benchmark_status_defers_ownership_to_nodepool_when_reachable() {
+        // Nodepool maps the presented token to a different worker: the read is
+        // a cross-account claim and fails closed with 403, even though the
+        // report is available locally.
+        let not_owned = benchmark_status_for_ownership(Some(
+            hivemind_proto::GetProviderWorkerAssignmentsResponse {
+                success: true,
+                status_message: "OK".into(),
+                worker_id: "another-worker".into(),
+                assignments: vec![],
+            },
+        ))
+        .await;
+        assert_eq!(not_owned, Some(StatusCode::FORBIDDEN));
+
+        // The same token owned by this worker reads the cached report.
+        let owned = benchmark_status_for_ownership(Some(
+            hivemind_proto::GetProviderWorkerAssignmentsResponse {
+                success: true,
+                status_message: "OK".into(),
+                worker_id: "worker-1".into(),
+                assignments: vec![],
+            },
+        ))
+        .await;
+        assert_eq!(owned, Some(StatusCode::OK));
+    }
+
+    #[tokio::test]
+    async fn benchmark_status_fails_closed_when_nodepool_rejects_the_token() {
+        // Nodepool answers the assignments RPC with an `unauthenticated` gRPC
+        // status (a token it does not recognize): the read is 401, distinct
+        // from the 403 a recognized-but-foreign token receives.
+        let unauthorized = benchmark_status_for_ownership(None).await;
+        assert_eq!(unauthorized, Some(StatusCode::UNAUTHORIZED));
     }
 }
