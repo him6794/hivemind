@@ -1366,6 +1366,17 @@ impl NodeManagerService for GrpcNodeManagerService {
                 }));
             }
         }
+        // The same shape/length guard register_worker_node applies before it
+        // touches a worker row, so a beat cannot write the new benchmark and
+        // observation columns under a key the other paths would reject.
+        if !is_safe_worker_id(&worker_id) {
+            return Ok(Response::new(RunningStatusResponse {
+                success: false,
+                status_message: "Invalid worker_id".into(),
+                effective_cpu_threads: None,
+                worker_policy_generation: 0,
+            }));
+        }
         let public_dynamic = self.state.node_manager.is_public_dynamic_admission();
         let dynamic_capability_report = if public_dynamic {
             match parse_worker_capability_report(req.capability_report, true) {
