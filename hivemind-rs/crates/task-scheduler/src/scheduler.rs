@@ -193,19 +193,16 @@ pub async fn find_best_worker(task: &Task, workers: &[WorkerNode]) -> Option<Wor
         }
     }
 
-    fn effective_cpu_score(w: &WorkerNode) -> i32 {
-        // The scheduler uses the Nodepool-verified benchmark score, not the
-        // historical `cpu_score` scalar (which the registration loop zeros
-        // because the heuristic was removed). A positive task requirement with
-        // no usable measured score fails closed instead of matching by default.
-        w.measured_scores().0.unwrap_or(0)
-    }
-
-    fn effective_gpu_score(w: &WorkerNode) -> i32 {
-        // Same rule as the CPU score: only a fresh, Ready, suite-matching GPU
-        // measurement counts. A worker with no usable measured GPU score offers
-        // no GPU performance claim, so a positive `req_gpu_score` is unmet.
-        w.measured_scores().1.unwrap_or(0)
+    fn measured_scores(w: &WorkerNode) -> (i32, i32) {
+        // The scheduler uses the Nodepool-verified benchmark scores, not the
+        // historical `cpu_score`/`gpu_score` scalars (which the registration
+        // loop zeros because the heuristic was removed). A positive task
+        // requirement with no usable measured score fails closed instead of
+        // matching by default. Computed once per worker per pass, so the
+        // stored report is parsed a single time; the model helper already
+        // drops the CPU score when the provider cap is below the budget.
+        let (cpu, gpu) = w.measured_scores();
+        (cpu.unwrap_or(0), gpu.unwrap_or(0))
     }
 
     fn effective_available_memory_gb(w: &WorkerNode) -> i32 {
@@ -266,11 +263,12 @@ pub async fn find_best_worker(task: &Task, workers: &[WorkerNode]) -> Option<Wor
             Some(_) => false,
         };
 
+        let (cpu_score, gpu_score) = measured_scores(w);
         status_ok
             && w.provider_enabled
             && general_compute_compatible
-            && effective_cpu_score(w) >= task.req_cpu_score
-            && effective_gpu_score(w) >= task.req_gpu_score
+            && cpu_score >= task.req_cpu_score
+            && gpu_score >= task.req_gpu_score
             && effective_available_memory_gb(w) >= task.req_memory_gb
             && effective_i32(w.gpu_memory_gb, w.gpu_memory_gb_limit) >= task.req_gpu_memory_gb
             && effective_available_storage_gb(w) >= task.req_storage_gb

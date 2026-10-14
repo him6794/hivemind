@@ -287,6 +287,20 @@ impl HardwareBenchmarkReport {
         }
         self.cpu.score(false).ok().flatten()
     }
+
+    /// The current CPU and GPU scores for this validated report. `cpu` is
+    /// `Some` only for a fresh release-build measurement at the recorded thread
+    /// budget; `gpu` is the highest fresh, ready per-device score.
+    pub fn scores(&self, now: DateTime<Utc>) -> (Option<i32>, Option<i32>) {
+        let cpu = self.cpu_score(self.cpu.threads, now);
+        let gpu = self
+            .gpus
+            .iter()
+            .filter(|gpu| gpu.measurement.fresh(now))
+            .filter_map(|gpu| gpu.measurement.score(true).ok().flatten())
+            .max();
+        (cpu, gpu)
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]

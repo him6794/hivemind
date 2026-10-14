@@ -4213,14 +4213,24 @@ fn validate_worker_registration_resources(
 }
 
 fn worker_info_from_model(worker: WorkerNode) -> WorkerInfo {
-    // The displayed score is the Nodepool-verified, fresh benchmark score, not
-    // the zeroed legacy scalar. An unmeasured component projects to 0, which the
-    // frontend treats as "absent" (not a real zero).
-    let (measured_cpu, measured_gpu) = worker.measured_scores();
-    let benchmark_report = stored_benchmark_report_envelope(
-        &worker.worker_id,
-        worker.benchmark_report_json.as_deref(),
-    );
+    // The stored report is parsed and re-validated once; both the displayed
+    // score and the wire envelope use that single parse. An unmeasured
+    // component projects to 0, which the frontend treats as "absent" (not a
+    // real zero); a stored value that no longer validates projects to no
+    // envelope at all.
+    let benchmark_report = worker.parsed_benchmark_report();
+    if benchmark_report.is_none() && worker.benchmark_report_json.is_some() {
+        tracing::warn!(
+            worker_id = %worker.worker_id,
+            "stored benchmark report failed re-validation and was dropped from the projection"
+        );
+    }
+    let (measured_cpu, measured_gpu) = match &benchmark_report {
+        Some(report) => worker.scores_from_report(report),
+        None => (None, None),
+    };
+    let benchmark_report =
+        stored_benchmark_report_envelope(&worker.worker_id, benchmark_report.as_ref());
     let resource_observation = stored_resource_observation_envelope(
         &worker.worker_id,
         worker.resource_observation_json.as_deref(),
@@ -4257,43 +4267,17 @@ fn worker_info_from_model(worker: WorkerNode) -> WorkerInfo {
     }
 }
 
-/// Projects the Nodepool-verified benchmark report back onto the wire. The JSON
-/// is stored canonical (it passed `parse` at registration); re-validating here
-/// keeps a hand-edited or legacy row from leaking a stale/invalid claim.
-///
-/// `None` means "this worker has no usable stored report." A stored report that
-/// fails re-validation also projects to `None`, but the failure is logged with
-/// the worker's identity so an operator can tell a genuinely absent report from
-/// one that was stored and then dropped on projection.
+/// Projects an already-validated stored benchmark report onto the wire as the
+/// canonical envelope. The caller parses and re-validates once (via
+/// `WorkerNode::parsed_benchmark_report`) and reuses that for both the score
+/// projection and this envelope, so a single worker row costs one parse, not
+/// one per consumer. A `None` report projects to no envelope at all.
 fn stored_benchmark_report_envelope(
-    worker_id: &str,
-    report_json: Option<&str>,
+    _worker_id: &str,
+    report: Option<&hivemind_models::observations::HardwareBenchmarkReport>,
 ) -> Option<ProtoHardwareBenchmarkReport> {
-    let report_json = report_json?;
-    let parsed = match hivemind_models::observations::HardwareBenchmarkReport::parse(
-        report_json.as_bytes(),
-    ) {
-        Ok(report) => report,
-        Err(message) => {
-            tracing::warn!(
-                worker_id = %worker_id,
-                error = %message,
-                "stored benchmark report failed re-validation and was dropped from the projection"
-            );
-            return None;
-        }
-    };
-    let payload = match serde_json::to_string(&parsed) {
-        Ok(payload) => payload,
-        Err(error) => {
-            tracing::warn!(
-                worker_id = %worker_id,
-                error = %error,
-                "stored benchmark report failed re-serialization and was dropped from the projection"
-            );
-            return None;
-        }
-    };
+    let parsed = report?;
+    let payload = serde_json::to_string(parsed).ok()?;
     Some(ProtoHardwareBenchmarkReport {
         protocol_version: hivemind_proto::OBSERVATION_PROTOCOL_VERSION,
         report_json: payload,

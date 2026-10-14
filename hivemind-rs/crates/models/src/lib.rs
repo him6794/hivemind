@@ -407,6 +407,17 @@ impl WorkerNode {
         }
     }
 
+    /// The verified benchmark report, parsed and re-validated once. Returns
+    /// `None` when the worker has no stored report or the stored value no
+    /// longer validates. Both the score projection and the wire envelope go
+    /// through this so the JSON is parsed and validated a single time per
+    /// worker per pass, not once per consumer.
+    pub fn parsed_benchmark_report(&self) -> Option<observations::HardwareBenchmarkReport> {
+        self.benchmark_report_json
+            .as_deref()
+            .and_then(|json| observations::HardwareBenchmarkReport::parse(json.as_bytes()).ok())
+    }
+
     /// The verified benchmark's current CPU and GPU scores, recomputed from the
     /// Nodepool-persisted report. Each element is `Some(score)` only when that
     /// measurement is Ready, fresh within its TTL, and (for CPU) taken at the
@@ -415,31 +426,30 @@ impl WorkerNode {
     /// columns are deliberately not consulted — a missing measurement is
     /// "no performance claim," never a fabricated zero.
     pub fn measured_scores(&self) -> (Option<i32>, Option<i32>) {
-        let Some(report) = self
-            .benchmark_report_json
-            .as_deref()
-            .and_then(|json| observations::HardwareBenchmarkReport::parse(json.as_bytes()).ok())
-        else {
-            return (None, None);
-        };
-        let now = Utc::now();
-        // A CPU score measured at a thread budget the provider no longer allows
-        // is only meaningful after the worker re-measures, so gate it on the
-        // cap (a zero limit is no cap). The GPU score is independent of it.
+        self.parsed_benchmark_report()
+            .map(|report| self.scores_from_report(&report))
+            .unwrap_or((None, None))
+    }
+
+    /// The gated CPU/GPU scores for an already-parsed, validated report. The
+    /// CPU score only counts while fresh, a release build, taken at the
+    /// recorded budget, and not below the provider's `cpu_cores_limit` (a zero
+    /// limit is no cap): a worker later capped below its measurement budget no
+    /// longer advertises that score until re-measured. The GPU score is
+    /// independent of the cap. Sharing this across the score projection and the
+    /// wire envelope keeps a worker row to a single parse.
+    pub fn scores_from_report(
+        &self,
+        report: &observations::HardwareBenchmarkReport,
+    ) -> (Option<i32>, Option<i32>) {
         let budget_ok =
             self.cpu_cores_limit <= 0 || self.cpu_cores_limit as u32 >= report.cpu.threads;
-        let cpu = if budget_ok {
-            report.cpu_score(report.cpu.threads, now)
+        let (cpu, gpu) = report.scores(Utc::now());
+        if budget_ok {
+            (cpu, gpu)
         } else {
-            None
-        };
-        let gpu = report
-            .gpus
-            .iter()
-            .filter(|gpu| gpu.measurement.fresh(now))
-            .filter_map(|gpu| gpu.measurement.score(true).ok().flatten())
-            .max();
-        (cpu, gpu)
+            (None, gpu)
+        }
     }
 }
 
