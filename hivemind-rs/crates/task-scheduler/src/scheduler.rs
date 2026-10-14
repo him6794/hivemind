@@ -638,49 +638,12 @@ mod tests {
     }
 
     fn measured_cpu_benchmark_json(threads: u32, age_secs: i64) -> String {
-        use hivemind_models::observations::{
-            BenchmarkBatch, BenchmarkCase, BenchmarkMeasurement, BenchmarkState,
-            HardwareBenchmarkReport, BENCHMARK_BATCHES, HARDWARE_SUITE, OBSERVATION_VERSION,
-        };
-        let batches = vec![
-            BenchmarkBatch {
-                repetitions: 1,
-                // 2 * 128^3 * 1 / 4_194_304 = exactly 1.0 GFLOP/s per participating
-                // thread, so the harmonic-mean score is 100 * threads.
-                elapsed_ns: 4_194_304,
-            };
-            BENCHMARK_BATCHES
-        ];
-        let case = |name: &str, threads: u32| BenchmarkCase {
-            name: name.into(),
-            dimension: 128,
-            threads,
-            batches: batches.clone(),
-        };
-        let report = HardwareBenchmarkReport {
-            version: OBSERVATION_VERSION,
-            suite: HARDWARE_SUITE.into(),
-            build_id: "a".repeat(64),
-            release_build: true,
-            cpu: BenchmarkMeasurement {
-                measurement_id: Some(uuid::Uuid::new_v4()),
-                state: BenchmarkState::Ready,
-                measured_at: Some(chrono::Utc::now() - chrono::Duration::seconds(age_secs)),
-                identity: "test cpu".into(),
-                threads,
-                correctness_passed: true,
-                cases: vec![
-                    case("cpu-f32-single", 1),
-                    case("cpu-f64-single", 1),
-                    case("cpu-f32-allocated", threads),
-                    case("cpu-f64-allocated", threads),
-                ],
-                reason: None,
-            },
-            gpu_state: BenchmarkState::NotRun,
-            gpu_reason: None,
-            gpus: Vec::new(),
-        };
+        let mut report =
+            hivemind_models::observations::HardwareBenchmarkReport::ready_cpu_report(threads);
+        report.cpu.measured_at = Some(
+            report.cpu.measured_at.unwrap_or_else(chrono::Utc::now)
+                - chrono::Duration::seconds(age_secs),
+        );
         serde_json::to_string(&report).unwrap()
     }
 

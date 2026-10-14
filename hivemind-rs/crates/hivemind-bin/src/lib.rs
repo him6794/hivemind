@@ -1379,7 +1379,14 @@ mod tests {
                     dynamic_admission_ready: false,
                     dynamic_readiness_reason: None,
                     dynamic_observed_at: None,
-                    benchmark_report_json: None,
+                    benchmark_report_json: Some(
+                        serde_json::to_string(
+                            &hivemind_models::observations::HardwareBenchmarkReport::ready_cpu_report(
+                                4,
+                            ),
+                        )
+                        .unwrap(),
+                    ),
                     resource_observation_json: None,
                     last_heartbeat: Utc::now(),
                     registered_at: Utc::now(),

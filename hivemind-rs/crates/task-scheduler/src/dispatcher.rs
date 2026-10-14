@@ -6911,7 +6911,14 @@ mod tests {
             dynamic_admission_ready: false,
             dynamic_readiness_reason: None,
             dynamic_observed_at: None,
-            benchmark_report_json: None,
+            benchmark_report_json: Some(
+                serde_json::to_string(
+                    &hivemind_models::observations::HardwareBenchmarkReport::ready_cpu_report(
+                        cpu.max(1) as u32,
+                    ),
+                )
+                .unwrap(),
+            ),
             resource_observation_json: None,
             last_heartbeat: Utc::now(),
             registered_at: Utc::now(),
@@ -7744,6 +7751,20 @@ mod tests {
         .execute(&db.pool)
         .await
         .unwrap();
+        // The scheduler gates on the verified benchmark, not the legacy cpu_score
+        // column, so a worker that can accept a positive-score task must carry a
+        // matching measured report (4 threads => 400, in step with cpu_score).
+        sqlx::query("UPDATE worker_nodes SET benchmark_report_json = $1 WHERE worker_id = $2")
+            .bind(
+                serde_json::to_string(
+                    &hivemind_models::observations::HardwareBenchmarkReport::ready_cpu_report(4),
+                )
+                .unwrap(),
+            )
+            .bind(&worker_id)
+            .execute(&db.pool)
+            .await
+            .unwrap();
         sqlx::query(
             "INSERT INTO worker_reputation (worker_id, successful_tasks, failed_tasks, score, banned)
              VALUES ($1, 10, 0, 100, false)",
@@ -7879,6 +7900,22 @@ mod tests {
         .execute(&db.pool)
         .await
         .unwrap();
+        // Both workers need a verified benchmark matching their cpu_score so the
+        // scheduler's measured-score gate (not the legacy column) can place the
+        // task on the trusted one; the banned worker must still be excluded by
+        // trust, not by an unmeasured score.
+        let report_json = serde_json::to_string(
+            &hivemind_models::observations::HardwareBenchmarkReport::ready_cpu_report(4),
+        )
+        .unwrap();
+        for worker in [&banned_worker_id, &trusted_worker_id] {
+            sqlx::query("UPDATE worker_nodes SET benchmark_report_json = $1 WHERE worker_id = $2")
+                .bind(report_json.clone())
+                .bind(worker)
+                .execute(&db.pool)
+                .await
+                .unwrap();
+        }
 
         sqlx::query(
             "INSERT INTO worker_reputation (worker_id, successful_tasks, failed_tasks, score, banned)

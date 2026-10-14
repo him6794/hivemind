@@ -234,6 +234,46 @@ impl HardwareBenchmarkReport {
         }
     }
 
+    /// A valid, fresh, Ready CPU-only report taken at `threads` — the shape a
+    /// worker produces after running the CPU suite, with five calibrated
+    /// batches per fixed case. The per-batch elapsed time is fixed so the
+    /// suite score is exactly `100 * threads` (1.0 GFLOP/s per participating
+    /// thread), keeping a fixture's report in step with its `cpu_score`
+    /// column. `measured_at` is now so the report is fresh; callers needing an
+    /// aged or stale sample shift `cpu.measured_at` after construction.
+    pub fn ready_cpu_report(threads: u32) -> Self {
+        let case = |name: &str, case_threads: u32| BenchmarkCase {
+            name: name.into(),
+            dimension: 128,
+            threads: case_threads,
+            batches: vec![
+                BenchmarkBatch {
+                    repetitions: 1,
+                    // 2 * 128^3 * 1 / 4_194_304 = exactly 1.0 GFLOP/s per thread.
+                    elapsed_ns: 4_194_304,
+                };
+                BENCHMARK_BATCHES
+            ],
+        };
+        let mut report = Self::empty("a".repeat(64), true);
+        report.cpu = BenchmarkMeasurement {
+            measurement_id: Some(Uuid::new_v4()),
+            state: BenchmarkState::Ready,
+            measured_at: Some(Utc::now()),
+            identity: "test cpu".into(),
+            threads,
+            correctness_passed: true,
+            cases: vec![
+                case("cpu-f32-single", 1),
+                case("cpu-f64-single", 1),
+                case("cpu-f32-allocated", threads),
+                case("cpu-f64-allocated", threads),
+            ],
+            reason: None,
+        };
+        report
+    }
+
     pub fn validate(&self) -> Result<(), &'static str> {
         if self.version != OBSERVATION_VERSION
             || self.suite != HARDWARE_SUITE
