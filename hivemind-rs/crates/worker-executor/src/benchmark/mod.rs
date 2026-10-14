@@ -225,8 +225,14 @@ impl BenchmarkCoordinator {
                 .lock()
                 .unwrap_or_else(|error| error.into_inner());
             match result {
+                // Compare against the budget captured at spawn, not the current
+                // atomic: an in-flight run was launched under `budget`, so a
+                // valid measurement taken under it must not be rejected just
+                // because a budget update landed while it was running. The
+                // helper clamps to available parallelism at spawn, so a
+                // measurement still short of `budget` (a real clamp) fails here.
                 Ok(value)
-                    if value.threads == self.threads()
+                    if value.threads == budget
                         && value.score(false).is_ok()
                         && value.state == BenchmarkState::Ready =>
                 {
