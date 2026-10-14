@@ -56,6 +56,52 @@ function createProfile() {
   };
 }
 
+// The Computer tab polls the local control API's /api/benchmark on a timer once
+// signed in, so the fixture must answer it or the request lands in
+// unhandledRequests. The shape mirrors BenchmarkStatusResponse: a server-derived
+// cpu_score plus the raw report the UI projects, with a Ready CPU measurement
+// and no GPU devices.
+function createBenchmark() {
+  const batch = { repetitions: 1, elapsed_ns: 4194304 };
+  const caseEntry = (name, threads) => ({
+    name,
+    dimension: 128,
+    threads,
+    batches: [batch, batch, batch, batch, batch],
+  });
+  return {
+    success: true,
+    busy: false,
+    threads: 8,
+    cpu_score: 800,
+    gpu_scores: [],
+    report: {
+      version: 1,
+      suite: 'hivemind-hardware-v1',
+      build_id: 'a'.repeat(64),
+      release_build: true,
+      cpu: {
+        measurement_id: '00000000-0000-4000-8000-000000000000',
+        state: 'ready',
+        measured_at: '2026-09-30T12:00:00.000Z',
+        identity: 'test cpu',
+        threads: 8,
+        correctness_passed: true,
+        reason: null,
+        cases: [
+          caseEntry('cpu-f32-single', 1),
+          caseEntry('cpu-f64-single', 1),
+          caseEntry('cpu-f32-allocated', 8),
+          caseEntry('cpu-f64-allocated', 8),
+        ],
+      },
+      gpu_state: 'not-run',
+      gpu_reason: null,
+      gpus: [],
+    },
+  };
+}
+
 async function installMockApi(page, { startupScenario = 'ready' } = {}) {
   let releaseInitialStartup;
   const initialStartupGate = new Promise((resolve) => { releaseInitialStartup = resolve; });
@@ -152,6 +198,14 @@ async function installMockApi(page, { startupScenario = 'ready' } = {}) {
       } else {
         await fulfillJson(createDashboard());
       }
+      return;
+    }
+
+    if (method === 'GET' && pathname === '/api/benchmark') {
+      // The Computer tab polls this on a timer; answer it so the request never
+      // lands in unhandledRequests. It is a background poll, not part of the
+      // sign-in flow, so it is intentionally not recorded in flowEvents.
+      await fulfillJson(createBenchmark());
       return;
     }
 

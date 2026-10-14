@@ -91,7 +91,10 @@ for (const [role, port] of [['Master', 4173], ['Worker', 4174]]) {
     await page.evaluate(() => window.dispatchEvent(new Event('hivemind:close-requested')));
     await page.keyboard.press('Escape');
     await expect(dialog).toBeVisible();
-    expect(await page.evaluate(() => window.__windowActions)).toEqual(['cancel', 'quit', 'background']);
+    // 'background' is pushed to the action log by the host after the controller's
+    // close-out delay, so poll for it rather than reading the array once; a
+    // single read races that task on slow hosts and drops the third action.
+    await expect.poll(() => page.evaluate(() => window.__windowActions)).toEqual(['cancel', 'quit', 'background']);
     await page.evaluate(() => window.__finishWindowAction());
     await expect(dialog).toBeHidden();
     await expect(username).toBeFocused();
