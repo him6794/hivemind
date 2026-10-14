@@ -793,6 +793,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn score_requirements_fail_closed_when_capped_below_the_measurement_budget() {
+        // The same verified measurement, taken at a 4-thread budget, is only
+        // usable while the worker is allowed at least those threads. A provider
+        // cap below the budget drops the CPU score until the worker re-measures
+        // — the scheduler never scales a higher-budget score down to fit the cap.
+        let task = legacy_score_task(300, 0);
+        let report = measured_cpu_benchmark_json(4, 0);
+
+        let uncapped = {
+            let mut w = make_worker("uncapped", 4, 16, 0.0, WorkerStatus::Idle);
+            w.benchmark_report_json = Some(report.clone());
+            w
+        };
+        let capped = {
+            let mut w = make_worker("capped", 4, 16, 0.0, WorkerStatus::Idle);
+            w.cpu_cores_limit = 2;
+            w.benchmark_report_json = Some(report);
+            w
+        };
+
+        assert_eq!(
+            find_best_worker(&task, &[capped])
+                .await
+                .map(|w| w.worker_id),
+            None
+        );
+        assert_eq!(
+            find_best_worker(&task, &[uncapped])
+                .await
+                .map(|w| w.worker_id),
+            Some("uncapped".into())
+        );
+    }
+
+    #[tokio::test]
     async fn test_no_suitable_worker() {
         let workers = vec![make_worker("w1", 1, 2, 0.0, WorkerStatus::Active)];
         let task = Task {

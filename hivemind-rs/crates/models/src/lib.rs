@@ -423,7 +423,16 @@ impl WorkerNode {
             return (None, None);
         };
         let now = Utc::now();
-        let cpu = report.cpu_score(report.cpu.threads, now);
+        // A CPU score measured at a thread budget the provider no longer allows
+        // is only meaningful after the worker re-measures, so gate it on the
+        // cap (a zero limit is no cap). The GPU score is independent of it.
+        let budget_ok =
+            self.cpu_cores_limit <= 0 || self.cpu_cores_limit as u32 >= report.cpu.threads;
+        let cpu = if budget_ok {
+            report.cpu_score(report.cpu.threads, now)
+        } else {
+            None
+        };
         let gpu = report
             .gpus
             .iter()
