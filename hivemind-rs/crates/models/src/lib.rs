@@ -559,6 +559,12 @@ pub struct Task {
     pub peak_memory_mb: i64,
     pub download_bytes: i64,
     pub cache_hits: i64,
+    /// The Nodepool-validated execution observation for the current attempt, as
+    /// a canonical presence-aware JSON payload. `None` means the worker reported
+    /// no measurement for this attempt (legacy or not yet completed); a stored
+    /// value re-validates on read. Kept separate from the scalar metric columns,
+    /// which remain the compatibility/billing path.
+    pub execution_observation_json: Option<String>,
     pub created_at: DateTime<Utc>,
     pub last_update: DateTime<Utc>,
     pub completed_at: Option<DateTime<Utc>>,

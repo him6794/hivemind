@@ -726,6 +726,7 @@ fn test_task(task_id: &str) -> Task {
         peak_memory_mb: 0,
         download_bytes: 0,
         cache_hits: 0,
+        execution_observation_json: None,
         created_at: now,
         last_update: now,
         completed_at: None,

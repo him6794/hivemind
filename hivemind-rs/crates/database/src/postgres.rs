@@ -316,6 +316,7 @@ async fn run_migrations_inner(pool: &PgPool) -> Result<()> {
             peak_memory_mb BIGINT NOT NULL DEFAULT 0,
             download_bytes BIGINT NOT NULL DEFAULT 0,
             cache_hits BIGINT NOT NULL DEFAULT 0,
+            execution_observation_json TEXT,
             created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
             last_update TIMESTAMPTZ NOT NULL DEFAULT NOW(),
             completed_at TIMESTAMPTZ
@@ -367,6 +368,7 @@ async fn run_migrations_inner(pool: &PgPool) -> Result<()> {
          ADD COLUMN IF NOT EXISTS peak_memory_mb BIGINT NOT NULL DEFAULT 0,
          ADD COLUMN IF NOT EXISTS download_bytes BIGINT NOT NULL DEFAULT 0,
          ADD COLUMN IF NOT EXISTS cache_hits BIGINT NOT NULL DEFAULT 0,
+         ADD COLUMN IF NOT EXISTS execution_observation_json TEXT,
          ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
          ADD COLUMN IF NOT EXISTS last_update TIMESTAMPTZ NOT NULL DEFAULT NOW(),
          ADD COLUMN IF NOT EXISTS completed_at TIMESTAMPTZ;",
@@ -1609,6 +1611,9 @@ async fn run_migrations_inner(pool: &PgPool) -> Result<()> {
     .execute(&mut *tx)
     .await?;
     sqlx::query("ALTER TABLE tasks ADD COLUMN IF NOT EXISTS managed_receipt_json TEXT;")
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("ALTER TABLE tasks ADD COLUMN IF NOT EXISTS execution_observation_json TEXT;")
         .execute(&mut *tx)
         .await?;
 

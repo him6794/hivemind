@@ -7238,6 +7238,61 @@ impl TaskRepository {
         Ok(updated.rows_affected() > 0)
     }
 
+    /// Persist the Nodepool-validated execution observation for the active
+    /// attempt, alongside the usage-percent update the worker sent with it. The
+    /// payload is already canonical (validated by the caller); `None` clears it
+    /// back to "no measurement for this attempt". Uses the same in-flight
+    /// snapshot/lock as the usage update so a stale attempt cannot clobber a
+    /// newer one, and a completed-but-untouched attempt still accepts its
+    /// terminal observation once.
+    pub async fn record_execution_observation_for_worker_attempt(
+        &self,
+        task_id: &str,
+        worker_id: &str,
+        retry_count: i32,
+        observation_json: Option<&str>,
+    ) -> Result<bool> {
+        let Some(expected) = self
+            .find_usage_worker_attempt_snapshot(task_id, worker_id, retry_count)
+            .await?
+        else {
+            return Ok(false);
+        };
+        let mut tx = self.pool.begin().await?;
+        if lock_usage_worker_attempt_snapshot(&mut tx, &expected, worker_id)
+            .await?
+            .is_none()
+        {
+            tx.commit().await?;
+            return Ok(false);
+        }
+        let updated = sqlx::query(
+            "UPDATE tasks
+             SET execution_observation_json = $1, last_update = NOW()
+             WHERE id = $2 AND task_id = $3 AND worker_id = $4
+               AND retry_count = $5
+               AND (
+                   status IN ('ASSIGNED', 'RUNNING')
+                   OR (
+                       status = 'COMPLETED'
+                       AND cpu_usage = 0
+                       AND memory_usage = 0
+                       AND gpu_usage = 0
+                       AND gpu_memory_usage = 0
+                   )
+               )",
+        )
+        .bind(observation_json)
+        .bind(expected.id)
+        .bind(&expected.task_id)
+        .bind(worker_id)
+        .bind(retry_count)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(updated.rows_affected() > 0)
+    }
+
     pub async fn record_batch_report_for_worker_attempt(
         &self,
         task_id: &str,
@@ -8634,6 +8689,7 @@ impl TaskRepository {
              SET status = 'PENDING', status_message = 'Redispatched', worker_id = NULL, worker_ip = NULL,
                  general_compute_manifest_json = $1,
                  managed_gpu_manifest_json = $2,
+                 execution_observation_json = NULL,
                  retry_count = $3, last_update = NOW()
              WHERE id = $4
                AND task_id = $5
@@ -10741,6 +10797,7 @@ mod tests {
             peak_memory_mb: 0,
             download_bytes: 0,
             cache_hits: 0,
+            execution_observation_json: None,
             created_at: Utc::now(),
             last_update: Utc::now(),
             completed_at: None,
@@ -16908,6 +16965,7 @@ mod tests {
             peak_memory_mb: 0,
             download_bytes: 0,
             cache_hits: 0,
+            execution_observation_json: None,
             created_at: Utc::now(),
             last_update: Utc::now(),
             completed_at: None,

@@ -1444,6 +1444,7 @@ mod tests {
                     peak_memory_mb: 0,
                     download_bytes: 0,
                     cache_hits: 0,
+                    execution_observation_json: None,
                     created_at: Utc::now(),
                     last_update: Utc::now(),
                     completed_at: None,

@@ -425,6 +425,20 @@ impl ExecutionObservation {
         }
         Ok(())
     }
+
+    /// Parse and validate an execution observation from a canonical JSON
+    /// payload. Mirrors the resource observation's `parse`: a size bound,
+    /// well-formed JSON, and the full field checks. Nodepool stores the payload
+    /// only after this passes, so a malformed observation is never persisted.
+    pub fn parse(bytes: &[u8]) -> Result<Self, &'static str> {
+        if bytes.len() > RESOURCE_OBSERVATION_MAX_BYTES {
+            return Err("execution observation too large");
+        }
+        let observation: Self =
+            serde_json::from_slice(bytes).map_err(|_| "invalid execution observation JSON")?;
+        observation.validate()?;
+        Ok(observation)
+    }
 }
 
 #[cfg(test)]
@@ -523,5 +537,47 @@ mod tests {
         report.suite = "unknown-suite".into();
         assert!(report.validate().is_err());
         assert!(HardwareBenchmarkReport::parse(&vec![0; BENCHMARK_MAX_BYTES + 1]).is_err());
+    }
+
+    #[test]
+    fn execution_observation_parse_keeps_presence_zero_and_null_distinct() {
+        // Absent gauges survive as null, a measured zero as 0, and the two are
+        // never coerced into each other on a round-trip.
+        let partial = ExecutionObservation {
+            version: OBSERVATION_VERSION,
+            wall_time_ms: Some(0),
+            cpu_time_ms: None,
+            ..Default::default()
+        };
+        let canonical = serde_json::to_string(&partial).unwrap();
+        let parsed = ExecutionObservation::parse(canonical.as_bytes()).unwrap();
+        assert_eq!(parsed, partial);
+        assert_eq!(parsed.wall_time_ms, Some(0));
+        assert_eq!(parsed.cpu_time_ms, None);
+        let value: serde_json::Value = serde_json::from_str(&canonical).unwrap();
+        assert_eq!(value["wall_time_ms"], serde_json::json!(0));
+        assert_eq!(value["cpu_time_ms"], serde_json::Value::Null);
+
+        // The wire rejects anything validate() rejects: negative gauge,
+        // out-of-range percent, and a size over the envelope bound.
+        let negative = ExecutionObservation {
+            version: OBSERVATION_VERSION,
+            cpu_time_ms: Some(-1),
+            ..Default::default()
+        };
+        assert!(
+            ExecutionObservation::parse(serde_json::to_string(&negative).unwrap().as_bytes())
+                .is_err()
+        );
+        let off_scale = ExecutionObservation {
+            version: OBSERVATION_VERSION,
+            gpu_percent: Some(101.0),
+            ..Default::default()
+        };
+        assert!(
+            ExecutionObservation::parse(serde_json::to_string(&off_scale).unwrap().as_bytes())
+                .is_err()
+        );
+        assert!(ExecutionObservation::parse(&vec![0; RESOURCE_OBSERVATION_MAX_BYTES + 1]).is_err());
     }
 }

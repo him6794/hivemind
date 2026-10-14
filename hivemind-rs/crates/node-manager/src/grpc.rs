@@ -16,6 +16,7 @@ use hivemind_proto::{
     CompleteBatchResponse,
     DownloadTaskArtifactRequest,
     DownloadTaskArtifactResponse,
+    ExecutionObservation as ProtoExecutionObservation,
     ExecutionPackage,
     GeneralComputeArtifactChunkUpload,
     GeneralComputeArtifactChunkUploadResponse,
@@ -234,6 +235,27 @@ pub(crate) fn verify_worker_resource_observation(
     serde_json::to_string(&parsed)
         .map(Some)
         .map_err(|error| format!("invalid resource observation: {error}"))
+}
+
+/// Verifies a worker's per-task execution observation from its envelope and
+/// returns the canonical JSON to persist. Like the resource observation it is
+/// a bounded, versioned, presence-aware payload (absent gauges stay absent);
+/// Nodepool stores it only after it passes the envelope and field checks, so
+/// the worker cannot report an out-of-range or unmeasured-as-zero reading.
+/// `None` means the worker sent no observation for this attempt.
+pub(crate) fn verify_worker_execution_observation(
+    report: Option<ProtoExecutionObservation>,
+) -> Result<Option<String>, String> {
+    let Some(report) = report else {
+        return Ok(None);
+    };
+    let payload = hivemind_proto::validate_execution_observation_envelope(&report)
+        .map_err(|message| format!("invalid execution observation envelope: {message}"))?;
+    let parsed = hivemind_models::observations::ExecutionObservation::parse(payload.as_bytes())
+        .map_err(|message| format!("invalid execution observation: {message}"))?;
+    serde_json::to_string(&parsed)
+        .map(Some)
+        .map_err(|error| format!("invalid execution observation: {error}"))
 }
 
 pub struct NodepoolState {
@@ -1752,6 +1774,18 @@ impl NodeManagerService for GrpcNodeManagerService {
                 status_message: "retry_count must not be negative".into(),
             }));
         }
+        // The execution observation, when present, is a worker claim about this
+        // attempt. Validate it fail-closed before the beat: a malformed payload
+        // fails the beat rather than clobbering a previously stored reading.
+        let observation = match verify_worker_execution_observation(req.execution_observation) {
+            Ok(observation) => observation,
+            Err(status_message) => {
+                return Ok(Response::new(TaskUsageResponse {
+                    success: false,
+                    status_message,
+                }));
+            }
+        };
         match self
             .state
             .scheduler
@@ -1766,10 +1800,45 @@ impl NodeManagerService for GrpcNodeManagerService {
             )
             .await
         {
-            Ok(true) => Ok(Response::new(TaskUsageResponse {
-                success: true,
-                status_message: "OK".into(),
-            })),
+            Ok(true) => {
+                // The usage beat accepted; persist the observation for the same
+                // attempt. A stale write is a no-op (the attempt changed), so it
+                // does not fail the beat; a storage error does.
+                if let Some(observation) = observation {
+                    match self
+                        .state
+                        .scheduler
+                        .record_execution_observation_for_worker_attempt(
+                            &req.task_id,
+                            &req.worker_id,
+                            req.retry_count,
+                            Some(observation.as_str()),
+                        )
+                        .await
+                    {
+                        Ok(false) => {
+                            tracing::debug!(
+                                task_id = %req.task_id,
+                                worker_id = %req.worker_id,
+                                "execution observation arrived after the active attempt changed; leaving stored value untouched"
+                            );
+                        }
+                        Ok(true) => {}
+                        Err(error) => {
+                            return Ok(Response::new(TaskUsageResponse {
+                                success: false,
+                                status_message: format!(
+                                    "stored usage but failed to store the execution observation: {error}"
+                                ),
+                            }));
+                        }
+                    }
+                }
+                Ok(Response::new(TaskUsageResponse {
+                    success: true,
+                    status_message: "OK".into(),
+                }))
+            }
             Ok(false) => Ok(Response::new(TaskUsageResponse {
                 success: false,
                 status_message: "task assignment changed or retry_count is stale".into(),
@@ -2342,6 +2411,7 @@ impl MasterNodeService for GrpcMasterNodeService {
             peak_memory_mb: 0,
             download_bytes: 0,
             cache_hits: 0,
+            execution_observation_json: None,
             created_at: chrono::Utc::now(),
             last_update: chrono::Utc::now(),
             completed_at: None,
@@ -4148,6 +4218,10 @@ async fn task_info_from_task(pool: &sqlx::PgPool, task: Task) -> Result<TaskInfo
         },
     );
 
+    let execution_observation = stored_execution_observation_envelope(
+        parsed_stored_execution_observation(&task.task_id, &task).as_ref(),
+    );
+
     Ok(TaskInfo {
         task_id: task.task_id,
         owner: task.owner,
@@ -4173,7 +4247,7 @@ async fn task_info_from_task(pool: &sqlx::PgPool, task: Task) -> Result<TaskInfo
         max_cpt: task.max_cpt,
         runtime: task.runtime.unwrap_or_default(),
         managed_consensus: consensus,
-        execution_observation: None,
+        execution_observation,
         performance_suite: String::new(),
     })
 }
@@ -4326,6 +4400,45 @@ fn stored_resource_observation_envelope(
         protocol_version: hivemind_proto::OBSERVATION_PROTOCOL_VERSION,
         observation_json: payload,
     })
+}
+
+/// Projects the Nodepool-validated execution observation for the current task
+/// attempt onto the wire. The caller re-validates the stored payload once (via
+/// `parsed_stored_execution_observation`); a stored value that no longer
+/// validates, or a task with no stored observation, projects as absent
+/// (unavailable) rather than a fabricated zero. Unlike the resource observation
+/// there is no freshness window: the reading is bound to the attempt that
+/// produced it, not a live host snapshot, so a settled reading stays visible.
+fn stored_execution_observation_envelope(
+    observation: Option<&hivemind_models::observations::ExecutionObservation>,
+) -> Option<ProtoExecutionObservation> {
+    let observation = observation?;
+    let payload = serde_json::to_string(observation).ok()?;
+    Some(ProtoExecutionObservation {
+        protocol_version: hivemind_proto::OBSERVATION_PROTOCOL_VERSION,
+        observation_json: payload,
+    })
+}
+
+/// Re-validate a stored execution observation, logging the task when it fails,
+/// so "no stored reading" is distinguishable from "stored reading dropped on
+/// the way out". Returns the parsed, validated observation, or `None`.
+fn parsed_stored_execution_observation(
+    task_id: &str,
+    task: &hivemind_models::Task,
+) -> Option<hivemind_models::observations::ExecutionObservation> {
+    let json = task.execution_observation_json.as_deref()?;
+    match hivemind_models::observations::ExecutionObservation::parse(json.as_bytes()) {
+        Ok(observation) => Some(observation),
+        Err(message) => {
+            tracing::warn!(
+                task_id = %task_id,
+                error = %message,
+                "stored execution observation failed re-validation and was dropped from the projection"
+            );
+            None
+        }
+    }
 }
 
 fn provider_settings_from_worker(worker: &WorkerNode) -> ProviderWorkerSettings {
@@ -8528,6 +8641,245 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_task_usage_ingests_validates_and_projects_execution_observation() {
+        let lock = grpc_db_lock();
+        let _guard = lock.lock().await;
+        let (service, task_id, _other_token, owner) = match test_service().await {
+            Some(parts) => parts,
+            None => return,
+        };
+        let node_service = GrpcNodeManagerService::new(service.state.clone());
+        let worker_id = format!("grpc-obs-worker-{task_id}");
+        let owner_token = token_for(&service.state.auth, &owner);
+        node_service
+            .register_worker_node(Request::new(RegisterWorkerNodeRequest {
+                capability_report: None,
+                benchmark_report: None,
+                resource_observation: None,
+                username: owner.clone(),
+                worker_id: worker_id.clone(),
+                ip: "10.77.2.10:50053".into(),
+                resources: Some(ProtoResourceSpec {
+                    cpu_cores: 2,
+                    memory_mb: 8 * 1024,
+                    gpu_count: 0,
+                    gpu_name: String::new(),
+                    vram_mb: 0,
+                    cpu_score: 200,
+                    gpu_score: 0,
+                    storage_total_gb: 100,
+                    storage_available_gb: 50,
+                    score_suite: None,
+                }),
+                location: "local".into(),
+                token: owner_token.clone(),
+            }))
+            .await
+            .unwrap();
+        service
+            .state
+            .scheduler
+            .assign_task_to_worker(&task_id, &worker_id, "10.77.2.10:50053")
+            .await
+            .unwrap();
+
+        let usage = Some(hivemind_proto::ResourceUsage {
+            cpu_percent: 10.0,
+            memory_percent: 20.0,
+            gpu_percent: 0.0,
+            vram_percent: 0.0,
+            storage_percent: 0.0,
+        });
+
+        // A valid, versioned observation is accepted and stored for the attempt.
+        let valid = hivemind_models::observations::ExecutionObservation {
+            version: hivemind_models::observations::OBSERVATION_VERSION,
+            wall_time_ms: Some(9),
+            ..Default::default()
+        };
+        let valid_json = serde_json::to_string(&valid).unwrap();
+        let beat = node_service
+            .task_usage(Request::new(TaskUsageRequest {
+                execution_observation: Some(hivemind_proto::ExecutionObservation {
+                    protocol_version: hivemind_proto::OBSERVATION_PROTOCOL_VERSION,
+                    observation_json: valid_json.clone(),
+                }),
+                resource_observation: None,
+                usage_received: false,
+                task_id: task_id.clone(),
+                worker_id: worker_id.clone(),
+                retry_count: 0,
+                usage,
+                token: owner_token.clone(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(beat.success, "{}", beat.status_message);
+
+        // It round-trips through the store verbatim (canonical, presence-aware).
+        let stored = service
+            .state
+            .scheduler
+            .get_task(&task_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            stored.execution_observation_json.as_deref(),
+            Some(valid_json.as_str())
+        );
+
+        // And projects onto the wire for the owner: the reading stays present,
+        // with only the measured gauge set and the rest absent.
+        let list = service
+            .get_all_user_tasks(Request::new(GetAllUserTasksRequest {
+                token: owner_token.clone(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        let info = list
+            .tasks
+            .iter()
+            .find(|task| task.task_id == task_id)
+            .expect("owner task present in the list")
+            .clone();
+        let observation = info
+            .execution_observation
+            .as_ref()
+            .expect("a stored observation must project, not collapse to absent");
+        assert_eq!(
+            observation.protocol_version,
+            hivemind_proto::OBSERVATION_PROTOCOL_VERSION
+        );
+        // The envelope carries the canonical JSON; parse it back to check the
+        // presence-aware gauges survived the round-trip unchanged.
+        let projected: hivemind_models::observations::ExecutionObservation =
+            serde_json::from_str(&observation.observation_json).unwrap();
+        assert_eq!(
+            projected.version,
+            hivemind_models::observations::OBSERVATION_VERSION
+        );
+        assert_eq!(projected.wall_time_ms, Some(9));
+        assert_eq!(projected.cpu_time_ms, None);
+        assert_eq!(projected.peak_memory_mb, None);
+
+        // A beat without an observation leaves the stored reading untouched
+        // (absent is not a clear; it only arrives with a real measurement).
+        let again = node_service
+            .task_usage(Request::new(TaskUsageRequest {
+                execution_observation: None,
+                resource_observation: None,
+                usage_received: false,
+                task_id: task_id.clone(),
+                worker_id: worker_id.clone(),
+                retry_count: 0,
+                usage,
+                token: owner_token.clone(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(again.success, "{}", again.status_message);
+        let stored = service
+            .state
+            .scheduler
+            .get_task(&task_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            stored.execution_observation_json.as_deref(),
+            Some(valid_json.as_str())
+        );
+
+        // A malformed payload fails the beat closed rather than clobbering the
+        // valid value: first a valid envelope whose inner version is wrong...
+        let bad_field =
+            serde_json::to_string(&hivemind_models::observations::ExecutionObservation {
+                version: 99,
+                ..Default::default()
+            })
+            .unwrap();
+        let rejected = node_service
+            .task_usage(Request::new(TaskUsageRequest {
+                execution_observation: Some(hivemind_proto::ExecutionObservation {
+                    protocol_version: hivemind_proto::OBSERVATION_PROTOCOL_VERSION,
+                    observation_json: bad_field,
+                }),
+                resource_observation: None,
+                usage_received: false,
+                task_id: task_id.clone(),
+                worker_id: worker_id.clone(),
+                retry_count: 0,
+                usage,
+                token: owner_token.clone(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(!rejected.success, "{}", rejected.status_message);
+        // ...and an envelope with an unsupported protocol version.
+        let bad_envelope = node_service
+            .task_usage(Request::new(TaskUsageRequest {
+                execution_observation: Some(hivemind_proto::ExecutionObservation {
+                    protocol_version: 0,
+                    observation_json: valid_json.clone(),
+                }),
+                resource_observation: None,
+                usage_received: false,
+                task_id: task_id.clone(),
+                worker_id: worker_id.clone(),
+                retry_count: 0,
+                usage,
+                token: owner_token.clone(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(!bad_envelope.success, "{}", bad_envelope.status_message);
+        let stored = service
+            .state
+            .scheduler
+            .get_task(&task_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            stored.execution_observation_json.as_deref(),
+            Some(valid_json.as_str()),
+            "a rejected observation must not overwrite the stored value"
+        );
+
+        // Redispatching clears the previous attempt's reading: a new attempt
+        // must not inherit a measurement the last one made.
+        let repository = hivemind_task_scheduler::task_repository::TaskRepository::new(
+            service.state.scheduler.database().pool.clone(),
+        );
+        assert!(
+            repository
+                .reset_to_pending_for_worker_snapshot(&stored, &worker_id)
+                .await
+                .unwrap(),
+            "the active attempt should still be resettable"
+        );
+        let stored = service
+            .state
+            .scheduler
+            .get_task(&task_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            stored.execution_observation_json.is_none(),
+            "redispatch must clear the prior attempt's observation"
+        );
+
+        cleanup(&service.state.scheduler, &task_id, &owner).await;
+    }
+
+    #[tokio::test]
     async fn test_worker_report_rpc_rejects_non_owner_for_assigned_worker() {
         let lock = grpc_db_lock();
         let _guard = lock.lock().await;
@@ -10781,6 +11133,7 @@ mod tests {
             peak_memory_mb: 0,
             download_bytes: 0,
             cache_hits: 0,
+            execution_observation_json: None,
             created_at: Utc::now(),
             last_update: Utc::now(),
             completed_at: None,

@@ -19,13 +19,14 @@ use hivemind_managed_consensus::{
 use hivemind_models::{Claims, Task, TaskStatus, WorkerNode};
 use hivemind_proto::{
     general_compute_chunk_service_client::GeneralComputeChunkServiceClient,
-    validate_general_compute_chunk_resume_request, validate_general_compute_chunk_upload,
-    validate_general_compute_prepare_request, worker_node_service_client::WorkerNodeServiceClient,
-    ExecuteTaskRequest, ExecuteTaskResponse, GeneralComputeChunkResumeRequest,
-    GeneralComputeChunkUpload, GeneralComputePrepareRequest, ResourceSpec as ProtoResourceSpec,
-    StopTaskExecutionRequest, GENERAL_COMPUTE_CHUNK_RPC_MESSAGE_MAX_BYTES,
-    GENERAL_COMPUTE_RESULT_MAX_BYTES, LEGACY_MANAGED_RECEIPT_MAX_BYTES,
-    MANAGED_GPU_RESULT_MAX_BYTES, WORKER_RPC_MESSAGE_MAX_BYTES, WORKER_STATUS_MESSAGE_MAX_BYTES,
+    validate_execution_observation_envelope, validate_general_compute_chunk_resume_request,
+    validate_general_compute_chunk_upload, validate_general_compute_prepare_request,
+    worker_node_service_client::WorkerNodeServiceClient, ExecuteTaskRequest, ExecuteTaskResponse,
+    GeneralComputeChunkResumeRequest, GeneralComputeChunkUpload, GeneralComputePrepareRequest,
+    ResourceSpec as ProtoResourceSpec, StopTaskExecutionRequest,
+    GENERAL_COMPUTE_CHUNK_RPC_MESSAGE_MAX_BYTES, GENERAL_COMPUTE_RESULT_MAX_BYTES,
+    LEGACY_MANAGED_RECEIPT_MAX_BYTES, MANAGED_GPU_RESULT_MAX_BYTES, WORKER_RPC_MESSAGE_MAX_BYTES,
+    WORKER_STATUS_MESSAGE_MAX_BYTES,
 };
 use prost::Message;
 use sha2::{Digest, Sha256};
@@ -42,6 +43,38 @@ use crate::task_repository::{
     ManagedConsensusAssignment, ManagedConsensusAttempt, ManagedConsensusReplica,
     ManagedConsensusStopTarget, TaskRepository, MANAGED_FUNCTION_V0_RETIREMENT_REASON,
 };
+
+/// Validate and normalize the execution observation a Worker reported on its
+/// completion response, returning the canonical JSON to persist. The observation
+/// is a bounded, versioned, presence-aware claim (absent gauges stay absent);
+/// Nodepool re-checks the envelope and field checks here before storing it, so
+/// a malformed or out-of-range reading is dropped rather than persisted. It is
+/// a diagnostic record, not billing evidence, so an invalid payload is skipped
+/// (with a warning) instead of failing an otherwise valid completion. `None`
+/// means there was no usable envelope, so the stored value is left untouched;
+/// the prior attempt's reading is cleared only on redispatch.
+fn validated_execution_observation(response: &ExecuteTaskResponse) -> Option<String> {
+    let envelope = response.execution_observation.as_ref()?;
+    let payload = validate_execution_observation_envelope(envelope)
+        .ok()
+        .or_else(|| {
+            warn!(
+                idempotency_key = %response.idempotency_key,
+                "dropping an invalid execution observation envelope on completion"
+            );
+            None
+        })?;
+    let parsed = hivemind_models::observations::ExecutionObservation::parse(payload.as_bytes())
+        .ok()
+        .or_else(|| {
+            warn!(
+                idempotency_key = %response.idempotency_key,
+                "dropping an invalid execution observation payload on completion"
+            );
+            None
+        })?;
+    serde_json::to_string(&parsed).ok()
+}
 
 pub struct Dispatcher {
     repo: Arc<TaskRepository>,
@@ -3416,6 +3449,40 @@ async fn execute_on_worker_with_options(
             } else {
                 None
             };
+            // The Worker's measured execution observation rides on this response
+            // and is bound to the attempt it just finished. Record it while the
+            // attempt is still active (ASSIGNED/RUNNING); the completion or
+            // failure transition below then moves it to a terminal state. It is
+            // a diagnostic claim, not billing evidence, so a missing or stale
+            // write never blocks the result from settling.
+            if let Some(observation) = validated_execution_observation(&response) {
+                match repo
+                    .record_execution_observation_for_worker_attempt(
+                        &current_task.task_id,
+                        &worker_id,
+                        current_task.retry_count,
+                        Some(observation.as_str()),
+                    )
+                    .await
+                {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        tracing::debug!(
+                            task_id = %current_task.task_id,
+                            worker_id = %worker_id,
+                            "execution observation arrived after the active attempt changed; leaving stored value untouched"
+                        );
+                    }
+                    Err(error) => {
+                        warn!(
+                            task_id = %current_task.task_id,
+                            worker_id = %worker_id,
+                            error = %error,
+                            "failed to store the Worker execution observation; settling the result without it"
+                        );
+                    }
+                }
+            }
             if response.success {
                 if current_task.runtime.as_deref().map(str::trim)
                     == Some(MANAGED_GPU_RUNTIME_VERSION)
@@ -4536,6 +4603,7 @@ mod tests {
             peak_memory_mb: 0,
             download_bytes: 0,
             cache_hits: 0,
+            execution_observation_json: None,
             created_at: Utc::now(),
             last_update: Utc::now(),
             completed_at: None,
@@ -9264,5 +9332,71 @@ mod tests {
         );
         assert_eq!(workers[0].status, WorkerStatus::Busy);
         assert_eq!(workers[0].queue_capacity, 3);
+    }
+
+    fn response_with_observation(
+        envelope: Option<hivemind_proto::ExecutionObservation>,
+    ) -> ExecuteTaskResponse {
+        ExecuteTaskResponse {
+            execution_observation: envelope,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn validated_execution_observation_round_trips_a_valid_claim_and_drops_invalid_ones() {
+        let obs = hivemind_models::observations::ExecutionObservation {
+            version: hivemind_models::observations::OBSERVATION_VERSION,
+            wall_time_ms: Some(42),
+            cpu_time_ms: None,
+            ..Default::default()
+        };
+        let canonical = serde_json::to_string(&obs).unwrap();
+
+        // No envelope on the response: leave the stored value untouched.
+        assert_eq!(
+            validated_execution_observation(&response_with_observation(None)),
+            None
+        );
+
+        // A valid envelope: re-normalized to its canonical form.
+        let valid = validated_execution_observation(&response_with_observation(Some(
+            hivemind_proto::ExecutionObservation {
+                protocol_version: hivemind_proto::OBSERVATION_PROTOCOL_VERSION,
+                observation_json: canonical.clone(),
+            },
+        )))
+        .expect("a valid observation should persist");
+        assert_eq!(valid, canonical);
+
+        // An unsupported protocol version: dropped, not stored.
+        assert_eq!(
+            validated_execution_observation(&response_with_observation(Some(
+                hivemind_proto::ExecutionObservation {
+                    protocol_version: 0,
+                    observation_json: canonical.clone(),
+                },
+            ))),
+            None
+        );
+
+        // A well-formed envelope whose inner payload fails the field checks
+        // (an explicit negative gauge): dropped, not stored.
+        let malformed =
+            serde_json::to_string(&hivemind_models::observations::ExecutionObservation {
+                version: hivemind_models::observations::OBSERVATION_VERSION,
+                cpu_time_ms: Some(-1),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(
+            validated_execution_observation(&response_with_observation(Some(
+                hivemind_proto::ExecutionObservation {
+                    protocol_version: hivemind_proto::OBSERVATION_PROTOCOL_VERSION,
+                    observation_json: malformed,
+                },
+            ))),
+            None
+        );
     }
 }

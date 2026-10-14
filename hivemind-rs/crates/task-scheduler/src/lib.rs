@@ -283,6 +283,23 @@ impl TaskScheduler {
             .await
     }
 
+    pub async fn record_execution_observation_for_worker_attempt(
+        &self,
+        task_id: &str,
+        worker_id: &str,
+        retry_count: i32,
+        observation_json: Option<&str>,
+    ) -> Result<bool> {
+        self.repo
+            .record_execution_observation_for_worker_attempt(
+                task_id,
+                worker_id,
+                retry_count,
+                observation_json,
+            )
+            .await
+    }
+
     pub async fn record_batch_task_report_for_worker(
         &self,
         task_id: &str,
