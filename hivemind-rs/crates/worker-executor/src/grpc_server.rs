@@ -1064,31 +1064,31 @@ fn validate_managed_consensus_token_identity(
 fn validate_execute_task_contract(request: &ExecuteTaskRequest) -> Result<(), &'static str> {
     match request.runtime.trim() {
         "" => Ok(()),
-        "managed-function-v0" => {
-            Err("managed-function-v0 has been retired; use managed-function-v1")
-        }
-        "managed-function-v1" => {
+        "managed-function-v0" => Err("managed-function-v0 has been retired; use hcode"),
+        "managed-function-v1" => Err("managed-function-v1 has been retired; use hcode"),
+        "managed-function-gpu-v1" => Err("managed-function-gpu-v1 has been retired; use hcode-gpu"),
+        "hcode" => {
             if request.task_source.trim().is_empty() {
-                return Err("managed-function-v1 requires non-empty task_source");
+                return Err("hcode requires non-empty task_source");
             }
             if request.task_source.len() > hivemind_proto::MANAGED_TASK_SOURCE_MAX_BYTES {
-                return Err("managed-function-v1 task_source exceeds the byte limit");
+                return Err("hcode task_source exceeds the byte limit");
             }
             if request.torrent.trim().is_empty() {
-                return Err("managed-function-v1 requires non-empty JSON input");
+                return Err("hcode requires non-empty JSON input");
             }
             if request.torrent.len() > hivemind_proto::MANAGED_JSON_INPUT_MAX_BYTES {
-                return Err("managed-function-v1 JSON input exceeds the byte limit");
+                return Err("hcode JSON input exceeds the byte limit");
             }
             if request.managed_budget_units <= 0 {
-                return Err("managed-function-v1 budget must be positive");
+                return Err("hcode budget must be positive");
             }
             if !request.general_compute_manifest_json.is_empty()
                 || !request.managed_gpu_manifest_json.is_empty()
                 || !request.managed_dsl_backend_id.is_empty()
                 || !request.managed_dsl_semantics_manifest_sha256.is_empty()
             {
-                return Err("managed-function-v1 must not carry another runtime manifest");
+                return Err("hcode must not carry another runtime manifest");
             }
             Ok(())
         }
@@ -1142,35 +1142,33 @@ fn validate_execute_task_contract(request: &ExecuteTaskRequest) -> Result<(), &'
         }
         MANAGED_GPU_RUNTIME_VERSION => {
             if !request.general_compute_manifest_json.is_empty() {
-                return Err("managed-function-gpu-v1 must not carry a general-compute manifest");
+                return Err("hcode-gpu must not carry a general-compute manifest");
             }
             if !request.managed_dsl_backend_id.is_empty()
                 || !request.managed_dsl_semantics_manifest_sha256.is_empty()
             {
-                return Err("managed-function-gpu-v1 must not carry managed DSL identity");
+                return Err("hcode-gpu must not carry managed DSL identity");
             }
             if !request.task_source.trim().is_empty() || !request.torrent.trim().is_empty() {
-                return Err(
-                    "managed-function-gpu-v1 source and input belong to the request manifest",
-                );
+                return Err("hcode-gpu source and input belong to the request manifest");
             }
             if request.managed_budget_units != 0 {
-                return Err("managed-function-gpu-v1 must not carry a managed budget field");
+                return Err("hcode-gpu must not carry a managed budget field");
             }
             if request.managed_gpu_manifest_json.is_empty() {
-                return Err("managed-function-gpu-v1 requires a non-empty request manifest");
+                return Err("hcode-gpu requires a non-empty request manifest");
             }
             if request.managed_gpu_manifest_json.len()
                 > hivemind_proto::MANAGED_GPU_MANIFEST_MAX_BYTES
             {
-                return Err("managed-function-gpu-v1 request manifest exceeds the byte limit");
+                return Err("hcode-gpu request manifest exceeds the byte limit");
             }
             let manifest =
                 serde_json::from_slice::<ManagedGpuRequest>(&request.managed_gpu_manifest_json)
-                    .map_err(|_| "managed-function-gpu-v1 request manifest is malformed")?;
+                    .map_err(|_| "hcode-gpu request manifest is malformed")?;
             manifest
                 .validate()
-                .map_err(|_| "managed-function-gpu-v1 request manifest is invalid")?;
+                .map_err(|_| "hcode-gpu request manifest is invalid")?;
             for (actual, expected) in [
                 (&request.execution_id, &manifest.execution_id),
                 (&request.attempt_id, &manifest.attempt_id),
@@ -1178,9 +1176,7 @@ fn validate_execute_task_contract(request: &ExecuteTaskRequest) -> Result<(), &'
                 (&request.request_digest, &manifest.request_digest),
             ] {
                 if !actual.is_empty() && actual != expected {
-                    return Err(
-                        "managed-function-gpu-v1 top-level identity does not match manifest",
-                    );
+                    return Err("hcode-gpu top-level identity does not match manifest");
                 }
             }
             Ok(())
@@ -2471,12 +2467,7 @@ mod tests {
 
     #[test]
     fn managed_consensus_attachment_preserves_failed_partial_usage_and_code() {
-        let mut request = execute_request(
-            "managed-function-v1",
-            "return 1 + 2;".into(),
-            "{}".into(),
-            10,
-        );
+        let mut request = execute_request("hcode", "return 1 + 2;".into(), "{}".into(), 10);
         request.execution_id = "execution-partial".into();
         request.attempt_id = "attempt-partial".into();
         request.idempotency_key = "idempotency-partial".into();
@@ -2490,7 +2481,7 @@ mod tests {
             managed_executed_ops: 7,
             managed_output_bytes: 0,
             managed_receipt_json: serde_json::json!({
-                "runtime": "managed-function-v1",
+                "runtime": "hcode",
                 "status": "failed",
                 "usage_units": 7,
                 "executed_ops": 7,
@@ -2505,12 +2496,8 @@ mod tests {
             ..ExecuteTaskResponse::default()
         };
 
-        attach_managed_consensus_result(
-            &mut response,
-            &request,
-            &managed_consensus_task("managed-function-v1"),
-        )
-        .expect("partial managed result should be attachable");
+        attach_managed_consensus_result(&mut response, &request, &managed_consensus_task("hcode"))
+            .expect("partial managed result should be attachable");
 
         let result = response
             .managed_consensus_result
@@ -2908,14 +2895,14 @@ mod tests {
 
     fn managed_gpu_result_json(identity: &ExecuteTaskIdentity) -> Vec<u8> {
         serde_json::json!({
-            "protocol_version": "managed-function-gpu-result-v1",
+            "protocol_version": "hcode-gpu-result-v1",
             "execution_id": identity.execution_id.clone(),
             "attempt_id": identity.attempt_id.clone(),
             "idempotency_key": identity.idempotency_key.clone(),
             "request_digest": identity.request_digest.clone(),
-            "runtime_version": "managed-function-gpu-v1",
+            "runtime_version": "hcode-gpu",
             "semantics_manifest_sha256": "sha256:semantics",
-            "operation_registry_version": "managed-function-gpu-ops-v1",
+            "operation_registry_version": "hcode-gpu-ops-v1",
             "backend_id": "cuda-fixed",
             "guest_image_digest": "sha256:image",
             "source_sha256": "sha256:source",
@@ -2927,7 +2914,7 @@ mod tests {
             "output": "42",
             "output_sha256": "sha256:output",
             "selected_gpu": {
-                "protocol_version": "managed-function-gpu-capability-v1",
+                "protocol_version": "hcode-gpu-capability-v1",
                 "vendor": "nvidia",
                 "device_id": "gpu-0",
                 "compute_capability": "8.9",
@@ -2961,8 +2948,7 @@ mod tests {
 
     #[test]
     fn managed_gpu_execute_response_requires_a_typed_result() {
-        let mut request =
-            execute_request("managed-function-gpu-v1", String::new(), String::new(), 0);
+        let mut request = execute_request("hcode-gpu", String::new(), String::new(), 0);
         request.execution_id = "execution-gpu-response".into();
         request.attempt_id = "attempt-gpu-response".into();
         request.idempotency_key = "idempotency-gpu-response".into();
@@ -3212,25 +3198,25 @@ mod tests {
     #[test]
     fn managed_execute_contract_enforces_source_and_input_caps_without_a_v0_budget_ceiling() {
         let exact = execute_request(
-            "managed-function-v1",
+            "hcode",
             "s".repeat(hivemind_proto::MANAGED_TASK_SOURCE_MAX_BYTES),
             "i".repeat(hivemind_proto::MANAGED_JSON_INPUT_MAX_BYTES),
             hivemind_proto::MANAGED_BUDGET_MAX_USAGE_UNITS,
         );
         let oversized_source = execute_request(
-            "managed-function-v1",
+            "hcode",
             "s".repeat(hivemind_proto::MANAGED_TASK_SOURCE_MAX_BYTES + 1),
             "{}".into(),
             1,
         );
         let oversized_input = execute_request(
-            "managed-function-v1",
+            "hcode",
             "return 1;".into(),
             "i".repeat(hivemind_proto::MANAGED_JSON_INPUT_MAX_BYTES + 1),
             1,
         );
         let beyond_legacy_budget = execute_request(
-            "managed-function-v1",
+            "hcode",
             "return 1;".into(),
             "{}".into(),
             hivemind_proto::MANAGED_BUDGET_MAX_USAGE_UNITS + 1,
@@ -3239,11 +3225,11 @@ mod tests {
         assert_eq!(validate_execute_task_contract(&exact), Ok(()));
         assert_eq!(
             validate_execute_task_contract(&oversized_source),
-            Err("managed-function-v1 task_source exceeds the byte limit")
+            Err("hcode task_source exceeds the byte limit")
         );
         assert_eq!(
             validate_execute_task_contract(&oversized_input),
-            Err("managed-function-v1 JSON input exceeds the byte limit")
+            Err("hcode JSON input exceeds the byte limit")
         );
         assert_eq!(
             validate_execute_task_contract(&beyond_legacy_budget),
@@ -3253,39 +3239,44 @@ mod tests {
 
     #[test]
     fn managed_execute_contract_rejects_blank_fields_and_nonpositive_budget() {
-        let blank_source = execute_request("managed-function-v1", "".into(), "{}".into(), 1);
-        let blank_input = execute_request("managed-function-v1", "return 1;".into(), "".into(), 1);
-        let zero_budget =
-            execute_request("managed-function-v1", "return 1;".into(), "{}".into(), 0);
-        let negative_budget =
-            execute_request("managed-function-v1", "return 1;".into(), "{}".into(), -1);
+        let blank_source = execute_request("hcode", "".into(), "{}".into(), 1);
+        let blank_input = execute_request("hcode", "return 1;".into(), "".into(), 1);
+        let zero_budget = execute_request("hcode", "return 1;".into(), "{}".into(), 0);
+        let negative_budget = execute_request("hcode", "return 1;".into(), "{}".into(), -1);
 
         assert_eq!(
             validate_execute_task_contract(&blank_source),
-            Err("managed-function-v1 requires non-empty task_source")
+            Err("hcode requires non-empty task_source")
         );
         assert_eq!(
             validate_execute_task_contract(&blank_input),
-            Err("managed-function-v1 requires non-empty JSON input")
+            Err("hcode requires non-empty JSON input")
         );
         assert_eq!(
             validate_execute_task_contract(&zero_budget),
-            Err("managed-function-v1 budget must be positive")
+            Err("hcode budget must be positive")
         );
         assert_eq!(
             validate_execute_task_contract(&negative_budget),
-            Err("managed-function-v1 budget must be positive")
+            Err("hcode budget must be positive")
         );
     }
 
     #[test]
-    fn managed_function_v0_execute_contract_returns_the_v1_migration_error() {
-        let request = execute_request("managed-function-v0", "return 1;".into(), "{}".into(), 1);
+    fn retired_execute_contract_returns_the_hcode_migration_error() {
+        for (runtime, replacement) in [
+            ("managed-function-v0", "hcode"),
+            ("managed-function-v1", "hcode"),
+            ("managed-function-gpu-v1", "hcode-gpu"),
+        ] {
+            let request =
+                execute_request(&format!(" {runtime} "), "return 1;".into(), "{}".into(), 1);
 
-        assert_eq!(
-            validate_execute_task_contract(&request),
-            Err("managed-function-v0 has been retired; use managed-function-v1")
-        );
+            assert_eq!(
+                validate_execute_task_contract(&request).unwrap_err(),
+                format!("{runtime} has been retired; use {replacement}")
+            );
+        }
     }
 
     #[test]
@@ -3305,8 +3296,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let service = test_service(tmp.path());
         let task_id = "managed-without-consensus";
-        let mut request =
-            execute_request("managed-function-v1", "return 1;".into(), "{}".into(), 1);
+        let mut request = execute_request("hcode", "return 1;".into(), "{}".into(), 1);
         request.task_id = task_id.into();
         request.token = bound_token(test_private_key_pem(), ASSIGNED_OWNER, task_id);
 
@@ -3343,26 +3333,31 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn execute_task_rejects_retired_v0_before_recording_assignment() {
+    async fn execute_task_rejects_retired_runtimes_before_recording_assignment() {
         let tmp = TempDir::new().unwrap();
         let service = test_service(tmp.path());
-        let task_id = "worker-retired-v0";
-        let mut request =
-            execute_request("managed-function-v0", "return 1;".into(), "{}".into(), 1);
-        request.task_id = task_id.into();
-        request.token = bound_token(test_private_key_pem(), ASSIGNED_OWNER, task_id);
+        for (runtime, replacement) in [
+            ("managed-function-v0", "hcode"),
+            ("managed-function-v1", "hcode"),
+            ("managed-function-gpu-v1", "hcode-gpu"),
+        ] {
+            let task_id = format!("worker-retired-{runtime}");
+            let mut request = execute_request(runtime, "return 1;".into(), "{}".into(), 1);
+            request.task_id = task_id.clone();
+            request.token = bound_token(test_private_key_pem(), ASSIGNED_OWNER, &task_id);
 
-        let error = service
-            .execute_task(Request::new(request))
-            .await
-            .expect_err("retired v0 must fail admission");
+            let error = service
+                .execute_task(Request::new(request))
+                .await
+                .expect_err("retired runtimes must fail admission");
 
-        assert_eq!(error.code(), tonic::Code::InvalidArgument);
-        assert_eq!(
-            error.message(),
-            "managed-function-v0 has been retired; use managed-function-v1"
-        );
-        assert!(service.report_for_task(task_id).unwrap().is_none());
+            assert_eq!(error.code(), tonic::Code::InvalidArgument);
+            assert_eq!(
+                error.message(),
+                format!("{runtime} has been retired; use {replacement}")
+            );
+            assert!(service.report_for_task(&task_id).unwrap().is_none());
+        }
     }
 
     #[tokio::test]
@@ -4172,7 +4167,7 @@ mod tests {
                         storage_available_gb: 1,
                         score_suite: None,
                     }),
-                    runtime: "managed-function-v1".into(),
+                    runtime: "hcode".into(),
                     task_source: "return 1;".into(),
                     token: execute_token,
                     managed_budget_units: hivemind_proto::MANAGED_BUDGET_MAX_USAGE_UNITS,

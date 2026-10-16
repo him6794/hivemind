@@ -289,7 +289,7 @@ pub async fn run_submit(submit: SubmitCommand) -> Result<()> {
     )
     .await?;
 
-    // managed-function-v1 tasks carry their JSON input in the `torrent` field;
+    // hcode tasks carry their JSON input in the `torrent` field;
     // Nodepool stores it verbatim as the task input reference.
     let input = if submit.input.trim().is_empty() {
         None
@@ -298,7 +298,7 @@ pub async fn run_submit(submit: SubmitCommand) -> Result<()> {
     };
     let mut body = serde_json::json!({
         "task_id": submit.task_id,
-        "runtime": "managed-function-v1",
+        "runtime": "hcode",
         "task_source": task_source,
     });
     if let Some(input) = input {

@@ -431,8 +431,8 @@ const GENERAL_COMPUTE_BILLING_VERSION: &str = "billing-v1";
 const GENERAL_COMPUTE_COST_MODEL_VERSION: &str = "cost-v1";
 const MANAGED_CONSENSUS_BILLING_VERSION: &str = "consensus-billing-v1";
 const MANAGED_CONSENSUS_COST_MODEL_VERSION: &str = "consensus-reservation-v1";
-const MANAGED_CONSENSUS_V1_LEGACY_BILLING_VERSION: &str = "managed-function-v1-billing-v1";
-const MANAGED_CONSENSUS_V1_BILLING_VERSION: &str = "managed-function-v1-billing-v2-total-budget";
+const MANAGED_CONSENSUS_V1_LEGACY_BILLING_VERSION: &str = "hcode-billing-v1";
+const MANAGED_CONSENSUS_V1_BILLING_VERSION: &str = "hcode-billing-v2-total-budget";
 const MANAGED_CONSENSUS_V1_COST_MODEL_VERSION: &str =
     general_compute_runtime::MANAGED_DSL_V1_COST_MODEL_VERSION;
 pub const MANAGED_CONSENSUS_POLICY_PENDING_MESSAGE: &str = "awaiting managed consensus policy";
@@ -924,11 +924,7 @@ async fn apply_managed_v1_settlement(
     {
         anyhow::bail!("managed v1 usage hold does not match the settlement plan");
     }
-    let key_prefix = format!(
-        "managed-function-v1:{}:{}",
-        hold.task_id,
-        attempt_id.simple()
-    );
+    let key_prefix = format!("hcode:{}:{}", hold.task_id, attempt_id.simple());
     if plan.charged_amount_cpt > 0 {
         insert_managed_v1_ledger_entry(
             tx,
@@ -1185,7 +1181,7 @@ async fn settle_managed_v1_hold_without_certificate(
 }
 
 fn managed_consensus_backend_id(task_runtime: Option<&str>, backend_id: Option<&str>) -> String {
-    if task_runtime.map(str::trim) == Some("managed-function-v1") {
+    if task_runtime.map(str::trim) == Some("hcode") {
         return hivemind_managed_consensus::MANAGED_DSL_V1_DEFAULT_BACKEND_ID.to_owned();
     }
     backend_id
@@ -1206,7 +1202,7 @@ fn managed_consensus_semantics_digest(
     task_runtime: Option<&str>,
     semantics_digest: Option<&str>,
 ) -> String {
-    if task_runtime.map(str::trim) == Some("managed-function-v1") {
+    if task_runtime.map(str::trim) == Some("hcode") {
         return hivemind_managed_consensus::MANAGED_DSL_V1_DEFAULT_SEMANTICS_DIGEST.to_owned();
     }
     semantics_digest
@@ -1312,7 +1308,7 @@ impl TaskRepository {
         };
         if !matches!(
             runtime.as_deref().map(str::trim),
-            Some("managed-function-v1") | Some("production_sandboxed_dsl")
+            Some("hcode") | Some("production_sandboxed_dsl")
         ) {
             anyhow::bail!("managed consensus policy requires an active managed DSL runtime");
         }
@@ -2007,7 +2003,7 @@ impl TaskRepository {
              WHERE h.attempt_id = $1 AND h.state = 'held'
                AND h.replica_count = a.replica_count AND a.mode = 'enforce'
                AND a.state IN ('dispatching', 'running')
-               AND t.runtime = 'managed-function-v1'
+               AND t.runtime = 'hcode'
                AND t.managed_consensus_attempt_id = a.id
                AND t.status IN ('ASSIGNED', 'RUNNING')",
         )
@@ -2051,7 +2047,7 @@ impl TaskRepository {
         }
         if !matches!(
             task.runtime.as_deref().map(str::trim),
-            Some("managed-function-v1") | Some("production_sandboxed_dsl")
+            Some("hcode") | Some("production_sandboxed_dsl")
         ) {
             anyhow::bail!("managed consensus requires an active managed DSL runtime");
         }
@@ -2113,7 +2109,7 @@ impl TaskRepository {
         let managed_v1_enforce = managed_v1_task && mode == "enforce";
         let v1_hold = if managed_v1_enforce {
             if persisted_max_cpt <= 0 {
-                anyhow::bail!("managed-function-v1 requires a positive max_cpt");
+                anyhow::bail!("hcode requires a positive max_cpt");
             }
             let prior_enforce_attempt_exists: bool = sqlx::query_scalar(
                 "SELECT EXISTS (
@@ -2129,7 +2125,7 @@ impl TaskRepository {
                     "UPDATE tasks SET status = 'FAILED', worker_id = NULL, worker_ip = NULL,
                         managed_consensus_state = 'no_quorum',
                         managed_consensus_updated_at = NOW(), last_update = NOW(),
-                        status_message = 'managed-function-v1 retry disabled after prior owner-funded attempt'
+                        status_message = 'hcode retry disabled after prior owner-funded attempt'
                      WHERE task_id = $1 AND status IN ('PENDING', 'QUEUED')",
                 )
                 .bind(&task.task_id)
@@ -2139,18 +2135,15 @@ impl TaskRepository {
                 return Ok(None);
             }
             if billed_amount < 0 || billed_amount >= persisted_max_cpt {
-                anyhow::bail!("managed-function-v1 task has no remaining owner-funded budget");
+                anyhow::bail!("hcode task has no remaining owner-funded budget");
             }
-            let maximum_remaining_hold =
-                persisted_max_cpt
-                    .checked_sub(billed_amount)
-                    .ok_or_else(|| {
-                        anyhow::anyhow!("managed-function-v1 budget calculation underflowed")
-                    })?;
+            let maximum_remaining_hold = persisted_max_cpt
+                .checked_sub(billed_amount)
+                .ok_or_else(|| anyhow::anyhow!("hcode budget calculation underflowed"))?;
             let (replica_allowance_cpt, reserved_usage_cpt, reserved_fee_cpt, held_total_cpt) =
                 managed_v1_total_budget_hold(maximum_remaining_hold, policy.replica_count)?;
             if held_total_cpt > maximum_remaining_hold {
-                anyhow::bail!("managed-function-v1 hold exceeds the remaining task budget");
+                anyhow::bail!("hcode hold exceeds the remaining task budget");
             }
             let balance: Option<i64> = sqlx::query_scalar(
                 "SELECT balance FROM users WHERE username = $1 AND is_active = true FOR UPDATE",
@@ -2424,7 +2417,7 @@ impl TaskRepository {
             anyhow::bail!("managed consensus observation belongs to a stale task attempt");
         }
         let expected_runtime = task_runtime.as_deref().unwrap_or_default();
-        if expected_runtime == "managed-function-v1" {
+        if expected_runtime == "hcode" {
             if result.runtime != expected_runtime {
                 anyhow::bail!("managed consensus result runtime does not match the task");
             }
@@ -3195,7 +3188,7 @@ impl TaskRepository {
         if task.runtime.as_deref().map(str::trim)
             != Some(general_compute_runtime::MANAGED_DSL_V1_RUNTIME_VERSION)
         {
-            anyhow::bail!("managed v1 settlement requires a managed-function-v1 task");
+            anyhow::bail!("managed v1 settlement requires a hcode task");
         }
         let attempt = sqlx::query_as::<_, ManagedConsensusAttempt>(
             "SELECT id, task_id, execution_id, round_id, request_digest,
@@ -3596,11 +3589,7 @@ impl TaskRepository {
             tx.commit().await?;
             return Ok(true);
         }
-        let key_prefix = format!(
-            "managed-function-v1:{}:{}",
-            task.id.simple(),
-            attempt.id.simple()
-        );
+        let key_prefix = format!("hcode:{}:{}", task.id.simple(), attempt.id.simple());
         if plan.charged_amount_cpt > 0 {
             insert_managed_v1_ledger_entry(
                 &mut tx,
@@ -4340,6 +4329,15 @@ impl TaskRepository {
             .as_deref()
             .map(str::trim)
             .filter(|runtime| !runtime.is_empty());
+        match runtime {
+            Some("managed-function-v1") => {
+                anyhow::bail!("managed-function-v1 has been retired; use hcode");
+            }
+            Some("managed-function-gpu-v1") => {
+                anyhow::bail!("managed-function-gpu-v1 has been retired; use hcode-gpu");
+            }
+            _ => {}
+        }
         let general_compute_manifest = task
             .general_compute_manifest_json
             .as_deref()
@@ -4359,7 +4357,7 @@ impl TaskRepository {
             );
         }
         if managed_gpu_manifest.is_some() && runtime != Some(MANAGED_GPU_RUNTIME_VERSION) {
-            anyhow::bail!("managed GPU request manifest requires runtime managed-function-gpu-v1");
+            anyhow::bail!("managed GPU request manifest requires runtime hcode-gpu");
         }
         if runtime == Some(general_compute_runtime::GENERAL_COMPUTE_RUNTIME_VERSION)
             && general_compute_manifest.is_none()
@@ -4418,34 +4416,30 @@ impl TaskRepository {
                 .task_source
                 .as_deref()
                 .filter(|source| !source.trim().is_empty())
-                .ok_or_else(|| {
-                    anyhow::anyhow!("managed-function-v1 requires non-empty task_source")
-                })?;
+                .ok_or_else(|| anyhow::anyhow!("hcode requires non-empty task_source"))?;
             if source.len() > hivemind_proto::MANAGED_TASK_SOURCE_MAX_BYTES {
-                anyhow::bail!("managed-function-v1 task_source exceeds the byte limit");
+                anyhow::bail!("hcode task_source exceeds the byte limit");
             }
             let input = task
                 .torrent_source
                 .as_deref()
                 .filter(|input| !input.trim().is_empty())
-                .ok_or_else(|| {
-                    anyhow::anyhow!("managed-function-v1 requires non-empty JSON input")
-                })?;
+                .ok_or_else(|| anyhow::anyhow!("hcode requires non-empty JSON input"))?;
             if input.len() > hivemind_proto::MANAGED_JSON_INPUT_MAX_BYTES {
-                anyhow::bail!("managed-function-v1 JSON input exceeds the byte limit");
+                anyhow::bail!("hcode JSON input exceeds the byte limit");
             }
             if task.max_cpt <= 0 {
-                anyhow::bail!("managed-function-v1 budget must be positive");
+                anyhow::bail!("hcode budget must be positive");
             }
             if general_compute_manifest.is_some() || managed_gpu_manifest.is_some() {
-                anyhow::bail!("managed-function-v1 cannot carry an execution manifest");
+                anyhow::bail!("hcode cannot carry an execution manifest");
             }
             if task
                 .expected_btih
                 .as_deref()
                 .is_some_and(|btih| !btih.trim().is_empty())
             {
-                anyhow::bail!("managed-function-v1 cannot carry a torrent identity");
+                anyhow::bail!("hcode cannot carry a torrent identity");
             }
             if task
                 .managed_dsl_backend_id
@@ -4464,7 +4458,7 @@ impl TaskRepository {
                                 != general_compute_runtime::MANAGED_DSL_V1_SEMANTICS_MANIFEST_SHA256
                     })
             {
-                anyhow::bail!("managed-function-v1 identity is invalid");
+                anyhow::bail!("hcode identity is invalid");
             }
         }
         if runtime != Some(general_compute_runtime::GENERAL_COMPUTE_RUNTIME_VERSION)
@@ -6110,7 +6104,7 @@ impl TaskRepository {
         Ok(Some(failed))
     }
 
-    /// Complete one managed-function-gpu-v1 attempt using only the canonical
+    /// Complete one hcode-gpu attempt using only the canonical
     /// request manifest stored on the task and the private operator-owned
     /// capability snapshot. Billing and the typed result transition share one
     /// database transaction so a successful GPU result cannot become an
@@ -6196,7 +6190,7 @@ impl TaskRepository {
                 .await?
         };
         if current.runtime.as_deref().map(str::trim) != Some(MANAGED_GPU_RUNTIME_VERSION) {
-            anyhow::bail!("task is not a managed-function-gpu-v1 task");
+            anyhow::bail!("task is not a hcode-gpu task");
         }
         if current.managed_gpu_manifest_json.as_deref() != Some(expected_manifest) {
             anyhow::bail!("managed GPU result does not match the persisted request manifest");
@@ -6806,7 +6800,7 @@ impl TaskRepository {
                 .await?
         };
         if current.runtime.as_deref().map(str::trim) != Some(MANAGED_GPU_RUNTIME_VERSION) {
-            anyhow::bail!("task is not a managed-function-gpu-v1 task");
+            anyhow::bail!("task is not a hcode-gpu task");
         }
         if let Some(expected_manifest) = expected_manifest {
             if current.managed_gpu_manifest_json.as_deref() != Some(expected_manifest) {
@@ -6856,7 +6850,7 @@ impl TaskRepository {
         Ok(Some(terminal))
     }
 
-    /// Persist a validated managed-function-gpu-v1 failure with Worker-owned
+    /// Persist a validated hcode-gpu failure with Worker-owned
     /// evidence and the corresponding reputation/attestation updates.
     pub async fn fail_managed_gpu_for_worker(
         &self,
@@ -6879,7 +6873,7 @@ impl TaskRepository {
         .ok_or_else(|| anyhow::anyhow!("task changed before managed GPU failure recording"))
     }
 
-    /// Persist a validated managed-function-gpu-v1 failure for the exact
+    /// Persist a validated hcode-gpu failure for the exact
     /// attempt snapshot observed by the dispatcher. A stale same-Worker
     /// response returns `Ok(None)` before any result, attestation, or lease
     /// mutation is made.
@@ -6903,7 +6897,7 @@ impl TaskRepository {
         .await
     }
 
-    /// Persist a validated managed-function-gpu-v1 failure without charging
+    /// Persist a validated hcode-gpu failure without charging
     /// either account. The typed result remains the only Worker result accepted
     /// for this route, including cancellation and backend-unavailable states.
     #[allow(clippy::too_many_arguments)]
@@ -6956,7 +6950,7 @@ impl TaskRepository {
                 .await?
         };
         if current.runtime.as_deref().map(str::trim) != Some(MANAGED_GPU_RUNTIME_VERSION) {
-            anyhow::bail!("task is not a managed-function-gpu-v1 task");
+            anyhow::bail!("task is not a hcode-gpu task");
         }
         if current.managed_gpu_manifest_json.as_deref() != Some(expected_manifest) {
             anyhow::bail!("managed GPU result does not match the persisted request manifest");
@@ -7399,9 +7393,7 @@ impl TaskRepository {
                 .await?;
         let managed_runtime = matches!(
             runtime.as_deref().map(str::trim),
-            Some("managed-function-v0")
-                | Some("managed-function-v1")
-                | Some("production_sandboxed_dsl")
+            Some("managed-function-v0") | Some("hcode") | Some("production_sandboxed_dsl")
         );
         let consensus_required: bool = sqlx::query_scalar(
             "SELECT EXISTS(
@@ -10742,6 +10734,29 @@ mod tests {
 
         cleanup_task_case(&repo.pool, &task_id, &username, None).await;
         fixture.cleanup().await.ok();
+    }
+
+    #[tokio::test]
+    async fn create_rejects_retired_v1_names_before_persistence() {
+        let (p, fixture) = match pool("task_repository_retired_v1_names").await {
+            Some(parts) => parts,
+            None => return,
+        };
+        let repo = TaskRepository::new(p);
+        for (runtime, replacement) in [
+            ("managed-function-v1", "hcode"),
+            ("managed-function-gpu-v1", "hcode-gpu"),
+        ] {
+            let mut task = make_task("retired-runtime", "unused-owner");
+            task.runtime = Some(format!(" {runtime} "));
+            let error = repo.create(&task).await.unwrap_err();
+            assert_eq!(
+                error.to_string(),
+                format!("{runtime} has been retired; use {replacement}")
+            );
+            assert!(repo.find_by_task_id(&task.task_id).await.unwrap().is_none());
+        }
+        fixture.cleanup().await.unwrap();
     }
 
     #[tokio::test]
@@ -14230,7 +14245,7 @@ mod tests {
         }
 
         let mut task = make_task(&task_id, &owner);
-        task.runtime = Some("managed-function-v1".into());
+        task.runtime = Some("hcode".into());
         task.task_source = Some("return input".into());
         task.torrent_source = Some("{}".into());
         task.deterministic = true;
@@ -14287,7 +14302,7 @@ mod tests {
             usage_units: 7,
             executed_ops: 7,
             output_bytes: output.len() as u64,
-            runtime: "managed-function-v1".into(),
+            runtime: "hcode".into(),
             backend_id: hivemind_managed_consensus::MANAGED_DSL_V1_DEFAULT_BACKEND_ID.into(),
             semantics_manifest_sha256:
                 hivemind_managed_consensus::MANAGED_DSL_V1_DEFAULT_SEMANTICS_DIGEST.into(),
@@ -14516,7 +14531,7 @@ mod tests {
             insert_worker(&repo.pool, worker_id, provider_user).await;
         }
         let mut task = make_task(&task_id, &owner);
-        task.runtime = Some("managed-function-v1".into());
+        task.runtime = Some("hcode".into());
         task.task_source = Some("return input".into());
         task.torrent_source = Some("{}".into());
         task.deterministic = true;
@@ -14544,7 +14559,7 @@ mod tests {
             usage_units: 1,
             executed_ops: 1,
             output_bytes: output.len() as u64,
-            runtime: "managed-function-v1".into(),
+            runtime: "hcode".into(),
             backend_id: hivemind_managed_consensus::MANAGED_DSL_V1_DEFAULT_BACKEND_ID.into(),
             semantics_manifest_sha256:
                 hivemind_managed_consensus::MANAGED_DSL_V1_DEFAULT_SEMANTICS_DIGEST.into(),
@@ -14630,7 +14645,7 @@ mod tests {
         for stops_confirmed in [true, false] {
             let pending_task_id = format!("observe-timeout-{stops_confirmed}-{unique}");
             let mut pending_task = make_task(&pending_task_id, &owner);
-            pending_task.runtime = Some("managed-function-v1".into());
+            pending_task.runtime = Some("hcode".into());
             pending_task.task_source = Some("return input".into());
             pending_task.torrent_source = Some("{}".into());
             pending_task.deterministic = true;
@@ -14774,7 +14789,7 @@ mod tests {
             insert_worker(&repo.pool, worker_id, provider_user).await;
         }
         let mut task = make_task(&task_id, &owner);
-        task.runtime = Some("managed-function-v1".into());
+        task.runtime = Some("hcode".into());
         task.task_source = Some("return input".into());
         task.torrent_source = Some("{}".into());
         task.deterministic = true;
@@ -14832,7 +14847,7 @@ mod tests {
             usage_units: 60,
             executed_ops: 60,
             output_bytes: output.len() as u64,
-            runtime: "managed-function-v1".into(),
+            runtime: "hcode".into(),
             backend_id: hivemind_managed_consensus::MANAGED_DSL_V1_DEFAULT_BACKEND_ID.into(),
             semantics_manifest_sha256:
                 hivemind_managed_consensus::MANAGED_DSL_V1_DEFAULT_SEMANTICS_DIGEST.into(),
@@ -15019,7 +15034,7 @@ mod tests {
             insert_worker(&repo.pool, worker_id, provider).await;
         }
         let mut task = make_task(&task_id, &owner);
-        task.runtime = Some("managed-function-v1".into());
+        task.runtime = Some("hcode".into());
         task.task_source = Some("return input".into());
         task.torrent_source = Some("{}".into());
         task.deterministic = true;
@@ -15047,7 +15062,7 @@ mod tests {
             usage_units: 12,
             executed_ops: 12,
             output_bytes: output.len() as u64,
-            runtime: "managed-function-v1".into(),
+            runtime: "hcode".into(),
             backend_id: hivemind_managed_consensus::MANAGED_DSL_V1_DEFAULT_BACKEND_ID.into(),
             semantics_manifest_sha256:
                 hivemind_managed_consensus::MANAGED_DSL_V1_DEFAULT_SEMANTICS_DIGEST.into(),
@@ -15318,7 +15333,7 @@ mod tests {
             insert_worker(&repo.pool, worker_id, provider).await;
         }
         let mut task = make_task(&task_id, &owner);
-        task.runtime = Some("managed-function-v1".into());
+        task.runtime = Some("hcode".into());
         task.task_source = Some("return input".into());
         task.torrent_source = Some("{}".into());
         task.deterministic = true;
@@ -15350,7 +15365,7 @@ mod tests {
             usage_units: 12,
             executed_ops: 12,
             output_bytes: output.len() as u64,
-            runtime: "managed-function-v1".into(),
+            runtime: "hcode".into(),
             backend_id: hivemind_managed_consensus::MANAGED_DSL_V1_DEFAULT_BACKEND_ID.into(),
             semantics_manifest_sha256:
                 hivemind_managed_consensus::MANAGED_DSL_V1_DEFAULT_SEMANTICS_DIGEST.into(),
@@ -15533,7 +15548,7 @@ mod tests {
             .await;
         }
         let mut task = make_task(&task_id, &owner);
-        task.runtime = Some("managed-function-v1".into());
+        task.runtime = Some("hcode".into());
         task.task_source = Some("return input".into());
         task.torrent_source = Some("{}".into());
         task.deterministic = true;

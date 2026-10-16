@@ -885,7 +885,13 @@ fn validate_runtime_contract_with_manifest(
     budget: i64,
 ) -> Result<(), &'static str> {
     if runtime.trim() == "managed-function-v0" {
-        return Err("managed-function-v0 has been retired; use managed-function-v1");
+        return Err("managed-function-v0 has been retired; use hcode");
+    }
+    if runtime.trim() == "managed-function-v1" {
+        return Err("managed-function-v1 has been retired; use hcode");
+    }
+    if runtime.trim() == "managed-function-gpu-v1" {
+        return Err("managed-function-gpu-v1 has been retired; use hcode-gpu");
     }
     if !manifest_json.is_empty() && !managed_gpu_manifest_json.is_empty() {
         return Err("general-compute and managed GPU manifests cannot be combined");
@@ -896,25 +902,25 @@ fn validate_runtime_contract_with_manifest(
     if !managed_gpu_manifest_json.is_empty()
         && runtime.trim() != general_compute_runtime::managed_gpu::MANAGED_GPU_RUNTIME_VERSION
     {
-        return Err("managed GPU request manifest requires runtime managed-function-gpu-v1");
+        return Err("managed GPU request manifest requires runtime hcode-gpu");
     }
     match runtime.trim() {
         "" => Ok(()),
-        "managed-function-v1" => {
+        "hcode" => {
             if task_source.trim().is_empty() {
-                return Err("managed-function-v1 requires non-empty task_source");
+                return Err("hcode requires non-empty task_source");
             }
             if task_source.len() > hivemind_proto::MANAGED_TASK_SOURCE_MAX_BYTES {
-                return Err("managed-function-v1 task_source exceeds the byte limit");
+                return Err("hcode task_source exceeds the byte limit");
             }
             if input.trim().is_empty() {
-                return Err("managed-function-v1 requires non-empty JSON input");
+                return Err("hcode requires non-empty JSON input");
             }
             if input.len() > hivemind_proto::MANAGED_JSON_INPUT_MAX_BYTES {
-                return Err("managed-function-v1 JSON input exceeds the byte limit");
+                return Err("hcode JSON input exceeds the byte limit");
             }
             if budget <= 0 {
-                return Err("managed-function-v1 budget must be positive");
+                return Err("hcode budget must be positive");
             }
             Ok(())
         }
@@ -957,23 +963,23 @@ fn validate_runtime_contract_with_manifest(
         }
         general_compute_runtime::managed_gpu::MANAGED_GPU_RUNTIME_VERSION => {
             if !task_source.trim().is_empty() || !input.trim().is_empty() {
-                return Err("managed-function-gpu-v1 uses manifest source and input only");
+                return Err("hcode-gpu uses manifest source and input only");
             }
             if managed_gpu_manifest_json.is_empty() {
-                return Err("managed-function-gpu-v1 requires a non-empty request manifest");
+                return Err("hcode-gpu requires a non-empty request manifest");
             }
             if managed_gpu_manifest_json.len() > hivemind_proto::MANAGED_GPU_MANIFEST_MAX_BYTES {
-                return Err("managed-function-gpu-v1 request manifest exceeds the byte limit");
+                return Err("hcode-gpu request manifest exceeds the byte limit");
             }
             let request = serde_json::from_slice::<
                 general_compute_runtime::managed_gpu::ManagedGpuRequest,
             >(managed_gpu_manifest_json)
-            .map_err(|_| "managed-function-gpu-v1 request manifest is invalid")?;
+            .map_err(|_| "hcode-gpu request manifest is invalid")?;
             request
                 .validate()
-                .map_err(|_| "managed-function-gpu-v1 request manifest is invalid")?;
+                .map_err(|_| "hcode-gpu request manifest is invalid")?;
             if u64::try_from(budget).ok() != Some(request.reservation_cpt) {
-                return Err("managed-function-gpu-v1 max_cpt must equal reservation_cpt");
+                return Err("hcode-gpu max_cpt must equal reservation_cpt");
             }
             Ok(())
         }
@@ -1002,13 +1008,13 @@ fn validate_task_input_contract(
         }
         general_compute_runtime::managed_gpu::MANAGED_GPU_RUNTIME_VERSION => {
             if managed_gpu_manifest_json.is_empty() {
-                return Err("managed-function-gpu-v1 requires a non-empty request manifest");
+                return Err("hcode-gpu requires a non-empty request manifest");
             }
             if !manifest_json.is_empty() {
-                return Err("managed-function-gpu-v1 cannot carry a general-compute manifest");
+                return Err("hcode-gpu cannot carry a general-compute manifest");
             }
             if !torrent.trim().is_empty() {
-                return Err("managed-function-gpu-v1 uses manifest input instead of torrent");
+                return Err("hcode-gpu uses manifest input instead of torrent");
             }
             Ok(())
         }
@@ -2173,17 +2179,14 @@ impl MasterNodeService for GrpcMasterNodeService {
             }));
         }
         let expected_btih = None;
-        let managed_v1_runtime = runtime == "managed-function-v1";
-        let managed_runtime = matches!(
-            runtime.as_str(),
-            "managed-function-v1" | "production_sandboxed_dsl"
-        );
+        let managed_v1_runtime = runtime == "hcode";
+        let managed_runtime = matches!(runtime.as_str(), "hcode" | "production_sandboxed_dsl");
         if managed_v1_runtime
             && self.state.managed_consensus_rollout_mode == ManagedConsensusRolloutMode::Disabled
         {
             return Ok(Response::new(UploadTaskResponse {
                 success: false,
-                status_message: "managed-function-v1 requires managed consensus".into(),
+                status_message: "hcode requires managed consensus".into(),
             }));
         }
         let explicit_consensus_policy = req.managed_consensus_version > 0
@@ -2294,7 +2297,7 @@ impl MasterNodeService for GrpcMasterNodeService {
         {
             None
         } else if let Some(held_total_cpt) = managed_v1_hold {
-            Some((held_total_cpt, "the managed-function-v1 total task budget"))
+            Some((held_total_cpt, "the hcode total task budget"))
         } else if req.max_cpt > 0 {
             Some((req.max_cpt, "max_cpt"))
         } else {
@@ -5224,7 +5227,7 @@ mod tests {
 
         assert_eq!(
             validate_runtime_contract(
-                "managed-function-v1",
+                "hcode",
                 &exact_source,
                 &exact_input,
                 hivemind_proto::MANAGED_BUDGET_MAX_USAGE_UNITS,
@@ -5232,16 +5235,16 @@ mod tests {
             Ok(())
         );
         assert_eq!(
-            validate_runtime_contract("managed-function-v1", &oversized_source, "{}", 1,),
-            Err("managed-function-v1 task_source exceeds the byte limit")
+            validate_runtime_contract("hcode", &oversized_source, "{}", 1,),
+            Err("hcode task_source exceeds the byte limit")
         );
         assert_eq!(
-            validate_runtime_contract("managed-function-v1", "return 1;", &oversized_input, 1,),
-            Err("managed-function-v1 JSON input exceeds the byte limit")
+            validate_runtime_contract("hcode", "return 1;", &oversized_input, 1,),
+            Err("hcode JSON input exceeds the byte limit")
         );
         assert_eq!(
             validate_runtime_contract(
-                "managed-function-v1",
+                "hcode",
                 "return 1;",
                 "{}",
                 hivemind_proto::MANAGED_BUDGET_MAX_USAGE_UNITS + 1,
@@ -5253,29 +5256,36 @@ mod tests {
     #[test]
     fn managed_upload_contract_rejects_blank_fields_and_nonpositive_budget() {
         assert_eq!(
-            validate_runtime_contract("managed-function-v1", "", "{}", 1),
-            Err("managed-function-v1 requires non-empty task_source")
+            validate_runtime_contract("hcode", "", "{}", 1),
+            Err("hcode requires non-empty task_source")
         );
         assert_eq!(
-            validate_runtime_contract("managed-function-v1", "return 1;", "", 1),
-            Err("managed-function-v1 requires non-empty JSON input")
+            validate_runtime_contract("hcode", "return 1;", "", 1),
+            Err("hcode requires non-empty JSON input")
         );
         assert_eq!(
-            validate_runtime_contract("managed-function-v1", "return 1;", "{}", 0),
-            Err("managed-function-v1 budget must be positive")
+            validate_runtime_contract("hcode", "return 1;", "{}", 0),
+            Err("hcode budget must be positive")
         );
         assert_eq!(
-            validate_runtime_contract("managed-function-v1", "return 1;", "{}", -1),
-            Err("managed-function-v1 budget must be positive")
+            validate_runtime_contract("hcode", "return 1;", "{}", -1),
+            Err("hcode budget must be positive")
         );
     }
 
     #[test]
-    fn managed_function_v0_upload_is_rejected_with_the_v1_migration_error() {
-        assert_eq!(
-            validate_runtime_contract("managed-function-v0", "return 1;", "{}", 1),
-            Err("managed-function-v0 has been retired; use managed-function-v1")
-        );
+    fn retired_runtime_upload_returns_the_hcode_migration_error() {
+        for (runtime, replacement) in [
+            ("managed-function-v0", "hcode"),
+            ("managed-function-v1", "hcode"),
+            ("managed-function-gpu-v1", "hcode-gpu"),
+        ] {
+            assert_eq!(
+                validate_runtime_contract(&format!(" {runtime} "), "return 1;", "{}", 1)
+                    .unwrap_err(),
+                format!("{runtime} has been retired; use {replacement}")
+            );
+        }
     }
 
     #[test]
@@ -5965,42 +5975,47 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn upload_task_rejects_retired_v0_before_persisting_any_assignment() {
+    async fn upload_task_rejects_retired_runtimes_before_persisting_any_assignment() {
         let service = GrpcMasterNodeService::new(nodepool_state_without_database());
-        let owner = "grpc-retired-v0-owner";
-        let rejected_task_id = format!("grpc-retired-v0-{}", uuid::Uuid::new_v4());
-        let response = service
-            .upload_task(Request::new(UploadTaskRequest {
-                task_id: rejected_task_id,
-                torrent: "{}".into(),
-                requirements: Some(ProtoResourceSpec::default()),
-                location: String::new(),
-                host_count: 1,
-                token: token_for(&service.state.auth, owner),
-                max_cpt: 1,
-                runtime: "managed-function-v0".into(),
-                task_source: "return 1;".into(),
-                package_data: Default::default(),
-                package_filename: String::new(),
-                general_compute_manifest_json: Vec::new(),
-                managed_dsl_backend_id: String::new(),
-                managed_dsl_semantics_manifest_sha256: String::new(),
-                managed_gpu_manifest_json: Vec::new(),
-                managed_consensus_version: 0,
-                managed_replica_count: 0,
-                managed_quorum: 0,
-            }))
-            .await
-            .unwrap()
-            .into_inner();
+        let owner = "grpc-retired-runtime-owner";
+        for (runtime, replacement) in [
+            ("managed-function-v0", "hcode"),
+            ("managed-function-v1", "hcode"),
+            ("managed-function-gpu-v1", "hcode-gpu"),
+        ] {
+            let rejected_task_id = format!("grpc-retired-{runtime}-{}", uuid::Uuid::new_v4());
+            let response = service
+                .upload_task(Request::new(UploadTaskRequest {
+                    task_id: rejected_task_id,
+                    torrent: "{}".into(),
+                    requirements: Some(ProtoResourceSpec::default()),
+                    location: String::new(),
+                    host_count: 1,
+                    token: token_for(&service.state.auth, owner),
+                    max_cpt: 1,
+                    runtime: runtime.into(),
+                    task_source: "return 1;".into(),
+                    package_data: Default::default(),
+                    package_filename: String::new(),
+                    general_compute_manifest_json: Vec::new(),
+                    managed_dsl_backend_id: String::new(),
+                    managed_dsl_semantics_manifest_sha256: String::new(),
+                    managed_gpu_manifest_json: Vec::new(),
+                    managed_consensus_version: 0,
+                    managed_replica_count: 0,
+                    managed_quorum: 0,
+                }))
+                .await
+                .unwrap()
+                .into_inner();
 
-        // Runtime admission happens before task lookup, assignment, or any
-        // persistence call, so this direct RPC cannot create V0 work.
-        assert!(!response.success);
-        assert_eq!(
-            response.status_message,
-            "managed-function-v0 has been retired; use managed-function-v1"
-        );
+            // Admission must reject retired names before touching the database.
+            assert!(!response.success);
+            assert_eq!(
+                response.status_message,
+                format!("{runtime} has been retired; use {replacement}")
+            );
+        }
     }
 
     #[tokio::test]
@@ -6930,7 +6945,7 @@ mod tests {
             assert!(!response.success);
             assert_eq!(
                 response.status_message,
-                "managed-function-gpu-v1 uses manifest source and input only"
+                "hcode-gpu uses manifest source and input only"
             );
             assert!(stored.is_none());
         }

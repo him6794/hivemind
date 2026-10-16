@@ -38,11 +38,11 @@ pub const MANAGED_DSL_RUNTIME_VERSION: &str = "managed-function-v0";
 pub const MANAGED_DSL_SEMANTICS_MANIFEST_SHA256: &str =
     "sha256:d61a8134f665100855402d7455cfcf3b3e701a79ad43e0039f4ad6c5f05bafef";
 /// Runtime identity for the built-in usage-settled managed DSL route.
-pub const MANAGED_DSL_V1_RUNTIME_VERSION: &str = "managed-function-v1";
+pub const MANAGED_DSL_V1_RUNTIME_VERSION: &str = "hcode";
 /// Canonical v1 managed DSL semantics binding.
 pub const MANAGED_DSL_V1_SEMANTICS_MANIFEST_SHA256: &str =
-    "sha256:c2dc962dcf6762df51fa94af2ee1f00a4d1aabdf84321ec67a3ab7f892692853";
-pub const MANAGED_DSL_V1_COST_MODEL_VERSION: &str = "managed-function-v1-execution-cpt-v1";
+    "sha256:1fb0e736676b6cc9d7090094b0e57e37f691b2b191eda5b9c7298a848bdc9593";
+pub const MANAGED_DSL_V1_COST_MODEL_VERSION: &str = "hcode-execution-cpt-v1";
 pub const MAX_CPU_MILLIS: u64 = 24 * 60 * 60 * 1000;
 pub const MAX_MEMORY_BYTES: u64 = 1024 * 1024 * 1024 * 1024;
 pub const MAX_WALL_TIME_MS: u64 = 7 * 24 * 60 * 60 * 1000;

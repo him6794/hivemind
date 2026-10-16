@@ -155,19 +155,25 @@ fn production_sandboxed_dsl_is_admitted_without_general_compute_manifest() {
 }
 
 #[test]
-fn managed_function_v0_is_rejected_after_retirement() {
-    let error = WorkerRuntimeAdmission::default()
-        .admit("managed-function-v0", &[])
-        .expect_err("retired v0 must not be admitted");
+fn retired_runtime_names_are_rejected_instead_of_aliased() {
+    for (runtime, replacement) in [
+        ("managed-function-v0", "hcode"),
+        ("managed-function-v1", "hcode"),
+        ("managed-function-gpu-v1", "hcode-gpu"),
+    ] {
+        let error = WorkerRuntimeAdmission::default()
+            .admit(&format!(" {runtime} "), &[])
+            .expect_err("retired runtimes must not be admitted");
 
-    assert!(matches!(
-        &error,
-        RuntimeAdmissionError::UnsupportedRuntime(runtime) if runtime == "managed-function-v0"
-    ));
-    assert_eq!(
-        error.to_string(),
-        "managed-function-v0 has been retired; use managed-function-v1"
-    );
+        assert_eq!(
+            error,
+            RuntimeAdmissionError::UnsupportedRuntime(runtime.into())
+        );
+        assert_eq!(
+            error.to_string(),
+            format!("{runtime} has been retired; use {replacement}")
+        );
+    }
 }
 
 #[test]
@@ -175,7 +181,7 @@ fn public_managed_dsl_capability_advertises_v1_without_v0() {
     let report = WorkerRuntimeAdmission::default().public_capability_report();
 
     assert_eq!(report.capabilities.len(), 1);
-    assert_eq!(report.capabilities[0].runtime, "managed-function-v1");
+    assert_eq!(report.capabilities[0].runtime, "hcode");
     assert!(report
         .capabilities
         .iter()
@@ -185,7 +191,7 @@ fn public_managed_dsl_capability_advertises_v1_without_v0() {
 #[test]
 fn managed_function_v1_is_admitted_without_a_host_runtime_manifest() {
     let route = WorkerRuntimeAdmission::default()
-        .admit("managed-function-v1", &[])
+        .admit("hcode", &[])
         .expect("v1 managed functions use the built-in closed interpreter");
 
     assert_eq!(route, RuntimeRoute::ManagedFunctionV1);

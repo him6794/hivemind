@@ -43,7 +43,7 @@ pub fn worker_supports_managed_dsl_request(
                 && requested_budget_units as u64 <= registration.max_usage_units
                 && match runtime {
                     "managed-function-v0" => true,
-                    "managed-function-v1" => false,
+                    "hcode" => false,
                     "production_sandboxed_dsl" => {
                         requested_backend_id.is_some_and(|backend_id| {
                             !backend_id.trim().is_empty() && backend_id == registration.backend_id
@@ -78,7 +78,7 @@ pub fn worker_supports_managed_dsl_request(
                     requested_backend_id.is_none_or(str::is_empty)
                         && requested_semantics_manifest_sha256.is_none_or(str::is_empty)
                 }
-                "managed-function-v1" => {
+                "hcode" => {
                     requested_backend_id.is_none_or(str::is_empty)
                         && requested_semantics_manifest_sha256.is_none_or(str::is_empty)
                         && capability.backend_id == MANAGED_DSL_V1_RUNTIME_VERSION
@@ -226,7 +226,7 @@ pub async fn find_best_worker(task: &Task, workers: &[WorkerNode]) -> Option<Wor
         };
 
         let general_compute_compatible = match task.runtime.as_deref().map(str::trim) {
-            Some("managed-function-v1") | Some("production_sandboxed_dsl") => {
+            Some("hcode") | Some("production_sandboxed_dsl") => {
                 worker_supports_managed_dsl_request(
                     managed_dsl_snapshot_for_worker(w),
                     task.runtime.as_deref().unwrap_or_default(),
@@ -508,6 +508,14 @@ mod tests {
             Some(capabilities_json.as_str())
         );
         assert!(worker_supports_managed_dsl_request(
+            managed_dsl_snapshot_for_worker(&worker),
+            "hcode",
+            None,
+            None,
+            1,
+        ));
+
+        assert!(!worker_supports_managed_dsl_request(
             managed_dsl_snapshot_for_worker(&worker),
             "managed-function-v1",
             None,

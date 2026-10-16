@@ -11,18 +11,18 @@ use crate::{
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
-pub const MANAGED_GPU_REQUEST_PROTOCOL_VERSION: &str = "managed-function-gpu-request-v1";
-pub const MANAGED_GPU_RESULT_PROTOCOL_VERSION: &str = "managed-function-gpu-result-v1";
-pub const MANAGED_GPU_CAPABILITY_PROTOCOL_VERSION: &str = "managed-function-gpu-capability-v1";
-pub const MANAGED_GPU_REQUIREMENT_PROTOCOL_VERSION: &str = "managed-function-gpu-requirement-v1";
-pub const MANAGED_GPU_RUNTIME_VERSION: &str = "managed-function-gpu-v1";
+pub const MANAGED_GPU_REQUEST_PROTOCOL_VERSION: &str = "hcode-gpu-request-v1";
+pub const MANAGED_GPU_RESULT_PROTOCOL_VERSION: &str = "hcode-gpu-result-v1";
+pub const MANAGED_GPU_CAPABILITY_PROTOCOL_VERSION: &str = "hcode-gpu-capability-v1";
+pub const MANAGED_GPU_REQUIREMENT_PROTOCOL_VERSION: &str = "hcode-gpu-requirement-v1";
+pub const MANAGED_GPU_RUNTIME_VERSION: &str = "hcode-gpu";
 /// This is the raw digest of the canonical managed GPU semantics manifest. It
 /// deliberately uses the same representation as the interpreter crate.
 pub const MANAGED_GPU_SEMANTICS_MANIFEST_SHA256: &str =
-    "2069ca41a110fd931aab3e9fbcdf00489ddc60cdfda3d62a38bd4b4812ab1f75";
-pub const MANAGED_GPU_OPERATION_REGISTRY_VERSION: &str = "managed-function-gpu-ops-v1";
-pub const MANAGED_GPU_BILLING_VERSION: &str = "managed-function-gpu-billing-v1";
-pub const MANAGED_GPU_COST_MODEL_VERSION: &str = "managed-function-gpu-metering-v1";
+    "0fea0cfea0d2c68bbca7cccb951af6afa71b89fa9fd58e4c4d45944f1cdcd441";
+pub const MANAGED_GPU_OPERATION_REGISTRY_VERSION: &str = "hcode-gpu-ops-v1";
+pub const MANAGED_GPU_BILLING_VERSION: &str = "hcode-gpu-billing-v1";
+pub const MANAGED_GPU_COST_MODEL_VERSION: &str = "hcode-gpu-metering-v1";
 pub const MANAGED_GPU_SETTLEMENT_BASIS: &str = "fixed-operation-reservation";
 pub const MANAGED_GPU_OPERATION_COST_UNITS: u64 = 10;
 pub const MANAGED_GPU_MAX_RESERVATION_CPT: u64 = 1_000_000_000_000;

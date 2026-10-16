@@ -87,7 +87,13 @@ impl std::fmt::Display for RuntimeAdmissionError {
                 )
             }
             Self::UnsupportedRuntime(runtime) if runtime == "managed-function-v0" => {
-                formatter.write_str("managed-function-v0 has been retired; use managed-function-v1")
+                formatter.write_str("managed-function-v0 has been retired; use hcode")
+            }
+            Self::UnsupportedRuntime(runtime) if runtime == "managed-function-v1" => {
+                formatter.write_str("managed-function-v1 has been retired; use hcode")
+            }
+            Self::UnsupportedRuntime(runtime) if runtime == "managed-function-gpu-v1" => {
+                formatter.write_str("managed-function-gpu-v1 has been retired; use hcode-gpu")
             }
             Self::UnsupportedRuntime(_) => formatter.write_str("unsupported task runtime"),
         }
@@ -283,8 +289,10 @@ impl WorkerRuntimeAdmission {
                 }
                 Ok(RuntimeRoute::Legacy)
             }
-            "managed-function-v0" => Err(RuntimeAdmissionError::UnsupportedRuntime(runtime.into())),
-            "managed-function-v1" => {
+            "managed-function-v0" | "managed-function-v1" | "managed-function-gpu-v1" => {
+                Err(RuntimeAdmissionError::UnsupportedRuntime(runtime.into()))
+            }
+            "hcode" => {
                 if !general_compute_manifest_json.is_empty()
                     || !managed_gpu_manifest_json.is_empty()
                 {

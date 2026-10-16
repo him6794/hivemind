@@ -10,17 +10,14 @@ use serde_json::Value as JsonValue;
 use sha2::{Digest, Sha256};
 
 const EXPECTED_GPU_MANIFEST_SHA256: &str =
-    "2069ca41a110fd931aab3e9fbcdf00489ddc60cdfda3d62a38bd4b4812ab1f75";
+    "0fea0cfea0d2c68bbca7cccb951af6afa71b89fa9fd58e4c4d45944f1cdcd441";
 
 #[test]
 fn gpu_manifest_and_runtime_identifiers_are_pinned() {
-    assert_eq!(GPU_RUNTIME_VERSION, "managed-function-gpu-v1");
-    assert_eq!(
-        GPU_OPERATION_REGISTRY_VERSION,
-        "managed-function-gpu-ops-v1"
-    );
-    assert_eq!(GPU_BILLING_VERSION, "managed-function-gpu-billing-v1");
-    assert_eq!(GPU_COST_MODEL_VERSION, "managed-function-gpu-metering-v1");
+    assert_eq!(GPU_RUNTIME_VERSION, "hcode-gpu");
+    assert_eq!(GPU_OPERATION_REGISTRY_VERSION, "hcode-gpu-ops-v1");
+    assert_eq!(GPU_BILLING_VERSION, "hcode-gpu-billing-v1");
+    assert_eq!(GPU_COST_MODEL_VERSION, "hcode-gpu-metering-v1");
 
     let manifest: JsonValue =
         serde_json::from_str(GPU_SEMANTICS_MANIFEST_JSON).expect("GPU manifest must be valid JSON");
@@ -31,14 +28,14 @@ fn gpu_manifest_and_runtime_identifiers_are_pinned() {
     assert_eq!(GPU_SEMANTICS_MANIFEST_SHA256, EXPECTED_GPU_MANIFEST_SHA256);
     assert_eq!(digest, EXPECTED_GPU_MANIFEST_SHA256);
     assert_eq!(manifest["runtime"], GPU_RUNTIME_VERSION);
-    assert_eq!(manifest["interpreter"], "managed-function-runtime-gpu-v1");
+    assert_eq!(manifest["interpreter"], "hcode-gpu-interpreter-v1");
     assert_eq!(
         manifest["operation_registry"],
         GPU_OPERATION_REGISTRY_VERSION
     );
     assert_eq!(manifest["billing_version"], GPU_BILLING_VERSION);
     assert_eq!(manifest["cost_model_version"], GPU_COST_MODEL_VERSION);
-    assert_eq!(manifest["tensor_abi"], "managed-function-gpu-tensor-v1");
+    assert_eq!(manifest["tensor_abi"], "hcode-gpu-tensor-v1");
     assert_eq!(manifest["supported_dtype"], "float32");
     assert_eq!(manifest["max_rank"], 8);
     assert_eq!(manifest["max_tensor_bytes"], 16_777_216);

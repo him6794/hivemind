@@ -909,7 +909,7 @@ pub struct TaskResult {
     /// Legacy managed-function results leave this unset.
     #[serde(default)]
     pub general_compute_result_json: Option<Vec<u8>>,
-    /// Serialized typed result for `managed-function-gpu-v1`.
+    /// Serialized typed result for `hcode-gpu`.
     /// GPU-v1 results never enter the legacy result-torrent route.
     #[serde(default)]
     pub managed_gpu_result_json: Option<Vec<u8>>,

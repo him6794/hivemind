@@ -189,12 +189,9 @@ fn managed_function_v1_manifest_is_canonical_and_hash_pinned() {
     assert_eq!(V1_SEMANTICS_MANIFEST_JSON.trim_end(), canonical);
     assert_eq!(V1_SEMANTICS_MANIFEST_SHA256, EXPECTED_V1_MANIFEST_SHA256);
     assert_eq!(digest, EXPECTED_V1_MANIFEST_SHA256);
-    assert_eq!(manifest["runtime_id"], "managed-function-v1");
+    assert_eq!(manifest["runtime_id"], "hcode");
     assert_eq!(manifest["cost_model"]["id"], V1_COST_MODEL_ID);
-    assert_eq!(
-        manifest["manifest_id"],
-        "managed-function-v1-semantics-manifest-v1"
-    );
+    assert_eq!(manifest["manifest_id"], "hcode-semantics-manifest-v1");
     assert_eq!(manifest["billing"]["authority"], "nodepool");
     assert_eq!(manifest["billing"]["reservation"], "per-replica-allowance");
     assert_eq!(manifest["billing"]["usage_role"], "settlement-input");
@@ -279,4 +276,4 @@ fn managed_function_v1_manifest_matches_budget_profile_and_cost_vectors() {
 }
 
 const EXPECTED_V1_MANIFEST_SHA256: &str =
-    "c2dc962dcf6762df51fa94af2ee1f00a4d1aabdf84321ec67a3ab7f892692853";
+    "1fb0e736676b6cc9d7090094b0e57e37f691b2b191eda5b9c7298a848bdc9593";

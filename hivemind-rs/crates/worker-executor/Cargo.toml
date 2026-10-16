@@ -6,7 +6,7 @@ license.workspace = true
 
 [features]
 default = []
-# Operator-owned CUDA support for managed-function-gpu-v1 only. The managed
+# Operator-owned CUDA support for hcode-gpu only. The managed
 # runtimes use their typed result channels independently of this feature.
 cuda = ["managed-function-runtime/cuda"]
 

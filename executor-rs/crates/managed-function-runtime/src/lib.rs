@@ -13,25 +13,24 @@ pub const V0_SEMANTICS_MANIFEST_JSON: &str = include_str!("../managed-function-v
 pub const V0_SEMANTICS_MANIFEST_SHA256: &str =
     "d61a8134f665100855402d7455cfcf3b3e701a79ad43e0039f4ad6c5f05bafef";
 
-/// Canonical `managed-function-v1` semantics, metering, billing, and result
+/// Canonical `hcode` semantics, metering, billing, and result
 /// contract manifest. The v1 contract reuses the closed interpreter while
 /// versioning its budget and settlement semantics independently from v0.
-pub const V1_SEMANTICS_MANIFEST_JSON: &str = include_str!("../managed-function-v1-semantics.json");
+pub const V1_SEMANTICS_MANIFEST_JSON: &str = include_str!("../hcode-semantics.json");
 
 /// SHA-256 of the canonical JSON bytes in [`V1_SEMANTICS_MANIFEST_JSON`],
 /// excluding the file's trailing newline.
 pub const V1_SEMANTICS_MANIFEST_SHA256: &str =
-    "c2dc962dcf6762df51fa94af2ee1f00a4d1aabdf84321ec67a3ab7f892692853";
+    "1fb0e736676b6cc9d7090094b0e57e37f691b2b191eda5b9c7298a848bdc9593";
 
 /// Versioned metering identity committed by the v1 semantics manifest.
-pub const V1_COST_MODEL_ID: &str = "managed-function-v1-execution-cpt-v1";
+pub const V1_COST_MODEL_ID: &str = "hcode-execution-cpt-v1";
 
 /// Canonical GPU-v1 semantics and operation-registry manifest.
-pub const GPU_SEMANTICS_MANIFEST_JSON: &str =
-    include_str!("../managed-function-gpu-v1-semantics.json");
+pub const GPU_SEMANTICS_MANIFEST_JSON: &str = include_str!("../hcode-gpu-semantics.json");
 /// SHA-256 of the canonical GPU-v1 manifest excluding its trailing newline.
 pub const GPU_SEMANTICS_MANIFEST_SHA256: &str =
-    "2069ca41a110fd931aab3e9fbcdf00489ddc60cdfda3d62a38bd4b4812ab1f75";
+    "0fea0cfea0d2c68bbca7cccb951af6afa71b89fa9fd58e4c4d45944f1cdcd441";
 
 mod gpu;
 
@@ -266,7 +265,7 @@ pub enum Status {
 pub struct ExecutionLimits {
     pub max_ops: u64,
     pub max_usage_units: Option<u64>,
-    /// Use checked signed-i64 arithmetic for the versioned managed-function-v1
+    /// Use checked signed-i64 arithmetic for the versioned hcode
     /// profile without changing the frozen v0 arithmetic behavior.
     pub checked_integer_arithmetic: bool,
     pub max_call_depth: usize,

@@ -286,13 +286,18 @@ fn validate_task_resources(body: &CreateTaskBody) -> Result<(), &'static str> {
 fn validate_runtime_contract(body: &CreateTaskBody) -> Result<(), &'static str> {
     let runtime = body.runtime.as_deref().map(str::trim).unwrap_or_default();
     if runtime == "managed-function-v0" {
-        return Err("managed-function-v0 has been retired; use managed-function-v1");
+        return Err("managed-function-v0 has been retired; use hcode");
+    }
+    if runtime == "managed-function-v1" {
+        return Err("managed-function-v1 has been retired; use hcode");
+    }
+    if runtime == "managed-function-gpu-v1" {
+        return Err("managed-function-gpu-v1 has been retired; use hcode-gpu");
     }
     let consensus_requested = body.managed_consensus_version.is_some()
         || body.managed_replica_count.is_some()
         || body.managed_quorum.is_some();
-    if consensus_requested && !matches!(runtime, "managed-function-v1" | "production_sandboxed_dsl")
-    {
+    if consensus_requested && !matches!(runtime, "hcode" | "production_sandboxed_dsl") {
         return Err("managed consensus policy requires a managed DSL runtime");
     }
     if body
@@ -323,7 +328,7 @@ fn validate_runtime_contract(body: &CreateTaskBody) -> Result<(), &'static str> 
     if body.managed_gpu_manifest_json.is_some()
         && runtime != general_compute_runtime::managed_gpu::MANAGED_GPU_RUNTIME_VERSION
     {
-        return Err("managed GPU request manifest requires runtime managed-function-gpu-v1");
+        return Err("managed GPU request manifest requires runtime hcode-gpu");
     }
     if runtime != "production_sandboxed_dsl"
         && (body.managed_dsl_backend_id.is_some()
@@ -333,23 +338,23 @@ fn validate_runtime_contract(body: &CreateTaskBody) -> Result<(), &'static str> 
     }
     match runtime {
         "" => Ok(()),
-        "managed-function-v1" => {
+        "hcode" => {
             let source = body.task_source.as_deref().unwrap_or_default();
             if source.trim().is_empty() {
-                return Err("managed-function-v1 requires non-empty task_source");
+                return Err("hcode requires non-empty task_source");
             }
             if source.len() > hivemind_proto::MANAGED_TASK_SOURCE_MAX_BYTES {
-                return Err("managed-function-v1 task_source exceeds the byte limit");
+                return Err("hcode task_source exceeds the byte limit");
             }
             let input = body.torrent.as_deref().unwrap_or_default();
             if input.trim().is_empty() {
-                return Err("managed-function-v1 requires non-empty JSON input");
+                return Err("hcode requires non-empty JSON input");
             }
             if input.len() > hivemind_proto::MANAGED_JSON_INPUT_MAX_BYTES {
-                return Err("managed-function-v1 JSON input exceeds the byte limit");
+                return Err("hcode JSON input exceeds the byte limit");
             }
             if body.max_cpt.unwrap_or(0) <= 0 {
-                return Err("managed-function-v1 budget must be positive");
+                return Err("hcode budget must be positive");
             }
             Ok(())
         }
@@ -426,29 +431,29 @@ fn validate_runtime_contract(body: &CreateTaskBody) -> Result<(), &'static str> 
                     .as_deref()
                     .is_some_and(|input| !input.trim().is_empty())
             {
-                return Err("managed-function-gpu-v1 uses manifest source and input only");
+                return Err("hcode-gpu uses manifest source and input only");
             }
             let manifest = body
                 .managed_gpu_manifest_json
                 .as_ref()
-                .ok_or("managed-function-gpu-v1 requires a non-empty request manifest")?;
+                .ok_or("hcode-gpu requires a non-empty request manifest")?;
             let bytes = serde_json::to_vec(manifest)
-                .map_err(|_| "managed-function-gpu-v1 request manifest is invalid")?;
+                .map_err(|_| "hcode-gpu request manifest is invalid")?;
             if bytes.is_empty() {
-                return Err("managed-function-gpu-v1 requires a non-empty request manifest");
+                return Err("hcode-gpu requires a non-empty request manifest");
             }
             if bytes.len() > hivemind_proto::MANAGED_GPU_MANIFEST_MAX_BYTES {
-                return Err("managed-function-gpu-v1 request manifest exceeds the byte limit");
+                return Err("hcode-gpu request manifest exceeds the byte limit");
             }
             let request = serde_json::from_slice::<
                 general_compute_runtime::managed_gpu::ManagedGpuRequest,
             >(&bytes)
-            .map_err(|_| "managed-function-gpu-v1 request manifest is invalid")?;
+            .map_err(|_| "hcode-gpu request manifest is invalid")?;
             request
                 .validate()
-                .map_err(|_| "managed-function-gpu-v1 request manifest is invalid")?;
+                .map_err(|_| "hcode-gpu request manifest is invalid")?;
             if u64::try_from(body.max_cpt.unwrap_or(0)).ok() != Some(request.reservation_cpt) {
-                return Err("managed-function-gpu-v1 max_cpt must equal reservation_cpt");
+                return Err("hcode-gpu max_cpt must equal reservation_cpt");
             }
             Ok(())
         }
@@ -3038,13 +3043,13 @@ mod tests {
     #[test]
     fn managed_runtime_source_accepts_64_kib_and_rejects_one_more_byte() {
         let exact = task_body(
-            Some("managed-function-v1"),
+            Some("hcode"),
             Some("s".repeat(hivemind_proto::MANAGED_TASK_SOURCE_MAX_BYTES)),
             Some("{}".into()),
             1,
         );
         let oversized = task_body(
-            Some("managed-function-v1"),
+            Some("hcode"),
             Some("s".repeat(hivemind_proto::MANAGED_TASK_SOURCE_MAX_BYTES + 1)),
             Some("{}".into()),
             1,
@@ -3053,7 +3058,7 @@ mod tests {
         assert_eq!(validate_runtime_contract(&exact), Ok(()));
         assert_eq!(
             validate_runtime_contract(&oversized),
-            Err("managed-function-v1 task_source exceeds the byte limit")
+            Err("hcode task_source exceeds the byte limit")
         );
     }
 
@@ -3160,7 +3165,7 @@ mod tests {
             };
             assert_eq!(
                 validate_runtime_contract(&body),
-                Err("managed-function-gpu-v1 uses manifest source and input only")
+                Err("hcode-gpu uses manifest source and input only")
             );
         }
     }
@@ -3178,7 +3183,7 @@ mod tests {
         };
         assert_eq!(
             validate_runtime_contract(&malformed),
-            Err("managed-function-gpu-v1 request manifest is invalid")
+            Err("hcode-gpu request manifest is invalid")
         );
 
         let oversized = CreateTaskBody {
@@ -3194,7 +3199,7 @@ mod tests {
         };
         assert_eq!(
             validate_runtime_contract(&oversized),
-            Err("managed-function-gpu-v1 request manifest exceeds the byte limit")
+            Err("hcode-gpu request manifest exceeds the byte limit")
         );
 
         let mismatched = CreateTaskBody {
@@ -3208,7 +3213,7 @@ mod tests {
         };
         assert_eq!(
             validate_runtime_contract(&mismatched),
-            Err("managed-function-gpu-v1 max_cpt must equal reservation_cpt")
+            Err("hcode-gpu max_cpt must equal reservation_cpt")
         );
     }
 
@@ -3322,13 +3327,13 @@ mod tests {
     #[test]
     fn managed_runtime_input_accepts_one_mib_and_rejects_one_more_byte() {
         let exact = task_body(
-            Some("managed-function-v1"),
+            Some("hcode"),
             Some("return 1;".into()),
             Some("i".repeat(hivemind_proto::MANAGED_JSON_INPUT_MAX_BYTES)),
             1,
         );
         let oversized = task_body(
-            Some("managed-function-v1"),
+            Some("hcode"),
             Some("return 1;".into()),
             Some("i".repeat(hivemind_proto::MANAGED_JSON_INPUT_MAX_BYTES + 1)),
             1,
@@ -3337,20 +3342,20 @@ mod tests {
         assert_eq!(validate_runtime_contract(&exact), Ok(()));
         assert_eq!(
             validate_runtime_contract(&oversized),
-            Err("managed-function-v1 JSON input exceeds the byte limit")
+            Err("hcode JSON input exceeds the byte limit")
         );
     }
 
     #[test]
     fn managed_runtime_v1_accepts_budgets_beyond_the_retired_v0_limit() {
         let legacy_limit = task_body(
-            Some("managed-function-v1"),
+            Some("hcode"),
             Some("return 1;".into()),
             Some("{}".into()),
             hivemind_proto::MANAGED_BUDGET_MAX_USAGE_UNITS,
         );
         let beyond_legacy_limit = task_body(
-            Some("managed-function-v1"),
+            Some("hcode"),
             Some("return 1;".into()),
             Some("{}".into()),
             hivemind_proto::MANAGED_BUDGET_MAX_USAGE_UNITS + 1,
@@ -3362,26 +3367,21 @@ mod tests {
 
     #[test]
     fn managed_runtime_rejects_blank_fields_and_nonpositive_budget() {
-        let blank_source = task_body(
-            Some("managed-function-v1"),
-            Some("   ".into()),
-            Some("{}".into()),
-            1,
-        );
+        let blank_source = task_body(Some("hcode"), Some("   ".into()), Some("{}".into()), 1);
         let blank_input = task_body(
-            Some("managed-function-v1"),
+            Some("hcode"),
             Some("return 1;".into()),
             Some("   ".into()),
             1,
         );
         let zero_budget = task_body(
-            Some("managed-function-v1"),
+            Some("hcode"),
             Some("return 1;".into()),
             Some("{}".into()),
             0,
         );
         let negative_budget = task_body(
-            Some("managed-function-v1"),
+            Some("hcode"),
             Some("return 1;".into()),
             Some("{}".into()),
             -1,
@@ -3389,35 +3389,41 @@ mod tests {
 
         assert_eq!(
             validate_runtime_contract(&blank_source),
-            Err("managed-function-v1 requires non-empty task_source")
+            Err("hcode requires non-empty task_source")
         );
         assert_eq!(
             validate_runtime_contract(&blank_input),
-            Err("managed-function-v1 requires non-empty JSON input")
+            Err("hcode requires non-empty JSON input")
         );
         assert_eq!(
             validate_runtime_contract(&zero_budget),
-            Err("managed-function-v1 budget must be positive")
+            Err("hcode budget must be positive")
         );
         assert_eq!(
             validate_runtime_contract(&negative_budget),
-            Err("managed-function-v1 budget must be positive")
+            Err("hcode budget must be positive")
         );
     }
 
     #[test]
-    fn managed_function_v0_submission_is_rejected_with_the_v1_migration_error() {
-        let body = task_body(
-            Some("managed-function-v0"),
-            Some("return 1;".into()),
-            Some("{}".into()),
-            1,
-        );
+    fn retired_runtime_submission_returns_the_hcode_migration_error() {
+        for (runtime, replacement) in [
+            ("managed-function-v0", "hcode"),
+            ("managed-function-v1", "hcode"),
+            ("managed-function-gpu-v1", "hcode-gpu"),
+        ] {
+            let body = task_body(
+                Some(&format!(" {runtime} ")),
+                Some("return 1;".into()),
+                Some("{}".into()),
+                1,
+            );
 
-        assert_eq!(
-            validate_runtime_contract(&body),
-            Err("managed-function-v0 has been retired; use managed-function-v1")
-        );
+            assert_eq!(
+                validate_runtime_contract(&body).unwrap_err(),
+                format!("{runtime} has been retired; use {replacement}")
+            );
+        }
     }
 
     #[test]
@@ -3440,7 +3446,7 @@ mod tests {
             task_submit_limiter: Arc::new(tokio::sync::Mutex::new(TaskSubmitRateLimiter::new())),
         };
         let body = task_body(
-            Some("managed-function-v1"),
+            Some("hcode"),
             Some("s".repeat(hivemind_proto::MANAGED_TASK_SOURCE_MAX_BYTES + 1)),
             Some("{}".into()),
             1,
@@ -3451,9 +3457,6 @@ mod tests {
                 .await;
 
         assert_eq!(status, StatusCode::BAD_REQUEST);
-        assert_eq!(
-            response.message,
-            "managed-function-v1 task_source exceeds the byte limit"
-        );
+        assert_eq!(response.message, "hcode task_source exceeds the byte limit");
     }
 }

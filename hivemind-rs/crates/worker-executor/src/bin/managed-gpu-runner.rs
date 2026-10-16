@@ -1,4 +1,4 @@
-//! Fixed operator-owned guest runner for `managed-function-gpu-v1`.
+//! Fixed operator-owned guest runner for `hcode-gpu`.
 //!
 //! The OCI image supplies this binary as its pinned entrypoint.  It accepts no
 //! task-selected executable, library, device, or command.  The only workload

@@ -264,7 +264,7 @@ impl WorkerCapabilityReport {
                     || capability.semantics_manifest_sha256
                         != MANAGED_DSL_V1_SEMANTICS_MANIFEST_SHA256)
             {
-                return Err("managed-function-v1 capability identity is invalid".into());
+                return Err("hcode capability identity is invalid".into());
             }
             if capability.runtime == "production_sandboxed_dsl"
                 && (capability.backend_id.trim().is_empty()
@@ -305,7 +305,8 @@ impl WorkerCapabilityReport {
                 && capability.runtime != MANAGED_DSL_V1_RUNTIME_VERSION
         }) {
             return Err(
-                "public dynamic admission supports only managed-function-v0/v1 capabilities".into(),
+                "public dynamic admission supports only managed-function-v0/hcode capabilities"
+                    .into(),
             );
         }
         Ok(())
@@ -527,7 +528,7 @@ pub struct Task {
     pub runtime: Option<String>,
     pub task_source: Option<String>,
     pub general_compute_manifest_json: Option<Vec<u8>>,
-    /// Canonical request manifest for the independent managed-function-gpu-v1 route.
+    /// Canonical request manifest for the independent hcode-gpu route.
     pub managed_gpu_manifest_json: Option<Vec<u8>>,
     pub managed_dsl_backend_id: Option<String>,
     pub managed_dsl_semantics_manifest_sha256: Option<String>,
@@ -854,18 +855,29 @@ mod tests {
     }
 
     #[test]
-    fn new_public_capability_report_is_v1_only() {
+    fn new_public_capability_report_advertises_hcode_only() {
         let report = WorkerCapabilityReport::public_managed_dsl();
 
-        assert_eq!(report.validate(), Ok(()));
+        assert_eq!(report.validate_public_dynamic(), Ok(()));
         assert_eq!(report.capabilities.len(), 1);
+        assert_eq!(report.capabilities[0].runtime, "hcode");
+        assert_eq!(report.capabilities[0].backend_id, "hcode");
+    }
+
+    #[test]
+    fn public_capabilities_reject_the_retired_v1_name_and_old_backend_identity() {
+        let mut report = WorkerCapabilityReport::public_managed_dsl();
+        report.capabilities[0].runtime = "managed-function-v1".into();
         assert_eq!(
-            report.capabilities[0].runtime,
-            MANAGED_DSL_V1_RUNTIME_VERSION
+            report.validate_public_dynamic(),
+            Err("worker capability report contains an unsupported runtime".into())
         );
-        assert!(report
-            .capabilities
-            .iter()
-            .all(|capability| capability.runtime != "managed-function-v0"));
+
+        report.capabilities[0].runtime = "hcode".into();
+        report.capabilities[0].backend_id = "managed-function-v1".into();
+        assert_eq!(
+            report.validate_public_dynamic(),
+            Err("hcode capability identity is invalid".into())
+        );
     }
 }

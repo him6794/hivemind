@@ -9,13 +9,13 @@ use super::{RuntimeError, Value};
 use std::fmt::{Display, Formatter};
 
 /// Versioned runtime identity for the GPU-capable interpreter path.
-pub const GPU_RUNTIME_VERSION: &str = "managed-function-gpu-v1";
+pub const GPU_RUNTIME_VERSION: &str = "hcode-gpu";
 /// Versioned fixed operation registry identity.
-pub const GPU_OPERATION_REGISTRY_VERSION: &str = "managed-function-gpu-ops-v1";
+pub const GPU_OPERATION_REGISTRY_VERSION: &str = "hcode-gpu-ops-v1";
 /// Versioned billing identity for GPU interpreter tasks.
-pub const GPU_BILLING_VERSION: &str = "managed-function-gpu-billing-v1";
+pub const GPU_BILLING_VERSION: &str = "hcode-gpu-billing-v1";
 /// Versioned metering identity for GPU interpreter operations.
-pub const GPU_COST_MODEL_VERSION: &str = "managed-function-gpu-metering-v1";
+pub const GPU_COST_MODEL_VERSION: &str = "hcode-gpu-metering-v1";
 
 /// Fixed cost charged for one Rust GPU operation in addition to the normal
 /// function-call charge.  The value is part of the GPU-v1 semantics contract.

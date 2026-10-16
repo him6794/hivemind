@@ -673,7 +673,17 @@ pub(crate) async fn run_task_with_cancel_and_backends_and_trusted_registration_a
 
     if task.runtime.as_deref() == Some("managed-function-v0") {
         return Err(anyhow::anyhow!(
-            "managed-function-v0 has been retired; use managed-function-v1"
+            "managed-function-v0 has been retired; use hcode"
+        ));
+    }
+    if task.runtime.as_deref() == Some("managed-function-v1") {
+        return Err(anyhow::anyhow!(
+            "managed-function-v1 has been retired; use hcode"
+        ));
+    }
+    if task.runtime.as_deref() == Some("managed-function-gpu-v1") {
+        return Err(anyhow::anyhow!(
+            "managed-function-gpu-v1 has been retired; use hcode-gpu"
         ));
     }
 
@@ -759,22 +769,22 @@ fn execute_managed_gpu_task(
     let request = task
         .managed_gpu_manifest_json
         .as_deref()
-        .ok_or_else(|| anyhow::anyhow!("managed-function-gpu-v1 request manifest is required"))
+        .ok_or_else(|| anyhow::anyhow!("hcode-gpu request manifest is required"))
         .and_then(|manifest| {
             serde_json::from_slice::<ManagedGpuRequest>(manifest).map_err(|error| {
-                anyhow::anyhow!("managed-function-gpu-v1 request manifest is malformed: {error}")
+                anyhow::anyhow!("hcode-gpu request manifest is malformed: {error}")
             })
         })?;
     if let Err(error) = request.validate() {
         return Ok(failed_managed_gpu_task(
             task,
-            format!("managed-function-gpu-v1 request rejected: {error:?}"),
+            format!("hcode-gpu request rejected: {error:?}"),
         ));
     }
     let Some(trusted_registration) = trusted_registration else {
         return Ok(failed_managed_gpu_task(
             task,
-            "managed-function-gpu-v1 requires an operator-approved trusted registration".into(),
+            "hcode-gpu requires an operator-approved trusted registration".into(),
         ));
     };
     let selected_gpu = match trusted_registration.select_managed_gpu_for_request(&request) {
@@ -782,7 +792,7 @@ fn execute_managed_gpu_task(
         Err(error) => {
             return Ok(failed_managed_gpu_task(
                 task,
-                format!("managed-function-gpu-v1 GPU admission failed: {error:?}"),
+                format!("hcode-gpu GPU admission failed: {error:?}"),
             ));
         }
     };
@@ -2200,7 +2210,7 @@ mod tests {
         config.torrent.api_dir = tmp.path().join("api").to_string_lossy().to_string();
         std::fs::create_dir_all(&config.torrent.api_dir).unwrap();
         let mut task = test_task_with_source("{\"items\":[1,2,3]}");
-        task.runtime = Some("managed-function-v1".into());
+        task.runtime = Some("hcode".into());
         task.task_source = Some(
             "let total = 0; for item in get(input, \"items\") { let total = total + item; } return total;"
                 .into(),
@@ -2218,19 +2228,26 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn managed_function_v0_task_is_rejected_before_execution() {
+    async fn retired_runtime_task_is_rejected_before_execution() {
         let tmp = TempDir::new().unwrap();
         let config = test_config(tmp.path().join("sandbox").to_str().unwrap());
-        let mut task = test_task_with_source("null");
-        task.runtime = Some("managed-function-v0".into());
+        for (runtime, replacement) in [
+            ("managed-function-v0", "hcode"),
+            ("managed-function-v1", "hcode"),
+            ("managed-function-gpu-v1", "hcode-gpu"),
+        ] {
+            let mut task = test_task_with_source("null");
+            task.runtime = Some(runtime.into());
 
-        let error = run_task(&task, &config)
-            .await
-            .expect_err("retired v0 must not execute");
+            let error = run_task(&task, &config)
+                .await
+                .expect_err("retired runtimes must not execute");
 
-        assert!(error
-            .to_string()
-            .contains("managed-function-v0 has been retired; use managed-function-v1"));
+            assert_eq!(
+                error.to_string(),
+                format!("{runtime} has been retired; use {replacement}")
+            );
+        }
     }
 
     #[test]
@@ -2294,7 +2311,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let config = test_config(tmp.path().join("sandbox").to_str().unwrap());
         let mut task = test_task_with_source("null");
-        task.runtime = Some("managed-function-v1".into());
+        task.runtime = Some("hcode".into());
         task.max_cpt = 2;
         task.task_source = Some("return 1 + 2 + 3;".into());
 
@@ -2310,7 +2327,7 @@ mod tests {
         assert!(result.managed_executed_ops <= task.max_cpt);
         let receipt: Value =
             serde_json::from_str(result.managed_receipt_json.as_deref().unwrap()).unwrap();
-        assert_eq!(receipt["runtime"], "managed-function-v1");
+        assert_eq!(receipt["runtime"], "hcode");
         assert_eq!(receipt["status"], "failed");
         assert_eq!(receipt["failure_code"], "budget_exhausted");
         assert_eq!(receipt["usage_units"], receipt["executed_ops"]);
@@ -2331,7 +2348,7 @@ mod tests {
         source.push_str("fn step_64() { return 0; }\nreturn step_0();");
 
         let mut task = test_task_with_source("null");
-        task.runtime = Some("managed-function-v1".into());
+        task.runtime = Some("hcode".into());
         task.max_cpt = 10_000;
         task.task_source = Some(source);
 
@@ -2360,7 +2377,7 @@ mod tests {
         }
 
         let mut task = test_task_with_source("null");
-        task.runtime = Some("managed-function-v1".into());
+        task.runtime = Some("hcode".into());
         task.max_cpt = 10_000;
         task.task_source = Some(format!(
             "fn double(value) {{ return value + value; }} return {expression};"

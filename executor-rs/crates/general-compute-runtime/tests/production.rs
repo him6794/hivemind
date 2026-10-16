@@ -64,7 +64,7 @@ fn managed_dsl_registry_round_trips_and_has_no_host_execution_fields() {
 #[test]
 fn managed_dsl_registry_rejects_wrong_identity_or_limits() {
     let mut registration = dsl_registration("managed-invalid");
-    registration.runtime_version = "managed-function-v1".into();
+    registration.runtime_version = "hcode".into();
     assert_eq!(
         ManagedDslBackendRegistry::new(vec![registration]).unwrap_err(),
         ProductionBackendRegistryError::ManagedDslRuntimeMismatch

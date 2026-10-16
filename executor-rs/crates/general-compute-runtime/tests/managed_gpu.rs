@@ -60,7 +60,7 @@ fn registration(capabilities: Vec<ManagedGpuCapability>) -> TrustedWorkerCapabil
     TrustedWorkerCapabilityRegistration {
         worker: WorkerCapabilities {
             guest_image_digests: vec![IMAGE.into()],
-            capabilities: vec!["managed-function-gpu-v1".into()],
+            capabilities: vec!["hcode-gpu".into()],
             max_threads: 4,
             gpu_available: true,
         },
@@ -140,6 +140,30 @@ fn request_digest_binds_the_complete_independent_gpu_envelope() {
         error.code,
         general_compute_runtime::ValidationErrorCode::RequestDigestMismatch
     );
+}
+
+#[test]
+fn hcode_gpu_rejects_retired_runtime_and_derived_contract_ids() {
+    let current = request();
+    assert_eq!(current.runtime_version, "hcode-gpu");
+    current.validate().expect("hcode GPU request must validate");
+
+    for (field, retired) in [
+        ("runtime_version", "managed-function-gpu-v1"),
+        ("protocol_version", "managed-function-gpu-request-v1"),
+        ("operation_registry_version", "managed-function-gpu-ops-v1"),
+        ("billing_version", "managed-function-gpu-billing-v1"),
+        ("cost_model_version", "managed-function-gpu-metering-v1"),
+    ] {
+        let mut json = serde_json::to_value(&current).unwrap();
+        json[field] = retired.into();
+        let mut legacy: ManagedGpuRequest = serde_json::from_value(json).unwrap();
+        legacy.request_digest = legacy.canonical_request_digest();
+        assert!(
+            legacy.validate().is_err(),
+            "retired {field} must be rejected"
+        );
+    }
 }
 
 #[test]

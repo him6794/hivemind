@@ -228,7 +228,7 @@ message UploadTaskRequest {
     bytes general_compute_manifest_json = 12; // canonical general-compute-v1alpha1 request manifest
     string managed_dsl_backend_id = 13;
     string managed_dsl_semantics_manifest_sha256 = 14;
-    bytes managed_gpu_manifest_json = 15; // canonical managed-function-gpu-v1 request manifest
+    bytes managed_gpu_manifest_json = 15; // canonical hcode-gpu request manifest
     uint32 managed_consensus_version = 16;
     uint32 managed_replica_count = 17;
     uint32 managed_quorum = 18;
@@ -444,7 +444,7 @@ message GetTaskResultResponse {
     bool success = 1;
     string status_message = 2;
     string result_torrent = 3;
-    bytes managed_gpu_result_json = 4; // Nodepool-validated managed-function-gpu-v1 result
+    bytes managed_gpu_result_json = 4; // Nodepool-validated hcode-gpu result
     ManagedConsensusSummary managed_consensus = 5;
 }
 
@@ -502,7 +502,7 @@ message ExecuteTaskRequest {
     string managed_dsl_backend_id = 13;
     string managed_dsl_semantics_manifest_sha256 = 14;
     reserved 15 to 17;
-    bytes managed_gpu_manifest_json = 18; // canonical managed-function-gpu-v1 request manifest
+    bytes managed_gpu_manifest_json = 18; // canonical hcode-gpu request manifest
     string consensus_round_id = 19; // Nodepool-created managed consensus round
     string replica_id = 20; // Nodepool-created replica assignment identity
     uint32 consensus_protocol_version = 21;
@@ -551,7 +551,7 @@ message ExecuteTaskResponse {
     string idempotency_key = 9;
     string request_digest = 10;
     bytes general_compute_result_json = 11; // validated general-compute-v1alpha1 result envelope
-    bytes managed_gpu_result_json = 12; // validated managed-function-gpu-v1 result envelope
+    bytes managed_gpu_result_json = 12; // validated hcode-gpu result envelope
     ManagedConsensusResult managed_consensus_result = 13;
     string managed_consensus_result_digest = 14;
     string replica_id = 15;

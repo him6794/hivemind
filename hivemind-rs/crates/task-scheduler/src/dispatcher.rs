@@ -1327,9 +1327,7 @@ fn build_execute_task_request_with_credentials(task: &Task, token: String) -> Ex
         token,
         managed_budget_units: if matches!(
             runtime,
-            Some("managed-function-v0")
-                | Some("managed-function-v1")
-                | Some("production_sandboxed_dsl")
+            Some("managed-function-v0") | Some("hcode") | Some("production_sandboxed_dsl")
         ) {
             task.max_cpt.max(0)
         } else {
@@ -1446,7 +1444,7 @@ fn managed_gpu_identity(task: &Task) -> Result<(String, String, String, String)>
     let manifest = task
         .managed_gpu_manifest_json
         .as_deref()
-        .ok_or_else(|| anyhow::anyhow!("managed-function-gpu-v1 request manifest is missing"))?;
+        .ok_or_else(|| anyhow::anyhow!("hcode-gpu request manifest is missing"))?;
     let request = serde_json::from_slice::<ManagedGpuRequest>(manifest)
         .map_err(|error| anyhow::anyhow!("managed GPU request is malformed: {error}"))?;
     request
@@ -1471,13 +1469,13 @@ fn validate_managed_gpu_response_identity(
         return Ok(());
     }
     let Some(manifest) = task.managed_gpu_manifest_json.as_deref() else {
-        return Err("managed-function-gpu-v1 request manifest is missing");
+        return Err("hcode-gpu request manifest is missing");
     };
     let request = serde_json::from_slice::<ManagedGpuRequest>(manifest)
-        .map_err(|_| "managed-function-gpu-v1 request manifest is malformed")?;
+        .map_err(|_| "hcode-gpu request manifest is malformed")?;
     request
         .validate()
-        .map_err(|_| "managed-function-gpu-v1 request manifest is invalid")?;
+        .map_err(|_| "hcode-gpu request manifest is invalid")?;
     if response.execution_id != request.execution_id
         || response.attempt_id != request.attempt_id
         || response.idempotency_key != request.idempotency_key
@@ -1812,9 +1810,7 @@ fn worker_session_execution_token_with_lifetime(
 fn is_managed_runtime(runtime: Option<&str>) -> bool {
     matches!(
         runtime,
-        Some("managed-function-v0")
-            | Some("managed-function-v1")
-            | Some("production_sandboxed_dsl")
+        Some("managed-function-v0") | Some("hcode") | Some("production_sandboxed_dsl")
     )
 }
 
@@ -4511,7 +4507,7 @@ mod tests {
     #[test]
     fn managed_dispatch_fails_closed_without_a_persisted_policy() {
         let mut task = make_task("managed-rollout", TaskStatus::Pending, 0);
-        task.runtime = Some("managed-function-v1".into());
+        task.runtime = Some("hcode".into());
 
         for rollout_mode in [
             ManagedConsensusRolloutMode::Disabled,
@@ -6163,7 +6159,7 @@ mod tests {
         assert_eq!(stored.status, TaskStatus::Failed);
         assert_eq!(
             stored.status_message.as_deref(),
-            Some("managed-function-gpu-v1 request manifest is missing")
+            Some("hcode-gpu request manifest is missing")
         );
         assert!(!stored.billing_settled);
         assert_eq!(stored.billed_amount, 0);

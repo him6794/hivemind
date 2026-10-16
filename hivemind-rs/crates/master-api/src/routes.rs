@@ -295,6 +295,6 @@ mod tests {
             .await
             .unwrap();
         assert!(String::from_utf8_lossy(&body)
-            .contains("managed-function-gpu-v1 request manifest exceeds the byte limit"));
+            .contains("hcode-gpu request manifest exceeds the byte limit"));
     }
 }

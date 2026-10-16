@@ -709,8 +709,8 @@ fn managed_function_templates_execute_successfully() {
 fn managed_function_v1_templates_execute_with_versioned_budget_profile() {
     let cases = [
         (
-            include_str!("../../../../templates/managed-function-v1/01_policy_gate.hmf"),
-            include_str!("../../../../templates/managed-function-v1/01_policy_gate.input.json"),
+            include_str!("../../../../templates/hcode/01_policy_gate.hmf"),
+            include_str!("../../../../templates/hcode/01_policy_gate.input.json"),
             dict([
                 ("allowed", Value::Bool(true)),
                 ("risk_score", Value::Int(21)),
@@ -718,16 +718,16 @@ fn managed_function_v1_templates_execute_with_versioned_budget_profile() {
             ]),
         ),
         (
-            include_str!("../../../../templates/managed-function-v1/02_weighted_score.hmf"),
-            include_str!("../../../../templates/managed-function-v1/02_weighted_score.input.json"),
+            include_str!("../../../../templates/hcode/02_weighted_score.hmf"),
+            include_str!("../../../../templates/hcode/02_weighted_score.input.json"),
             dict([
                 ("band", Value::String("gold".into())),
                 ("score", Value::Int(860)),
             ]),
         ),
         (
-            include_str!("../../../../templates/managed-function-v1/03_batch_sum.hmf"),
-            include_str!("../../../../templates/managed-function-v1/03_batch_sum.input.json"),
+            include_str!("../../../../templates/hcode/03_batch_sum.hmf"),
+            include_str!("../../../../templates/hcode/03_batch_sum.input.json"),
             dict([
                 ("input_count", Value::Int(3)),
                 ("paid_count", Value::Int(2)),
@@ -735,8 +735,8 @@ fn managed_function_v1_templates_execute_with_versioned_budget_profile() {
             ]),
         ),
         (
-            include_str!("../../../../templates/managed-function-v1/04_price_quote.hmf"),
-            include_str!("../../../../templates/managed-function-v1/04_price_quote.input.json"),
+            include_str!("../../../../templates/hcode/04_price_quote.hmf"),
+            include_str!("../../../../templates/hcode/04_price_quote.input.json"),
             dict([
                 ("per_host_cpt", Value::Int(29)),
                 ("total_cpt", Value::Int(58)),
@@ -744,8 +744,8 @@ fn managed_function_v1_templates_execute_with_versioned_budget_profile() {
             ]),
         ),
         (
-            include_str!("../../../../templates/managed-function-v1/05_route_task.hmf"),
-            include_str!("../../../../templates/managed-function-v1/05_route_task.input.json"),
+            include_str!("../../../../templates/hcode/05_route_task.hmf"),
+            include_str!("../../../../templates/hcode/05_route_task.input.json"),
             dict([
                 ("pool", Value::String("cpu_pool".into())),
                 ("priority", Value::Int(10)),

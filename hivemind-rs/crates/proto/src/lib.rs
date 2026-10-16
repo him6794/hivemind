@@ -52,12 +52,12 @@ pub const GENERAL_COMPUTE_CHUNK_RPC_MESSAGE_MAX_BYTES: usize =
 /// Maximum encoded size accepted for one transfer-lease authority request.
 pub const GENERAL_COMPUTE_TRANSFER_LEASE_RPC_MESSAGE_MAX_BYTES: usize = 16 * 1024;
 
-/// Maximum byte length accepted for a managed-function-gpu-v1 request manifest.
+/// Maximum byte length accepted for a hcode-gpu request manifest.
 /// The manifest carries bounded source and JSON input, so it is intentionally
 /// separate from the general-compute artifact manifest cap.
 pub const MANAGED_GPU_MANIFEST_MAX_BYTES: usize = 20 * 1024 * 1024;
 
-/// Maximum serialized size accepted for a managed-function-gpu-v1 result.
+/// Maximum serialized size accepted for a hcode-gpu result.
 pub const MANAGED_GPU_RESULT_MAX_BYTES: usize = 16 * 1024 * 1024;
 
 /// Maximum byte length accepted for a Nodepool-issued Worker execution JWT in an
@@ -134,7 +134,7 @@ pub fn validate_managed_consensus_request(
     }
     if !matches!(
         request.runtime.as_str(),
-        "managed-function-v0" | "managed-function-v1" | "production_sandboxed_dsl"
+        "managed-function-v0" | "hcode" | "production_sandboxed_dsl"
     ) {
         return Err("managed consensus is only supported for managed DSL runtimes");
     }
@@ -732,6 +732,31 @@ mod tests {
     }
 
     #[test]
+    fn managed_consensus_request_accepts_hcode_but_not_retired_v1_aliases() {
+        let mut request = ExecuteTaskRequest {
+            task_id: "task-1".into(),
+            runtime: "hcode".into(),
+            execution_id: "execution-1".into(),
+            attempt_id: "attempt-1".into(),
+            idempotency_key: "idempotency-1".into(),
+            request_digest: "sha256:request".into(),
+            consensus_round_id: "round-1".into(),
+            replica_id: "replica-1".into(),
+            consensus_protocol_version: 1,
+            ..ExecuteTaskRequest::default()
+        };
+        assert_eq!(validate_managed_consensus_request(&request), Ok(()));
+
+        for runtime in ["managed-function-v1", "managed-function-gpu-v1"] {
+            request.runtime = runtime.into();
+            assert_eq!(
+                validate_managed_consensus_request(&request),
+                Err("managed consensus is only supported for managed DSL runtimes")
+            );
+        }
+    }
+
+    #[test]
     fn managed_consensus_response_rejects_incomplete_identity() {
         let response = ExecuteTaskResponse {
             consensus_protocol_version: 1,
@@ -772,7 +797,7 @@ mod tests {
 
     #[test]
     fn managed_gpu_request_and_result_json_fields_round_trip() {
-        let manifest = br#"{\"runtime_version\":\"managed-function-gpu-v1\"}"#.to_vec();
+        let manifest = br#"{\"runtime_version\":\"hcode-gpu\"}"#.to_vec();
         let result = br#"{\"status\":\"completed\"}"#.to_vec();
 
         let execute = ExecuteTaskRequest {
