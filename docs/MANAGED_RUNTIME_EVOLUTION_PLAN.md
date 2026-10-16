@@ -3,7 +3,7 @@
 ## 0. 先講結論
 
 目前 active 的 `managed-function-runtime` 是 deterministic、bounded、可計量的
-`managed-function-v1` JSON DSL。它適合做受 Nodepool consensus 保護的函式結算，
+`hcode` JSON DSL。它適合做受 Nodepool consensus 保護的函式結算，
 但不能誠實宣稱是「部署時圖靈完備」或「完整科學運算環境」：值域仍是有限的
 整數、布林、字串、list、dict、null；每個 replica 以 `max_cpt` 作為工作額度，
 並另外受 call-depth、value、output、materialization 與 deadline 等結構性限制。
@@ -15,8 +15,8 @@
 
 | Runtime | 目的 | 宣稱 | 結算方式 |
 |---|---|---|---|
-| `managed-function-v1` | 小型 deterministic 函式、可計量的結算 | 有限 DSL；不宣稱圖靈完備 | Nodepool 以多 Worker consensus 與有效 replica usage evidence 結算 |
-| `managed-function-v0` | 已完成任務與舊 Worker 的相容性 | 凍結的歷史有限 DSL；不接受新工作 | 保留原有歷史 fixed-reservation 語義，不轉換成 v1 |
+| `hcode` | 小型 deterministic 函式、可計量的結算 | 有限 DSL；不宣稱圖靈完備 | Nodepool 以多 Worker consensus 與有效 replica usage evidence 結算 |
+| `managed-function-v0` | 已完成任務與舊 Worker 的相容性 | 凍結的歷史有限 DSL；不接受新工作 | 保留原有歷史 fixed-reservation 語義，不轉換成 hcode |
 | `general-compute-v1alpha1` | 一般程式與科學工作負載的 pre-release 契約 | 採 pinned CPython 的一般程式語義；單次執行仍受資源配額限制 | 僅允許 allowlisted beta；usage 先視為 claim，不直接驅動結算 |
 | `general-compute-v1` | 通過 M0–M5 後的穩定契約 | 只宣稱 support matrix 與 gates 已證明的 CPU／GPU 能力 | 依 Nodepool 驗證出的 evidence level 結算 |
 
@@ -46,7 +46,7 @@
 
 ### 2.1 契約分層
 
-`managed-function-v1` 已是 active managed runtime；它沿用封閉 interpreter，並以每個
+`hcode` 已是 active managed runtime；它沿用封閉 interpreter，並以每個
 replica 的 usage allowance 與有效 evidence 進行 Nodepool settlement。`managed-function-v0`
 的 runtime id、cost-model id 與 consensus result contract 仍是不可變的歷史邊界；新的
 v0 submission 會被拒絕，未完成的 v0 work 在 Nodepool 啟動時取消，已完成資料只作
@@ -56,9 +56,9 @@ v0 submission 會被拒絕，未完成的 v0 work 在 Nodepool 啟動時取消�
 被誤認為穩定 API。
 
 任何 managed 語義或計量改動都必須產生新 runtime／cost-model id、fixture 與 rollout，
-不能原地修改 frozen v0。V1 與完整 Python scientific backend 仍是不同契約，不應混為一談。
+不能原地修改 frozen v0。hcode 與完整 Python scientific backend 仍是不同契約，不應混為一談。
 
-本計畫另明確區分執行邊界：active `managed-function-v1` 以及相容用的 frozen v0
+本計畫另明確區分執行邊界：active `hcode` 以及相容用的 frozen v0
 interpreter 都只執行封閉自訂語法，沒有 filesystem、network、process、DLL 或 native
 API capability。`production_sandboxed_dsl` 仍保留其 frozen v0 semantics identity，並在
 自身路由中使用對應的封閉 interpreter；Windows DSL Worker 不需要 Windows
@@ -204,7 +204,7 @@ v1 延續目前 trust model：Nodepool 是唯一可信結算權威，Worker 的�
 - network 預設 deny；filesystem 只允許明確的 read-only input 與 ephemeral output mount；禁止任意 pip/npm install、動態 native plugin 與 host socket。
 - Worker 只回傳受限 telemetry；Nodepool 驗證 envelope、hash、配額、runtime/image/cost-model 版本後才建立 usage claim。
 - registry-approved image/capability與 Worker自報 capability是不同資料；Nodepool須記錄 claim、persisted registration、operator-approved registry與attested capability的 provenance。字串相符或 `gpu_available=true` 不是硬體存在的證明。
-- active `managed-function-v1` 由 Nodepool 以 strict-majority consensus certificate 選出
+- active `hcode` 由 Nodepool 以 strict-majority consensus certificate 選出
   結果，並獨立以驗證過的 per-replica usage evidence 結算；有效但 divergent 的 replica
   也可按實際工作量結算，未使用的 hold 會退回。`general-compute-v1alpha1` 的 resource
   telemetry 仍一律存為 `worker_usage_claim`，不得單獨驅動 variable settlement；其

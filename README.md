@@ -29,8 +29,11 @@ historical evaluations.
 
 For task submission and programming:
 
-- [docs/MANAGED_FUNCTION_RUNTIME.md](docs/MANAGED_FUNCTION_RUNTIME.md) — active
-  `managed-function-v1` syntax, metering, and settlement
+- [hcode tutorial (繁體中文)](docs/hcode-tutorial.zh-TW.md) — write and submit
+  a first task, understand JSON input and replica billing, and upgrade safely
+
+- [docs/HCODE_RUNTIME.md](docs/HCODE_RUNTIME.md) — active
+  `hcode` syntax, metering, and settlement
 - [docs/PUBLIC_NETWORK_LIMITATIONS.md](docs/PUBLIC_NETWORK_LIMITATIONS.md) —
   execution, security, service, and CPT limits
 - The official site's Docs and Usage rules pages share the reference in
@@ -174,17 +177,17 @@ see the runbook for configuration and cleanup details.
 
 ### Managed consensus
 
-Nodepool assigns each deterministic CPU `managed-function-v1` task to three
+Nodepool assigns each deterministic CPU `hcode` task to three
 distinct registered Workers by default. Two must return matching canonical results. Nodepool
 persists a quorum certificate before publishing a successful task result and
-does not fall back to single-Worker completion. Valid attempt-bound v1 usage
+does not fall back to single-Worker completion. Valid attempt-bound hcode usage
 can still be billable for a failed or no-quorum task.
 
 Consensus records agreement, not independently verified correctness. A colluding
 or commonly compromised Worker majority can agree on an incorrect result. Only
 deterministic, side-effect-free managed tasks are eligible.
 
-For new v1 tasks, `max_cpt` is the total charge cap, including the 10% platform
+For new hcode tasks, `max_cpt` is the total charge cap, including the 10% platform
 fee and all replicas. Nodepool derives equal integer execution budgets from the
 fee-exclusive cap. With a 100 CPT cap and three replicas, each receives 30 CPT
 of execution budget. The hold is 99 CPT (90 usage + 9 fee); the remaining 1 CPT
@@ -242,7 +245,7 @@ login handles VPN enrollment and Nodepool discovery through the overlay.
 | `WORKER_GRPC_ADDR` | `0.0.0.0:50053` | Worker gRPC listen address |
 | `WORKER_ADVERTISE_ADDR` | - | Worker address registered with Nodepool |
 | `EXECUTOR_SANDBOX_DIR` | `./sandbox` | Per-task working directory root |
-| `MANAGED_CONSENSUS_ROLLOUT_MODE` | `enforce` | `disabled`, `observe`, or `enforce`; successful output requires a strict-majority certificate; valid v1 usage is validated separately for payment |
+| `MANAGED_CONSENSUS_ROLLOUT_MODE` | `enforce` | `disabled`, `observe`, or `enforce`; successful output requires a strict-majority certificate; valid hcode usage is validated separately for payment |
 | `MANAGED_CONSENSUS_REPLICA_COUNT` | `3` | Distinct Worker replicas per managed task |
 | `MANAGED_CONSENSUS_QUORUM` | `2` | Matching replicas required; must be a strict majority |
 | `MANAGED_CONSENSUS_TIMEOUT_SECS` | `120` | Deadline for one consensus round |
@@ -267,7 +270,7 @@ curl -X POST http://localhost:8082/api/tasks \
   -H "Content-Type: application/json" \
   -d '{
     "task_id": "task-1",
-    "runtime": "managed-function-v1",
+    "runtime": "hcode",
     "task_source": "fn sum(values) {\n  return get(values, \"a\") + get(values, \"b\");\n}\nsum(input);\n",
     "torrent": "{\"a\": 1, \"b\": 2}",
     "memory_gb": 4,

@@ -9,7 +9,8 @@
 
 ## 任務與結算
 
-- [Managed Function Runtime](MANAGED_FUNCTION_RUNTIME.md)：`managed-function-v1` 語法、計量、限制與整個任務的 CPT 上限。
+- [hcode 教學（繁體中文）](hcode-tutorial.zh-TW.md)：第一個程式、JSON input、提交方式、預算與升級步驟。
+- [hcode Runtime](HCODE_RUNTIME.md)：`hcode` 語法、計量、限制與整個任務的 CPT 上限。
 - [Managed consensus state](managed-consensus-state.md)：副本、quorum、attempt fencing、用量驗證與結算。
 - [Operator-pinned ONNX inference](GENERAL_COMPUTE_ONNX.md)：general-compute alpha 的映像、tensor ABI、GPU/provider 綁定與輸出傳輸。
 

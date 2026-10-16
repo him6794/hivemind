@@ -54,7 +54,7 @@ confirmed, Nodepool retains the Worker-slot reservation in a durable
 `stop_pending`/`cancel_pending` state and retries the stop rather than
 redispatching the Worker immediately.
 
-For `managed-function-v1` in enforce mode, settlement uses validated,
+For `hcode` in enforce mode, settlement uses validated,
 assignment-bound per-replica usage evidence—including valid divergent results—
 within the task-wide `max_cpt` cap. Missing or invalid receipts are not billable;
 `observe` remains non-settling and creates no usage hold. A consensus certificate

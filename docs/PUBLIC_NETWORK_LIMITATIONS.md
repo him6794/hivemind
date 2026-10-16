@@ -18,7 +18,7 @@ independence. The trust model is defined in [AGENT.md](../AGENT.md).
 
 ## Managed execution
 
-- New CPU managed work uses `managed-function-v1`, a closed Rust-owned interpreter
+- New CPU managed work uses `hcode`, a closed Rust-owned interpreter
   with no file, network, import, subprocess, DLL, or arbitrary native API access.
 - `managed-function-v0` is retained for historical reads. New v0 submissions are
   rejected and unfinished historical work is retired.
@@ -37,7 +37,7 @@ independence. The trust model is defined in [AGENT.md](../AGENT.md).
 - Automatic paid retries are disabled pending a funded platform treasury.
   The task-wide cap does not retroactively change historical billing.
 
-The full contract is in [Managed Function Runtime](MANAGED_FUNCTION_RUNTIME.md)
+The full contract is in [hcode Runtime](HCODE_RUNTIME.md)
 and [managed consensus](managed-consensus-state.md).
 
 ## General compute, GPU, and ONNX

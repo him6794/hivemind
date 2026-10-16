@@ -2,7 +2,7 @@
 
 These fixtures preserve the frozen `managed-function-v0` contract for
 compatibility tests and historical task records. They are not accepted for new
-submission. Use [`../managed-function-v1/`](../managed-function-v1/) for active
+submission. Use [`../hcode/`](../hcode/) for active
 work.
 
 The archived request shape was:

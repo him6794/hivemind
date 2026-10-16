@@ -2,7 +2,7 @@
 
 Hivemind 是以 Rust 為核心的分散式運算平台，主要由
 `hivemind-rs` workspace 與 `hivemind-bin` runtime entry point 組成。
-CPU managed 工作使用 `managed-function-v1` 的共識與用量計費契約；GPU 與
+CPU managed 工作使用 `hcode` 的共識與用量計費契約；GPU 與
 general compute 的獨立路徑見[使用與部署手冊](HIVEMIND_MANUAL.zh-TW.md#other-runtimes)。
 
 本文件說明架構、信任邊界與零設定產品目標。設定、計費、API 與原始碼索引見
@@ -319,7 +319,7 @@ Identity enrollment credential 與 Headscale auth key 用途不同，不可互�
 1. Nodepool 驗證 task、Worker、attempt、policy、result digest、output、budget 與
    managed DSL backend/semantics binding。
 2. 持久化 quorum certificate 與相符的副本記錄，再標記成功完成並發布輸出。
-3. `managed-function-v1` enforce settlement 使用經驗證且與 assignment 綁定的 replica
+3. `hcode` enforce settlement 使用經驗證且與 assignment 綁定的 replica
    usage evidence，包含有效但 failed/divergent 的工作，並受 task-wide `max_cpt` 上限
    約束；缺失或無效的 receipt 不計費。`observe` 不結算。Frozen `managed-function-v0`
    才保留歷史 Nodepool-owned fixed-reservation billing contract。
@@ -364,7 +364,7 @@ Identity enrollment credential 與 Headscale auth key 用途不同，不可互�
 
 ### Worker Executor
 
-- 在 closed managed-function runtime 中執行 active `managed-function-v1` 任務。
+- 在 closed managed-function runtime 中執行 active `hcode` 任務。
 - 追蹤本機資源使用量，並提供 Worker gRPC/control HTTP endpoints。
 - 只回報帶有 assignment identity 的 result observation；不擁有 settlement 權限。
 - 保留解析既有 v0 執行與歷史 evidence 的相容邊界，但不接受新的 v0 work。
@@ -433,7 +433,7 @@ Worker into a settlement authority; only Nodepool can verify a quorum certificat
 - `proto/hivemind.proto` 定義 Worker/Master/Nodepool 共用的 gRPC surface。
 - `managed-consensus` 定義 consensus binding、observation、quorum policy 與
   certificate contract。
-- 新任務只使用 `managed-function-v1`：它沿用封閉的 source function/JSON input
+- 新任務只使用 `hcode`：它沿用封閉的 source function/JSON input
   interpreter，並以每個 replica 的實際執行 operation 做 Nodepool settlement。
   `managed-function-v0` 僅保留歷史相容契約；舊資料可讀取，但新的 v0 submission
   會被拒絕，未完成的 v0 work 會在 Nodepool 啟動時取消。

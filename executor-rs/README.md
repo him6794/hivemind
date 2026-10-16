@@ -3,7 +3,7 @@
 This Rust workspace contains the execution libraries used by Hivemind:
 
 - `managed-function-runtime` implements the active deterministic, metered
-  `managed-function-v1` DSL used by the Worker. The historical
+  `hcode` DSL used by the Worker. The historical
   `managed-function-v0` contract remains available only for compatibility
   parsing and frozen fixtures.
   Production closed-DSL execution is exposed as `production_sandboxed_dsl`;

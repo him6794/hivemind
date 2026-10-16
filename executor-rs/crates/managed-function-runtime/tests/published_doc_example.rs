@@ -33,6 +33,35 @@ sum(input);"#;
 
 const README_TASK_SOURCE_JSON: &str = r#""task_source": "fn sum(values) {\n  return get(values, \"a\") + get(values, \"b\");\n}\nsum(input);\n""#;
 
+const TUTORIAL_SOURCE: &str = r#"let total = 0;
+for value in get(input, "values") {
+  let total = total + value;
+}
+total;"#;
+
+const TUTORIAL_INPUT: &str = r#"{"values": [10, 20, 30]}"#;
+
+#[test]
+fn tutorial_example_runs_with_the_hcode_replica_budget() {
+    let tutorial = include_str!("../../../../docs/hcode-tutorial.zh-TW.md");
+    assert!(tutorial.contains(TUTORIAL_SOURCE));
+    assert!(tutorial.contains(TUTORIAL_INPUT));
+    assert!(tutorial.contains("25 usage units"));
+    assert!(tutorial.contains("總收費為 82 CPT"));
+    let result = ManagedExecutor
+        .execute_json_input(
+            TUTORIAL_SOURCE,
+            ExecutionLimits::for_managed_function_budget(303),
+            TUTORIAL_INPUT,
+        )
+        .expect("the tutorial example must run within its replica budget");
+
+    assert_eq!(result.status, Status::Completed);
+    assert_eq!(result.value, Value::Int(60));
+    assert!(result.output.is_empty());
+    assert_eq!(result.receipt.usage_units, 25);
+}
+
 #[test]
 fn published_doc_example_still_produces_the_documented_result() {
     let result = ManagedExecutor

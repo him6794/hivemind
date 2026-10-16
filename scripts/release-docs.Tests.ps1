@@ -5,8 +5,10 @@ $readmePath = Join-Path $repoRoot "README.md"
 $gettingStartedPath = Join-Path $repoRoot "docs/GETTING_STARTED.md"
 $architecturePath = Join-Path $repoRoot "docs/ARCHITECTURE.md"
 $envExamplePath = Join-Path $repoRoot ".env.example"
+$hcodeRuntimePath = Join-Path $repoRoot "docs/HCODE_RUNTIME.md"
+$hcodeTutorialPath = Join-Path $repoRoot "docs/hcode-tutorial.zh-TW.md"
 
-foreach ($path in @($readmePath, $gettingStartedPath, $architecturePath, $envExamplePath)) {
+foreach ($path in @($readmePath, $gettingStartedPath, $architecturePath, $envExamplePath, $hcodeRuntimePath, $hcodeTutorialPath)) {
     if (!(Test-Path -LiteralPath $path)) {
         throw "Missing required release documentation: $path"
     }
@@ -110,5 +112,28 @@ foreach ($document in $currentDocuments.GetEnumerator()) {
         }
     }
 }
+
+$hcodeRuntime = Get-Content -LiteralPath $hcodeRuntimePath -Raw -Encoding UTF8
+$hcodeTutorial = Get-Content -LiteralPath $hcodeTutorialPath -Raw -Encoding UTF8
+Assert-Contains -DocumentName "docs/HCODE_RUNTIME.md" -DocumentText $hcodeRuntime -ExpectedValues @(
+    'hcode-semantics.json',
+    'managed-function-v0-semantics.json',
+    '1fb0e736676b6cc9d7090094b0e57e37f691b2b191eda5b9c7298a848bdc9593',
+    'Coordinated upgrade',
+    'hard wire rename',
+    'hcode-tutorial.zh-TW.md'
+)
+Assert-Contains -DocumentName "docs/hcode-tutorial.zh-TW.md" -DocumentText $hcodeTutorial -ExpectedValues @(
+    '"runtime": "hcode"',
+    'let total = 0;',
+    '{"values": [10, 20, 30]}',
+    '25 usage units',
+    '82 CPT',
+    '--input',
+    'hcode-gpu',
+    'ConvertTo-Json -Depth 2',
+    'stop-pending',
+    'rollback'
+)
 
 Write-Host "release documentation contract tests passed"

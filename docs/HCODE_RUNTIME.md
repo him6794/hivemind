@@ -1,8 +1,8 @@
-# Managed Function Runtime
+# hcode Runtime
 
 ## Overview
 
-The Managed Function Runtime is a restricted, metered execution path for small
+The hcode Runtime is a restricted, metered execution path for small
 serverless-style Hivemind tasks. It parses a fixed syntax, evaluates it with a
 closed Rust-owned interpreter, and returns deterministic output and execution
 receipts. It does not execute user-supplied executables or expose file, network,
@@ -14,13 +14,38 @@ Docker, WSL, a VM, SSH, or a direct host-process fallback.
 
 ## Active contract
 
-`managed-function-v1` is the CPU managed-function runtime accepted for new
+`hcode` is the CPU managed-function runtime accepted for new
 submissions. It uses the closed interpreter described below with versioned
 per-replica metering, a task-wide fee-inclusive charge cap, checked arithmetic,
 structural safety limits, and Nodepool-coordinated consensus settlement.
 `managed-function-v0` is retained
 only so historical tasks, receipts, consensus evidence, and legacy capability
 reports remain readable; it is rejected at every new-work admission boundary.
+
+## Coordinated upgrade
+
+This is a hard wire rename: `managed-function-v1` is retired, not an alias for
+`hcode`; `managed-function-gpu-v1` is retired in favor of `hcode-gpu`. Runtime,
+backend, cost-model, billing and GPU protocol IDs have changed, as have the
+CPU/GPU semantics manifest digests. Operation costs and settlement rules have
+not changed.
+
+Stop new submissions and use the old Nodepool to drain and settle all old CPU
+rounds, including stop-pending rounds on terminal tasks and outstanding Worker
+reservations. Drain or cancel nonterminal old GPU tasks with persisted typed
+requests. Then stop the old Nodepool and coordinate the Nodepool, Master and
+Worker upgrade; do not run mixed versions against one queue.
+
+The transactional database migration refuses to proceed while these old
+executions remain in flight. After the checks pass it relabels old CPU task rows
+and only the old billing/cost metadata of held usage reservations. Settled and
+released billing history, request/result/attempt/certificate evidence, and
+frozen v0 identities are not rewritten. Old GPU request/result bytes and digests
+are never converted into new requests; the existing quarantine for active old
+GPU rows without a manifest remains in place. A blocked migration rolls back
+instead of partially renaming data. Do not bypass the guard with manual SQL.
+
+For a first task, see the [繁體中文 hcode 教學](hcode-tutorial.zh-TW.md).
 
 ## Frozen v0 contract
 
@@ -51,20 +76,20 @@ The v0 limitations are part of that frozen contract:
 - `ExecutionLimits::unlimited()` is a legacy/testing convenience, not the
   production v0 default.
 
-## Managed-function-v1 contract
+## hcode contract
 
-`managed-function-v1` is the versioned usage-billing contract for the same
+`hcode` is the versioned usage-billing contract for the same
 closed interpreter. Its runtime, backend, cost-model, and semantics identities
 are pinned by
-[`executor-rs/crates/managed-function-runtime/managed-function-v1-semantics.json`](../executor-rs/crates/managed-function-runtime/managed-function-v1-semantics.json)
+[`executor-rs/crates/managed-function-runtime/hcode-semantics.json`](../executor-rs/crates/managed-function-runtime/hcode-semantics.json)
 and digest
-`c2dc962dcf6762df51fa94af2ee1f00a4d1aabdf84321ec67a3ab7f892692853`.
+`1fb0e736676b6cc9d7090094b0e57e37f691b2b191eda5b9c7298a848bdc9593`.
 
 - Each managed task is assigned to three distinct Workers by default, with a
   two-replica quorum; at most seven replicas may be configured. A single Worker
   cannot establish a quorum or authorize a successful result. Valid work from
   a lone replica can still be paid and charged when quorum is not reached.
-- For a new v1 task, `max_cpt` is the maximum total charge for the entire task,
+- For a new hcode task, `max_cpt` is the maximum total charge for the entire task,
   including the platform fee and all configured replicas (three by default). It
   is not a per-replica allowance. Nodepool deterministically derives one identical integer execution
   budget for each replica from the fee-exclusive portion of this task cap. Any
@@ -95,7 +120,7 @@ and digest
   available.
 - Structural safety limits and the task deadline remain bounded. Missing or
   invalid runtime assets fail closed; no unsafe execution fallback is allowed.
-- The task-wide cap applies to new v1 submissions only. Historical v1 tasks
+- The task-wide cap applies to new hcode submissions. Historical v1 tasks
   settled under the earlier per-replica `max_cpt` contract remain recorded as
   billed; the new cap does not retroactively recalculate or refund them.
 
@@ -121,14 +146,14 @@ Output:
 
 Hivemind task integration:
 
-- set `runtime` to `managed-function-v1` for every new managed submission
+- set `runtime` to `hcode` for every new managed submission
 - set `task_source` to the managed function source text
 - set `torrent` / `torrent_source` to the JSON input payload when input is
   needed
 - treat `max_cpt` as the task-wide fee-inclusive charge cap, not a per-replica
   execution allowance; automatic paid retries are disabled until a funded
   platform treasury is available and do not charge retry work to the task owner
-- v1 submissions are admitted only when their runtime, backend, semantics
+- hcode submissions are admitted only when their runtime, backend, semantics
   digest, source, and input identities match the Nodepool policy
 - historical v0 task rows and evidence remain readable but cannot be resumed
   or submitted as new work
@@ -154,14 +179,14 @@ Worker `ExecuteTaskResponse` forwards the receipt summary back to the scheduler:
 - `managed_receipt_json`
 
 The scheduler stores these fields as typed replica evidence. For v0 they remain
-compatibility and diagnostic data. For v1 Nodepool independently validates the
+compatibility and diagnostic data. For hcode Nodepool independently validates the
 current-attempt evidence and sums accepted per-replica usage for task-level
 settlement under the fee-inclusive `max_cpt`; a single Worker receipt or usage
 claim is never authoritative.
 
 ## Supported Syntax
 
-The active v1 language and the frozen v0 language share this closed syntax. The
+The active hcode language and the frozen v0 language share this closed syntax. The
 syntax is intentionally separate from each version's metering and settlement
 rules, so a historical v0 fixture can be parsed without making v0 available for
 new submission.
@@ -217,7 +242,7 @@ Rules:
 - The last expression statement becomes the final value unless an earlier
   `return` exits the program.
 - `input` is available when the caller provides JSON input.
-- `for` only iterates lists. In v1, work is bounded by each replica's
+- `for` only iterates lists. In hcode, work is bounded by each replica's
   deterministically assigned runtime usage budget derived from the task-wide
   `max_cpt`; structural limits and the task deadline remain active. Frozen v0
   fixtures additionally retain their historical `max_loop_iterations` limit.
@@ -229,7 +254,7 @@ Rules:
   `while`, `break`, `continue`, `%`, member-dot access, and source comments are
   unsupported. Use `let` to rebind a variable.
 
-Forbidden in managed-function-v1 (and in the frozen v0 language):
+Forbidden in hcode (and in the frozen v0 language):
 
 - imports
 - file I/O
@@ -242,15 +267,15 @@ Forbidden in managed-function-v1 (and in the frozen v0 language):
 - unbounded recursion
 - unbounded loops
 
-## GPU-v1 extension
+## hcode-gpu extension
 
 GPU-enabled managed functions use a separate runtime identity,
-`managed-function-gpu-v1`, and the canonical
-`executor-rs/crates/managed-function-runtime/managed-function-gpu-v1-semantics.json`
+`hcode-gpu`, and the canonical
+`executor-rs/crates/managed-function-runtime/hcode-gpu-semantics.json`
 manifest. This keeps floating-point and GPU behavior out of the frozen v0
 result contract.
 
-GPU-v1 adds only fixed, Rust-owned operations:
+hcode-gpu adds only fixed, Rust-owned operations:
 
 - `gpu_add_f32(lhs, rhs)`
 - `gpu_scale_f32(value, scalar)`
@@ -262,12 +287,12 @@ executable. The operator-selected backend owns CUDA/cuBLAS resources, and a
 GPU-required request fails closed when a trusted compatible GPU is unavailable;
 it never silently uses the CPU reference backend.
 
-GPU-v1 permits floating-point and math operations only inside its explicit GPU
-execution context. Its completion path is separate from CPU v1 consensus:
+hcode-gpu permits floating-point and math operations only inside its explicit GPU
+execution context. Its completion path is separate from CPU hcode consensus:
 Nodepool validates the typed result against the persisted request manifest,
 assignment, and trusted capability snapshot, then stores the result and performs
 GPU-specific fixed-reservation settlement in one transaction. It does not require
-a CPU quorum certificate or use CPU v1 operation-based billing, and does not fall
+a CPU quorum certificate or use CPU hcode operation-based billing, and does not fall
 back to legacy result-torrent completion.
 
 ## Metering v0
@@ -292,9 +317,9 @@ Initial cost table:
 Execution stops with `op_limit_exceeded` before an operation would exceed the
 configured limit.
 
-## Metering v1
+## hcode metering
 
-The v1 cost vectors use the same evaluator operation accounting, including
+The hcode cost vectors use the same evaluator operation accounting, including
 function-call, print, and loop-iteration costs. The pinned runtime's
 `max_usage_units` is an internal per-replica work allowance and is the only
 dynamic work stop; Nodepool derives that value by evenly splitting the
@@ -308,9 +333,9 @@ before task-level settlement.
 The frozen v0 contract retains its historical fixed-reservation and diagnostic
 receipt semantics. V0 is no longer accepted for new work; completed v0 records
 are preserved as historical evidence, and unfinished v0 work is cancelled at
-Nodepool startup rather than being converted to v1.
+Nodepool startup rather than being converted to hcode.
 
-For v1, consensus selects the output; validated usage determines payment:
+For hcode, consensus selects the output; validated usage determines payment:
 
 ```text
 canonical result = managed-consensus-result-v1
@@ -345,7 +370,7 @@ imports, reflection, dynamic evaluation, or host callbacks. The Worker only
 returns the typed result and receipt; Nodepool is the sole verification,
 consensus, payment, settlement, and billing authority.
 
-The v0 and v1 contracts are intentionally versioned. Changes to parser
+The frozen v0 and active hcode contracts are intentionally versioned. Changes to parser
 semantics, limits, receipt meaning, cost vectors, or settlement inputs require a
 new runtime/cost-model/manifest identity and compatibility tests rather than a
 silent mutation of v0.

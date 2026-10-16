@@ -5,7 +5,7 @@ Read the repository [AGENTS.md](../AGENTS.md) for current commands and layout, a
 ## Architecture essentials
 
 - The backend is a Rust workspace. `hivemind-bin` composes the `master`, `nodepool`, and `worker` roles; Nodepool owns trusted state and validates claims from user-deployed Master and Worker processes.
-- New managed work uses the closed `managed-function-v1` runtime. General compute is a separate, explicitly sandboxed execution path. Do not conflate the Windows DSL interpreter with Windows HCS general-compute execution.
+- New managed work uses the closed `hcode` runtime. General compute is a separate, explicitly sandboxed execution path. Do not conflate the Windows DSL interpreter with Windows HCS general-compute execution.
 - The three frontend surfaces are `frontend/` (Next.js official site), `frontend/master-ui/`, and `frontend/worker-ui/` (Vite/React). See `AGENT.md` for which product responsibilities belong on each surface.
 
 ## Focused checks

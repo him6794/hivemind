@@ -213,7 +213,7 @@ export function DocsPage() {
 
             <Surface className="mt-4 border-honey/25 bg-honey/[0.04]">
               <h3 className="text-base font-semibold">
-                {t(locale, { zh: "V1 不支援", en: "Not available in managed-function-v1" })}
+                {t(locale, { zh: "hcode 不支援", en: "Not available in hcode" })}
               </h3>
               <div className="mt-3 flex flex-wrap gap-2">
                 {docs.language.forbidden.map((item: string) => (

@@ -12,9 +12,9 @@ This guide describes what different validation evidence establishes. It is not a
 
 ## Managed functions and Windows DSL execution
 
-`managed-function-v1` runs in the closed, cross-platform interpreter. A Windows DSL test exercises that interpreter and its bounds; it does not require Windows Containers or HCS and is not evidence for Windows general-compute isolation. The frozen `managed-function-v0` contract remains readable for historical compatibility, not new submissions.
+`hcode` runs in the closed, cross-platform interpreter. A Windows DSL test exercises that interpreter and its bounds; it does not require Windows Containers or HCS and is not evidence for Windows general-compute isolation. The frozen `managed-function-v0` contract remains readable for historical compatibility, not new submissions.
 
-Validate interpreter semantics and limits separately from Nodepool-coordinated consensus and settlement. Consensus evidence must establish distinct replica execution, result/quorum validation, and Nodepool-authorized settlement; a single-Worker result or a Worker usage claim is not a substitute. See [Managed Function Runtime](MANAGED_FUNCTION_RUNTIME.md) and [managed consensus](managed-consensus-state.md).
+Validate interpreter semantics and limits separately from Nodepool-coordinated consensus and settlement. Consensus evidence must establish distinct replica execution, result/quorum validation, and Nodepool-authorized settlement; a single-Worker result or a Worker usage claim is not a substitute. See [hcode Runtime](HCODE_RUNTIME.md) and [managed consensus](managed-consensus-state.md).
 
 ## General-compute isolation
 

@@ -14,7 +14,7 @@
 4. [環境、建置與本機啟動](#build)
 5. [設定參考與連接埠](#configuration)
 6. [帳號、登入與 VPN enrollment](#enrollment)
-7. [Managed-function-v1 任務與 DSL](#managed)
+7. [hcode 任務與 DSL](#managed)
 8. [計量、共識、CPT 與結算](#settlement)
 9. [HTTP／gRPC 介面與操作範例](#api)
 10. [GPU、general compute 與 ONNX](#other-runtimes)
@@ -32,13 +32,13 @@
 
 Hivemind 是以 Rust 為核心的分散式批次運算 runtime。使用者透過自架 Master 提交任務；Nodepool 驗證帳號、輸入、預算與 Worker，協調執行並保存結果及帳務；Worker 在自己的主機執行獲派工作。
 
-新 managed 任務使用 **`managed-function-v1`**：受限制的 source function／JSON DSL，不執行任意主機程式。一般運算、GPU 與 ONNX 使用不同 runtime 契約與部署條件。
+新 managed 任務使用 **`hcode`**：受限制的 source function／JSON DSL，不執行任意主機程式。一般運算、GPU 與 ONNX 使用不同 runtime 契約與部署條件。
 
 ### 1.2 產品狀態
 
 | 項目 | 當前狀態 |
 | --- | --- |
-| Managed DSL v1 | 封閉 interpreter、計量、執行限制與多 Worker consensus；接受新任務 |
+| Managed DSL hcode | 封閉 interpreter、計量、執行限制與多 Worker consensus；接受新任務 |
 | Managed DSL v0 | 僅供歷史資料相容讀取；拒絕新提交，未完成舊工作於啟動時退役 |
 | Nodepool consensus | 預設 3 個不同 Worker、2 個一致結果；成功 output 需 certificate，不是獨立正確性證明或硬體 usage attestation |
 | CPT 帳務 | Nodepool 管理 hold、有效 usage、fee、payment／refund；CPT 是內部單位，沒有兌換或外部支付網路 |
@@ -95,7 +95,7 @@ Worker 本機 HTTP API 僅供本機控制，不作為 Nodepool 的容量或結�
 | `frontend/master-ui/` | Vite／React 18 Master UI |
 | `frontend/worker-ui/` | Vite／React 18 Worker UI |
 | `scripts/` | Build、release、docs、browser／native／provider checks |
-| `templates/managed-function-v1/` | Active DSL 範例與 JSON input |
+| `templates/hcode/` | Active DSL 範例與 JSON input |
 | `deploy/`、`infra/` | 平台／backend 部署資產與範例；不是所有檔案都代表現行正式拓撲 |
 | `docs/` | 手冊、契約、驗證指南、計畫與歷史分析 |
 
@@ -122,7 +122,7 @@ Crate 目錄名不一定等於 Cargo package 名；使用 `cargo test -p` 前應
 
 ### 3.2 Active managed 任務的生命週期
 
-1. 使用者登入 Master，從 UI 或 HTTP API 提交 v1 source、JSON input、resource requirements 與 task-wide budget。
+1. 使用者登入 Master，從 UI 或 HTTP API 提交 hcode source、JSON input、resource requirements 與 task-wide budget。
 2. Master 做 HTTP-level validation，帶著 bearer token 呼叫 Nodepool。
 3. Nodepool 驗證 owner、runtime／semantics、source／input bounds、資源、共識 policy 與 balance／budget。
 4. Enforce 模式建立需要的 usage hold，以及 durable round、replica assignment 和 Worker-slot reservation。
@@ -355,6 +355,8 @@ Worker loader／provider 的其他 registry variables 應依對應 backend 文�
 - Master：本機 Master UI／HTTP API 使用 account login，之後才執行自己的 task operations。
 - Worker：本機 Worker UI／control API 登入，再完成 enrollment／registration。
 
+Master UI 與 Worker UI 預設使用 English，可在上方語言選單切換為繁體中文。兩個介面各自保存本機語言偏好，重新載入後沿用；切換不會清除登入狀態或未提交的表單。伺服器診斷、任務 source／input、原始 log 與 API JSON 保留原文。
+
 帳號是平台身分；Master／Worker 的本機服務不是另一個獨立帳號權威。當前 Master `/api/register` 回傳 410，應到官網的 account flow 建立帳號。
 
 ### 6.2 Authenticated enrollment 流程
@@ -398,14 +400,16 @@ Readiness 有 bounded timeout；VPN 不可用時應 fail closed，而不是改�
 
 <a id="managed"></a>
 
-## 7. Managed-function-v1 任務與 DSL
+## 7. hcode 任務與 DSL
+
+第一次使用可先閱讀 [hcode 教學](hcode-tutorial.zh-TW.md)，從可執行範例開始，依序了解 JSON input、所有副本的總預算、提交方式與協調升級。
 
 ### 7.1 新任務的 HTTP payload
 
 ```json
 {
   "task_id": "example-sum-001",
-  "runtime": "managed-function-v1",
+  "runtime": "hcode",
   "task_source": "fn sum(values) { return get(values, \"a\") + get(values, \"b\"); }\nsum(input);\n",
   "torrent": "{\"a\":1,\"b\":2}",
   "memory_gb": 1,
@@ -418,7 +422,7 @@ Readiness 有 bounded timeout；VPN 不可用時應 fail closed，而不是改�
 重要說明：
 
 - `task_id` 由 API caller 提供；UI 可以自行生成 ID。重複 submission 不能假定一定 idempotent，需遵循 server response。
-- `runtime` 明確寫 `managed-function-v1`。
+- `runtime` 明確寫 `hcode`。
 - `task_source` 是 DSL source text，不是 filename、ZIP、Python executable 或下載 URL。
 - **`torrent` 是內含 JSON 的 string 欄位**；在 managed route 中代表 input data，不是 BitTorrent package。
 - Resource fields 是 submission requirements，不是實際計費 operation，也不是硬體能力證明。
@@ -455,7 +459,7 @@ choose(input);
 
 ### 7.3 型別、builtins 與語言限制
 
-CPU v1 支援 signed `i64` integer、boolean、string、list、string-keyed dict 和 `null`。CPU JSON input 的 numeric 欄位只接受可表示為 `i64` 的整數；共用 `Value` enum 的 `Float` 不用於此 runtime。
+CPU hcode 支援 signed `i64` integer、boolean、string、list、string-keyed dict 和 `null`。CPU JSON input 的 numeric 欄位只接受可表示為 `i64` 的整數；共用 `Value` enum 的 `Float` 不用於此 runtime。
 
 | 形式／builtin | 行為／限制 |
 | --- | --- |
@@ -476,12 +480,12 @@ CPU v1 支援 signed `i64` integer、boolean、string、list、string-keyed dict
 
 **Source string 的 Unicode 邊界不能忽略：** Lexer 支援 ASCII identifiers、雙引號與 `\"`、`\\`、`\n`、`\r`、`\t` escapes，不接受 `\uXXXX`。其 source literal byte-wise decoding 不保留原始 non-ASCII UTF-8 文字。因此不要直接在 DSL source literals 放中文等資料並承諾原樣 round-trip；需要 Unicode 的 data 應置於 JSON input，並以當前 parser／renderer 測試為準。
 
-以下不在 CPU v1 語法／host capability surface：
+以下不在 CPU hcode 語法／host capability surface：
 
 - `while`、`break`、`continue`、`%`、member-dot access。
 - Comment syntax：lexer 只略過 whitespace；範例不要加入 `//`、`#` 或 `/* ... */`。
 - Import、filesystem、network、environment variables、subprocess、eval、reflection、DLL／native API。
-- CPU math builtins `abs`、`min`、`max`、`sqrt`、`floor`、`ceil`、`round`、`exp`、`ln`、`pow`；相關 float-enabled 實作屬於另一個 explicit context，不能直接列成 CPU v1 API。
+- CPU math builtins `abs`、`min`、`max`、`sqrt`、`floor`、`ceil`、`round`、`exp`、`ln`、`pow`；相關 float-enabled 實作屬於另一個 explicit context，不能直接列成 CPU hcode API。
 - GPU kernels／task-provided executable。
 
 可核對的 tracked source example：[examples/managed-add.hdsl](../examples/managed-add.hdsl)：
@@ -492,7 +496,7 @@ let total = add(get(input, "left"), get(input, "right"));
 return {"total": total};
 ```
 
-配合 input `{"left":1,"right":2}`，output 為 `{"total":3}`。更多 v1 examples 見 [templates/managed-function-v1](../templates/managed-function-v1)。
+配合 input `{"left":1,"right":2}`，output 為 `{"total":3}`。更多 hcode examples 見 [templates/hcode](../templates/hcode)。
 
 ### 7.4 Structural／protocol limits
 
@@ -516,21 +520,21 @@ Interpreter output 上限為 1 MiB；consensus transport 的 encoded result cap 
 
 提交時檢查 source／input 大小、runtime 與 budget；DSL 語法、JSON numeric type 或 evaluator 錯誤仍可能到 Worker 執行時才發現。
 
-常見 runtime failure 包含 `budget_exhausted`、`integer_arithmetic_overflow`、`type_error`、`index_error`，以及 parse、call-depth、value／output／deadline 相關失敗。精確 code set 依 enforcing source 與 versioned tests，不能任意從 v0 failure contract 推成 v1。
+常見 runtime failure 包含 `budget_exhausted`、`integer_arithmetic_overflow`、`type_error`、`index_error`，以及 parse、call-depth、value／output／deadline 相關失敗。精確 code set 依 enforcing source 與 versioned tests，不能任意從 v0 failure contract 推成 hcode。
 
 ### 7.5 計量不是「一行程式一個 CPT」
 
 每個執行到的 statement／expression、argument、call overhead、print、loop body 等都可以消耗 operations。Literal、variable read 與它們外層的 statement 也不是免費；AST 子 expression 會分別計量。
 
-在 v1，**一個實際執行 operation 對應一個 replica usage CPT**。不要用 source 行數、語法關鍵字個數或 wall time 推估精確 charge。Nodepool 派發的每個 replica allowance 是從 task-wide cap 推導，不是直接把 caller 的 `max_cpt` 當每個 Worker 的額度。
+在 hcode，**一個實際執行 operation 對應一個 replica usage CPT**。不要用 source 行數、語法關鍵字個數或 wall time 推估精確 charge。Nodepool 派發的每個 replica allowance 是從 task-wide cap 推導，不是直接把 caller 的 `max_cpt` 當每個 Worker 的額度。
 
-v1 不另設固定 `max_ops`／`max_loop_iterations` 取代 budget；call depth、value／materialization／memory／output 與 deadline 仍有 bounds。
+hcode 不另設固定 `max_ops`／`max_loop_iterations` 取代 budget；call depth、value／materialization／memory／output 與 deadline 仍有 bounds。
 
-精確 cost vectors 和語言範例見 [Managed Function Runtime](MANAGED_FUNCTION_RUNTIME.md) 與 versioned semantics manifests。Immutable manifest 中的 runtime allowance 名稱，不能覆蓋較高層當前 submission 的 task-total billing contract。
+精確 cost vectors 和語言範例見 [hcode Runtime](HCODE_RUNTIME.md) 與 versioned semantics manifests。Immutable manifest 中的 runtime allowance 名稱，不能覆蓋較高層當前 submission 的 task-total billing contract。
 
 ### 7.6 歷史 v0 相容範圍
 
-v0 manifest／metering／billing／canonical evidence 保持 frozen，以便讀取舊資料。不能原地改寫它的語義，不能讓 unfinished v0 resume，也不能以 v0 receipt 直接套用 v1 的 usage billing。
+v0 manifest／metering／billing／canonical evidence 保持 frozen，以便讀取舊資料。不能原地改寫它的語義，不能讓 unfinished v0 resume，也不能以 v0 receipt 直接套用 hcode 的 usage billing。
 
 歷史已 settlement 的 v1／v0 records 也不會因新 task-wide cap 自動重新計算退款。使用者查看舊任務時應核對當時的 billing version，而不是只看 runtime ID。
 
@@ -538,7 +542,7 @@ v0 manifest／metering／billing／canonical evidence 保持 frozen，以便讀�
 
 ## 8. 計量、共識、CPT 與結算
 
-以下共識與計費規則適用於 CPU `managed-function-v1`；GPU 與 general compute 的獨立契約見[第 10 章](#other-runtimes)。
+以下共識與計費規則適用於 CPU `hcode`；GPU 與 general compute 的獨立契約見[第 10 章](#other-runtimes)。
 
 ### 8.1 CPT 的意義
 
@@ -546,7 +550,7 @@ CPT 是內部 quota／budget unit，不是貨幣。本 repository 有 account／
 
 ### 8.2 Task-wide cap 如何分配
 
-新 v1 billing identity 是 `managed-function-v1-billing-v2-total-budget`；execution cost model 是 `managed-function-v1-execution-cpt-v1`，basis 為 `accepted-replica-executed-ops`。
+新 hcode billing identity 是 `hcode-billing-v2-total-budget`；execution cost model 是 `hcode-execution-cpt-v1`，basis 為 `accepted-replica-executed-ops`。
 
 令 task cap 為 `C`、replica count 為 `R`。Nodepool 求最大的正整數 `a`，使：
 
@@ -583,7 +587,7 @@ Enforce attempt creation 在 transaction 中建立 hold 並調整 payer balance�
 
 **資料欄位名可能有歷史語義：** `managed_consensus_usage_holds.max_cpt` 保存 per-replica allowance，外部 `tasks.max_cpt` 才是新 submission 的 task-total cap；不要把兩個欄位在報表／工具中不加區分地顯示為同一上限。
 
-Historical `managed-function-v1-billing-v1` holds 有自己的相容處理；已入帳歷史資料不因新 contract 自動 recalculation／refund。
+Historical `hcode-billing-v1` holds 有自己的相容處理。改名前已結算／釋放的 `managed-function-v1-billing-v1`／`managed-function-v1-billing-v2-total-budget` 紀錄保留原始身分；僅仍為 held 的 metadata 會在協調升級後改名。已入帳歷史資料不因新 contract 自動 recalculation／refund。
 
 ### 8.3 Consensus 的成功條件
 
@@ -630,7 +634,7 @@ Runtime／policy 缺失或不匹配也應 hold／fail closed，而不是以修�
 
 取得 quorum、timeout 或 cancel 後，outstanding replicas 必須被 fencing，並收到 attempt-bound stop request。若不能確認停止，Nodepool 保留 `stop_pending`／`cancel_pending` 及 slot reservation，後續重試 stop，而不是把仍可能執行的 Worker slot 馬上重派。
 
-新 v1 automatic paid retries 關閉；沒有 funded platform treasury 之前不把 automatic retry work 轉嫁給 owner。Stop request retry／恢復清理與「再次收費重跑任務」是不同事情。
+新 hcode automatic paid retries 關閉；沒有 funded platform treasury 之前不把 automatic retry work 轉嫁給 owner。Stop request retry／恢復清理與「再次收費重跑任務」是不同事情。
 
 持久化資料包括 task／policy、round、replica assignment、endpoint／provider snapshots、observations、slot reservations、certificate 與 settlement／ledger。正確診斷需跨這些 records 查看，而不只是檢查 Worker log 裡的 `completed`。
 
@@ -736,7 +740,7 @@ Dashboard telemetry 是 observation，不是 settled usage。Unknown／unsupport
 | `managed_consensus_version` | Optional；目前 HTTP 不接受 >1 |
 | `managed_replica_count` | Optional；有提供時 2–7；省略向 Nodepool 送 0，由 policy 決定 |
 | `managed_quorum` | Optional；positive 且與 replicas 同時提供時需 strict majority／不超 replicas |
-| `max_cpt` | V1 positive signed-i64 integer；不應依賴省略後的 generic quote fallback |
+| `max_cpt` | hcode positive signed-i64 integer；不應依賴省略後的 generic quote fallback |
 | Unknown fields／錯誤 JSON 型別 | `deny_unknown_fields`／extractor rejection，通常 422；不是所有錯誤都回 400 |
 | ID／runtime／resource validation | 400 |
 | Quote 超過 cap／insufficient balance | 402 |
@@ -747,7 +751,7 @@ Dashboard telemetry 是 observation，不是 settled usage。Unknown／unsupport
 
 Rate limiter 是 Master process-local、per-owner 60 秒 window，預設 60/min。設定 `HIVEMIND_TASK_SUBMIT_LIMIT_PER_MINUTE <= 0` 會封鎖所有提交，不是關閉限制。Handler-level invalid request 也可能先消耗 quota；schema extractor rejection 則尚未進 handler。
 
-Task create 的 HTTP body cap 為 21 MiB，因 router 同時支援 larger advanced manifests；CPU v1 的 source／input bounds仍各自較小。這不能解讀成可提交 21 MiB managed source。
+Task create 的 HTTP body cap 為 21 MiB，因 router 同時支援 larger advanced manifests；CPU hcode 的 source／input bounds仍各自較小。這不能解讀成可提交 21 MiB managed source。
 
 ### 9.3 gRPC 與 protobuf 分工
 
@@ -764,7 +768,7 @@ Canonical definitions 位於 [proto/hivemind.proto](../proto/hivemind.proto) 與
 | `VPNService` | Onboarding config 與仍存在的 compatibility mesh contracts；UI不因此取得VPN管理權 |
 | `BatchRuntimeService` | 有 server wiring／handler，但不是目前三個 UI 的主要 task workflow |
 
-Proto 保留歷史 `torrent` 與 package 欄位；active HTTP v1 使用 source／JSON input，不接受任意 ZIP 或 executable。
+Proto 保留歷史 `torrent` 與 package 欄位；active HTTP hcode 使用 source／JSON input，不接受任意 ZIP 或 executable。
 
 ### 9.4 PowerShell 提交示例
 
@@ -787,7 +791,7 @@ $headers = @{ Authorization = "Bearer $($login.token)" }
 $taskId = "manual-" + [Guid]::NewGuid().ToString("N")
 $payload = @{
     task_id = $taskId
-    runtime = "managed-function-v1"
+    runtime = "hcode"
     task_source = 'fn sum(values) { return get(values, "a") + get(values, "b"); } sum(input);'
     torrent = '{"a":1,"b":2}'
     memory_gb = 1
@@ -851,7 +855,7 @@ Invoke-RestMethod -Method Get -Uri "$master/api/tasks/$taskId/log" -Headers $hea
 Worker registration 中的 callback 是讓 Nodepool scheduler 發起 execution RPC 的 target；它不是 caller identity。Token／owner／assignment 驗證和 network reachability 是兩件事。
 
 - 不要註冊空 target、`0.0.0.0`、unspecified host 或 Nodepool 無法 route 的 localhost。
-- **Active managed consensus 目前走 Nodepool 主動連 Worker 的 unary gRPC callback。** Session-only／outbound registration 成功不能證明這條 v1 execution 路徑可達；non-consensus session-first branch 不能拿來宣稱 v1 已完成 NAT traversal。
+- **Active managed consensus 目前走 Nodepool 主動連 Worker 的 unary gRPC callback。** Session-only／outbound registration 成功不能證明這條 hcode execution 路徑可達；non-consensus session-first branch 不能拿來宣稱 hcode 已完成 NAT traversal。
 - Container callback、host callback 和 Headscale overlay address 要與實際部署相符。
 - 目前的 endpoint checks 不足以被描述成完整的 IP／DNS／SSRF allowlist 或資源 attestation。
 - Operator 應另行限制控制面的可訪目的地、egress 與 network segmentation；不要只因 registration accepted 就開放任意 internal address。
@@ -864,8 +868,8 @@ Worker registration 中的 callback 是讓 Nodepool scheduler 發起 execution R
 
 | 路徑 | 主要特性 | 額外條件／邊界 |
 | --- | --- | --- |
-| `managed-function-v1` | Deterministic closed JSON DSL | Budget、structural limits、replicated consensus；無 arbitrary host APIs |
-| `managed-function-gpu-v1` | 固定 Rust-owned GPU／math extension | Explicit GPU context、typed capability、相符 backend；不接受 task kernel／DLL |
+| `hcode` | Deterministic closed JSON DSL | Budget、structural limits、replicated consensus；無 arbitrary host APIs |
+| `hcode-gpu` | 固定 Rust-owned GPU／math extension | Explicit GPU context、typed capability、相符 backend；不接受 task kernel／DLL |
 | `general-compute-v1alpha1` | 一般程式／科學 workload 的 pre-release 契約 | Beta admission、operator-pinned assets、OS-specific production isolation |
 | ONNX on general compute | Operator-owned runner／image 內執行 inference | Model／tensor ABI、provider／GPU pinning、artifact／output evidence |
 
@@ -875,7 +879,7 @@ Worker registration 中的 callback 是讓 Nodepool scheduler 發起 execution R
 
 GPU-required request 缺少 trusted compatible GPU／backend 時 fail closed，不得默默使用 CPU reference backend 然後報成 GPU work。浮點／math surface 有自己的 semantics identity，不能改寫 frozen v0 的 integer result contract。
 
-GPU 的完成與結算使用獨立路徑。Nodepool 依持久化的 request manifest、assignment 與 trusted capability snapshot 驗證 typed result，成功時在同一交易保存結果並完成 GPU 專用的 fixed-reservation 結算；不套用 CPU v1 的 quorum certificate 或按 operation 計費契約。
+GPU 的完成與結算使用獨立路徑。Nodepool 依持久化的 request manifest、assignment 與 trusted capability snapshot 驗證 typed result，成功時在同一交易保存結果並完成 GPU 專用的 fixed-reservation 結算；不套用 CPU hcode 的 quorum certificate 或按 operation 計費契約。
 
 GPU readiness、driver／backend compatibility、實際執行與 Nodepool settlement 分屬不同檢查。
 
@@ -951,11 +955,11 @@ Nodepool 的 durable records 是權威狀態。Migration 與 repository 邏輯�
 | Consensus policies／attempts | Persisted policy、round／deadline／mode／state |
 | Worker reservations／replicas | Slots、endpoint／provider／attempt snapshots、terminal observations |
 | Consensus certificates | Matching output digest、participants、evidence level 與 authorization |
-| V1 usage holds | Reserved／actual usage、fee／charge／refund／outcome；支援無 quorum usage settlement |
+| hcode usage holds | Reserved／actual usage、fee／charge／refund／outcome；支援無 quorum usage settlement |
 | Replica payouts／ledger | Per-replica eligibility、accepted usage、payment／rejection 和 idempotency |
 | Reputation／attestations／audit | Server-side observations 與 trust decisions；不是通用硬體 attestation |
 
-另有歷史命名陷阱：replica 的 `result_json` 欄位在這條 v1 路徑保存 encoded protobuf `BYTEA`，不是任意 JSON text。維運工具應按 typed contract decode，不能只依欄位名猜測內容。
+另有歷史命名陷阱：replica 的 `result_json` 欄位在這條 hcode 路徑保存 encoded protobuf `BYTEA`，不是任意 JSON text。維運工具應按 typed contract decode，不能只依欄位名猜測內容。
 
 資料庫升級應遵循適用的 migration runner，先 backup 再測試；不要手動修改 billable flags、certificate 或 ledger 來「讓任務完成」。相同 task／attempt 的重送應由 server-side transaction／idempotency 機制處理，不能透過複製 task rows 實現。
 
@@ -1115,8 +1119,8 @@ Browser UI contracts、accessibility／theme checks、native lifecycle、three-s
 
 | 主題 | 原始碼與實作入口 |
 | --- | --- |
-| V1／v0 admission、source／input bounds | [Nodepool grpc:805–952](../hivemind-rs/crates/node-manager/src/grpc.rs#L805)、[shared constants](../hivemind-rs/crates/proto/src/lib.rs#L28) |
-| No paid v1 retries／task persistence | [grpc:2081–2167](../hivemind-rs/crates/node-manager/src/grpc.rs#L2081) |
+| hcode／v0 admission、source／input bounds | [Nodepool grpc:805–952](../hivemind-rs/crates/node-manager/src/grpc.rs#L805)、[shared constants](../hivemind-rs/crates/proto/src/lib.rs#L28) |
+| No paid hcode retries／task persistence | [grpc:2081–2167](../hivemind-rs/crates/node-manager/src/grpc.rs#L2081) |
 | CPU input types | [runtime Value:66–75](../executor-rs/crates/managed-function-runtime/src/lib.rs#L66)、[integer-only input:478–581](../executor-rs/crates/managed-function-runtime/src/lib.rs#L478) |
 | Lexer／parser／source literals | [lexer:1015–1128](../executor-rs/crates/managed-function-runtime/src/lib.rs#L1015)、[parser:1243–1615](../executor-rs/crates/managed-function-runtime/src/lib.rs#L1243) |
 | Evaluation／metering | [statement accounting:1711–1825](../executor-rs/crates/managed-function-runtime/src/lib.rs#L1711)、[calls:2138–2200](../executor-rs/crates/managed-function-runtime/src/lib.rs#L2138)、[charge:2506–2538](../executor-rs/crates/managed-function-runtime/src/lib.rs#L2506) |
@@ -1124,7 +1128,7 @@ Browser UI contracts、accessibility／theme checks、native lifecycle、three-s
 | Checked integer arithmetic | [runtime:2547–2629](../executor-rs/crates/managed-function-runtime/src/lib.rs#L2547) |
 | Logical structural limits | [limits:266–340](../executor-rs/crates/managed-function-runtime/src/lib.rs#L266)、[value bounds:1895–2009](../executor-rs/crates/managed-function-runtime/src/lib.rs#L1895) |
 | Partial receipts／actual output | [Worker evaluator:209–332](../hivemind-rs/crates/worker-executor/src/executor.rs#L209) |
-| Frozen／versioned semantics | [v0 manifest](../executor-rs/crates/managed-function-runtime/managed-function-v0-semantics.json)、[v1 manifest](../executor-rs/crates/managed-function-runtime/managed-function-v1-semantics.json) |
+| Frozen／versioned semantics | [v0 manifest](../executor-rs/crates/managed-function-runtime/managed-function-v0-semantics.json)、[hcode manifest](../executor-rs/crates/managed-function-runtime/hcode-semantics.json) |
 | Tracked starter example | [managed-add.hdsl](../examples/managed-add.hdsl#L1) |
 
 ### 15.3 Consensus、usage、billing 與 durable records
@@ -1162,7 +1166,7 @@ Browser UI contracts、accessibility／theme checks、native lifecycle、three-s
 | Same-origin Windows packages | [Master package:45–55](../scripts/package-master-windows.ps1#L45)、[Worker package:132–144](../scripts/package-worker-windows.ps1#L132) |
 | Canonical protobuf／generation | [hivemind.proto](../proto/hivemind.proto#L11)、[vpn.proto](../proto/vpn.proto#L11)、[build.rs](../hivemind-rs/crates/proto/build.rs#L1) |
 | General-compute request／gates | [runtime request／validation](../executor-rs/crates/general-compute-runtime/src/lib.rs#L111)、[Worker provider selection](../hivemind-rs/crates/worker-executor/src/executor.rs#L1252)、[production registration](../executor-rs/crates/general-compute-runtime/src/production.rs#L139)、[Windows HCS](../executor-rs/crates/general-compute-runtime/src/windows_hcs.rs#L69) |
-| Managed GPU 執行與獨立結算 | [Worker GPU route](../hivemind-rs/crates/worker-executor/src/executor.rs#L812)、[GPU semantics](../executor-rs/crates/managed-function-runtime/managed-function-gpu-v1-semantics.json)、[完成派送分支](../hivemind-rs/crates/task-scheduler/src/dispatcher.rs#L3418)、[結果驗證與結算](../hivemind-rs/crates/task-scheduler/src/task_repository.rs#L6294) |
+| Managed GPU 執行與獨立結算 | [Worker GPU route](../hivemind-rs/crates/worker-executor/src/executor.rs#L812)、[GPU semantics](../executor-rs/crates/managed-function-runtime/hcode-gpu-semantics.json)、[完成派送分支](../hivemind-rs/crates/task-scheduler/src/dispatcher.rs#L3418)、[結果驗證與結算](../hivemind-rs/crates/task-scheduler/src/task_repository.rs#L6294) |
 | Documentation contract | [release-docs checks](../scripts/release-docs.Tests.ps1#L34)、[site contract](../frontend/site-contract.test.mjs#L282) |
 
 延伸閱讀：
@@ -1170,7 +1174,7 @@ Browser UI contracts、accessibility／theme checks、native lifecycle、three-s
 - [文檔索引](README.md)
 - [Getting Started](GETTING_STARTED.md)
 - [Architecture](ARCHITECTURE.md)
-- [Managed Function Runtime](MANAGED_FUNCTION_RUNTIME.md)
+- [hcode Runtime](HCODE_RUNTIME.md)
 - [Managed consensus](managed-consensus-state.md)
 - [Public Network Limitations](PUBLIC_NETWORK_LIMITATIONS.md)
 - [Platform validation guide](platform-validation-state.md)

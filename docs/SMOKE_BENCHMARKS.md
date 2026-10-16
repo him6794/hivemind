@@ -6,7 +6,7 @@ This document defines the first practical benchmark gate recommended by
 ## Scope
 
 The smoke benchmark validates that a controlled worker pool can accept,
-dispatch, execute, and complete active `managed-function-v1` tasks. It does not
+dispatch, execute, and complete active `hcode` tasks. It does not
 validate public marketplace pricing, fiat conversion, or untrusted provider
 operation.
 
@@ -60,8 +60,8 @@ powershell -NoProfile -ExecutionPolicy Bypass `
   -File .\scripts\hivemind-smoke-benchmark.ps1 `
   -MasterUrl http://127.0.0.1:8082 `
   -Token "<requestor-token>" `
-  -TaskSourcePath .\templates\managed-function-v1\03_batch_sum.hmf `
-  -TaskInputPath .\templates\managed-function-v1\03_batch_sum.input.json
+  -TaskSourcePath .\templates\hcode\03_batch_sum.hmf `
+  -TaskInputPath .\templates\hcode\03_batch_sum.input.json
 ```
 
 Outputs are written to `test_logs/smoke-benchmark/` as CSV and JSON.
@@ -89,7 +89,7 @@ For a release candidate, record the exact commit and require:
 ## Notes
 
 - The benchmark script uses the current Master HTTP API and submits
-  `managed-function-v1` tasks via JSON `POST /api/tasks`.
+  `hcode` tasks via JSON `POST /api/tasks`.
 - The benchmark does not scale workers by itself; `WorkerCounts` are minimum
   registered-worker requirements and the script records the observed worker
   count from `/api/workers`.

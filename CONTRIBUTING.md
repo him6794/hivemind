@@ -10,8 +10,8 @@
 - Master 與 Worker 由使用者部署；它們回報的身分、資源、結果與費用都必須由 Nodepool 驗證。
 - 官網提供產品入口與帳號中心，任務操作屬於 Master，Worker 註冊與本機資訊屬於 Worker。
 - 瀏覽器不直接連 Nodepool；官網後端透過 `WEBSITE_NODEPOOL_GRPC_ADDR` 連線。
-- 新 CPU managed 任務只接受 `managed-function-v1`，v0 僅供讀取歷史資料；GPU 與 general-compute 使用獨立契約。
-- v1 的 `max_cpt` 是包含平台費與所有副本的整個任務收費上限。
+- 新 CPU managed 任務只接受 `hcode`，v0 僅供讀取歷史資料；GPU 與 general-compute 使用獨立契約。
+- hcode 的 `max_cpt` 是包含平台費與所有副本的整個任務收費上限。
 - 保留身分驗證、共識、用量驗證與隔離要求，不以單一 Worker 結算或較弱的執行方式繞過檢查。
 
 ## 2. 開發環境

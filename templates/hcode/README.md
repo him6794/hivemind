@@ -1,8 +1,8 @@
-# Managed Function v1 Templates
+# hcode Templates
 
-These templates are small `managed-function-v1` tasks for the active managed
+These templates are small `hcode` tasks for the active managed
 runtime. They use the same closed source-function and JSON-input language as the
-historical v0 fixtures, but v1 meters each replica's execution and settles from
+historical v0 fixtures, but hcode meters each replica's execution and settles from
 validated usage evidence.
 
 Submit a task with the source and input contents:
@@ -10,7 +10,7 @@ Submit a task with the source and input contents:
 ```json
 {
   "task_id": "example-managed-task",
-  "runtime": "managed-function-v1",
+  "runtime": "hcode",
   "task_source": "<contents of .hmf file>",
   "torrent": "<contents of matching .input.json file>",
   "max_cpt": 1000

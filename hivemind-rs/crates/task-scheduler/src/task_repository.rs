@@ -9718,6 +9718,17 @@ mod tests {
     type LedgerRow = (String, String, Option<String>, Option<String>, i64, String);
 
     #[test]
+    fn hcode_tutorial_budget_and_fee_match_the_settlement_policy() {
+        assert_eq!(
+            managed_v1_total_budget_hold(1_000, 3).unwrap(),
+            (303, 909, 90, 999)
+        );
+        let usage = 25 * 3;
+        let fee = managed_v1_fee(usage).unwrap();
+        assert_eq!((usage, fee, usage + fee), (75, 7, 82));
+    }
+
+    #[test]
     fn managed_v1_total_budget_uses_equal_replica_allowances_and_fee() {
         assert_eq!(
             managed_v1_total_budget_hold(100, 3).unwrap(),

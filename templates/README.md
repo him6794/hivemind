@@ -1,11 +1,11 @@
 # Hivemind Task Templates
 
 Ready-to-use starting points for requestors. Hivemind runs the active
-`managed-function-v1` runtime: a source function plus a JSON input payload.
+`hcode` runtime: a source function plus a JSON input payload.
 
 ## Available Templates
 
-See `managed-function-v1/` for runnable samples. Each sample is a pair:
+See `hcode/` for runnable samples. Each sample is a pair:
 
 | Sample | Use Case |
 |--------|----------|
@@ -22,14 +22,14 @@ See `managed-function-v1/` for runnable samples. Each sample is a pair:
 3. Submit with the CLI:
 
    ```bash
-   hivemind submit templates/managed-function-v1/03_batch_sum.hmf \
+   hivemind submit templates/hcode/03_batch_sum.hmf \
      --input '{"items":[{"status":"paid","amount":10},{"status":"pending","amount":7},{"status":"paid","amount":25}]}' \
      --username user --password pass --max-cpt 1000
    ```
 
    The CLI `--input` option takes inline JSON; the matching `.input.json` file
    is a reference payload and is not read automatically. Or submit over HTTP
-   with `POST /api/tasks` (see `docs/MANAGED_FUNCTION_RUNTIME.md`).
+   with `POST /api/tasks` (see `docs/HCODE_RUNTIME.md`).
 
 ## Resource and Budget Overrides
 
@@ -40,7 +40,7 @@ Submission flags adjust the requested resources and budget:
 - `--gpu-score` - minimum GPU benchmark score
 - `--gpu-memory-gb` - VRAM requirement
 - `--storage-gb` - disk space requirement
-- `--max-cpt` - the positive task-wide maximum charge for managed-function-v1,
+- `--max-cpt` - the positive task-wide maximum charge for hcode,
   including the platform fee and all three default replicas. Nodepool divides the
   fee-exclusive execution budget into identical deterministic integer allowances
   for the replicas; any remainder stays with the owner. Unused held CPT is
@@ -49,4 +49,4 @@ Submission flags adjust the requested resources and budget:
 
 The historical `managed-function-v0/` fixtures remain in the repository for
 frozen compatibility tests and old task documentation. New submissions must
-use `managed-function-v1`.
+use `hcode`.

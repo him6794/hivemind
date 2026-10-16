@@ -49,7 +49,7 @@ fn managed_function_v0_manifest_is_canonical_and_hash_pinned() {
 
 #[test]
 fn public_runtime_doc_links_the_frozen_manifest_and_its_known_limits() {
-    let documentation = include_str!("../../../../docs/MANAGED_FUNCTION_RUNTIME.md");
+    let documentation = include_str!("../../../../docs/HCODE_RUNTIME.md");
 
     assert!(documentation.contains("managed-function-v0-semantics.json"));
     assert!(documentation.contains(EXPECTED_MANIFEST_SHA256));
