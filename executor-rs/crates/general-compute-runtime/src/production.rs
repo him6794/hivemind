@@ -1916,6 +1916,8 @@ fn atomic_replace_file(
             .encode_wide()
             .chain(Some(0))
             .collect();
+        // SAFETY: Both pointers reference NUL-terminated UTF-16 buffers that stay
+        // alive for this synchronous call; MoveFileExW does not retain them.
         if unsafe {
             MoveFileExW(
                 source.as_ptr(),

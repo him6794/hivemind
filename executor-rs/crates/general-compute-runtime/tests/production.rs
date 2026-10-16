@@ -691,7 +691,7 @@ fn production_rootfs_snapshot_cache_materializes_and_validates_task_markers() {
         std::fs::read_dir(&cache_root)
             .unwrap()
             .filter_map(Result::ok)
-            .filter(|entry| entry.file_type().map(|kind| kind.is_dir()).unwrap_or(false))
+            .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
             .count(),
         1,
         "one template should produce one persistent rootfs snapshot"
