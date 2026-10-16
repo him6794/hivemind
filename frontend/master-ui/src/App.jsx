@@ -24,6 +24,8 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Textarea } from '@/components/ui/textarea';
 import { cn } from '@/lib/shadcn-utils';
 import './console.css';
+import { LocaleSelect, useLocale } from './LocaleProvider.jsx';
+import { errorMessage, localeError, message } from './locale.mjs';
 import { artifactFilenameFromContentDisposition } from './artifactDownloadPolicy.mjs';
 import {
   clearStoredSession,
@@ -35,9 +37,8 @@ import { createTaskId, validateTaskId } from './taskIdPolicy.mjs';
 import {
   isManagedGpuResult,
   isManagedLogGuidanceResult,
-  taskListResponseFailureMessage,
-  taskRequestFailureText,
-  taskResponseFailureMessage,
+  taskListResponseError,
+  taskResponseError,
 } from './taskResponsePolicy.mjs';
 import { normalizeTaskObservability } from './taskObservability.mjs';
 import { createBalanceRefreshController, parseCptBalance } from './accountBalance.mjs';
@@ -75,6 +76,7 @@ function SummaryCard({ icon: Icon, label, value, caption }) {
 }
 
 export default function MasterApp() {
+  const { t } = useLocale();
   const apiBase = String(import.meta.env.VITE_API_BASE || '').trim().replace(/\/$/, '');
 
   const [username, setUsername] = useState('');
@@ -156,12 +158,12 @@ export default function MasterApp() {
       data = await readJson(res);
     } catch {
       if (request.didTimeout()) {
-        throw new Error(method === 'GET'
+        throw localeError(method === 'GET'
           ? 'The request timed out. Please try again.'
           : 'The request timed out; its outcome may be unknown. It was not retried.');
       }
-      if (parentSignal?.aborted) throw new Error('Request cancelled');
-      throw new Error(method === 'GET'
+      if (parentSignal?.aborted) throw localeError('Request cancelled');
+      throw localeError(method === 'GET'
         ? 'Hivemind could not be reached. Check your connection and try again.'
         : 'The connection dropped; the request outcome may be unknown. It was not retried.');
     } finally {
@@ -171,13 +173,13 @@ export default function MasterApp() {
     if (!res.ok) {
       if (res.status === 401) {
         if (path === '/api/login' && !authToken) {
-          throw new Error('Username or password was not accepted.');
+          throw localeError('Username or password was not accepted.');
         }
         if (shouldLogoutForUnauthorizedRequest(authToken, tokenRef.current)) logout();
-        throw new Error('Session expired. Please log in again.');
+        throw localeError('Session expired. Please log in again.');
       }
       if (res.status >= 500) {
-        throw new Error(`Server error (${res.status}). Please try again later.`);
+        throw localeError('Server error ({status}). Please try again later.', { status: res.status });
       }
     }
     return { ok: res.ok, status: res.status, data };
@@ -188,7 +190,7 @@ export default function MasterApp() {
       checkStatus: async (signal) => {
         const response = await api('GET', '/api/startup-status', undefined, '', signal);
         if (!response.ok && response.status === 404) return { legacy: true };
-        if (!response.ok) throw new Error('Startup status is not available yet');
+        if (!response.ok) throw localeError('Startup status is not available yet');
         return response;
       },
       onState: setStartupStatus,
@@ -199,8 +201,8 @@ export default function MasterApp() {
     if (!authToken) return false;
     const { data } = await api('GET', '/api/tasks', undefined, authToken, signal);
     if (tokenRef.current !== authToken) return false;
-    const failureMessage = taskListResponseFailureMessage(data);
-    if (failureMessage) throw new Error(failureMessage);
+    const failureMessage = taskListResponseError(data);
+    if (failureMessage) throw failureMessage;
 
     setTasks(data.tasks);
     setLoadedTasksToken(authToken);
@@ -236,7 +238,7 @@ export default function MasterApp() {
   }
 
   async function bootstrapVpn(authToken = token, signal) {
-    if (!authToken) throw new Error('Login is required before VPN bootstrap');
+    if (!authToken) throw localeError('Login is required before VPN bootstrap');
     if (vpnReadyToken.current === authToken) return { success: true, state: 'ready' };
 
     const { ok, data } = await api(
@@ -249,9 +251,9 @@ export default function MasterApp() {
     );
     const state = String(data.state || '').trim();
     if (!ok || !data.success || !['ready', 'disabled'].includes(state)) {
-      throw new Error('The network is not ready. Please try again.');
+      throw localeError('The network is not ready. Please try again.');
     }
-    if (signal?.aborted || tokenRef.current !== authToken) throw new Error('Request cancelled');
+    if (signal?.aborted || tokenRef.current !== authToken) throw localeError('Request cancelled');
     vpnReadyToken.current = authToken;
     return data;
   }
@@ -279,8 +281,8 @@ export default function MasterApp() {
         if (tokenRef.current !== activeToken) return;
         setSetupPhase('');
         setSetupErrorPhase(phase);
-        setTasksLoadError(error?.message || (phase === 'tasks' ? 'Failed to load tasks' : 'Network connection failed'));
-        setStatus(`Connection failed: ${error?.message || 'Please try again.'}`);
+        setTasksLoadError(errorMessage(error, phase === 'tasks' ? 'Failed to load tasks' : 'Network connection failed'));
+        setStatus(message('Connection failed: {detail}', { detail: errorMessage(error, 'Please try again.') }));
       },
     });
   }
@@ -328,7 +330,7 @@ export default function MasterApp() {
         if (loaded && tokenRef.current === token) setLastRefresh(Date.now());
       }).catch((error) => {
         if (tokenRef.current === token) {
-          setTasksLoadError(error?.message || 'Failed to load tasks');
+          setTasksLoadError(errorMessage(error, 'Failed to load tasks'));
         }
       });
     }, 5000);
@@ -381,7 +383,7 @@ export default function MasterApp() {
         COLD_NETWORK_REQUEST_TIMEOUT_MS,
       );
       if (!data.success || !data.token) {
-        throw new Error(data.message || data.status_message || 'Login failed');
+        throw taskResponseError(data, 'Login failed', false);
       }
 
       const ownerUsername = username.trim();
@@ -396,7 +398,7 @@ export default function MasterApp() {
       setToken(data.token);
       setUsername(ownerUsername);
     } catch (err) {
-      setStatus(`Login failed: ${err.message}`);
+      setStatus(message('Login failed: {detail}', { detail: errorMessage(err) }));
     } finally {
       setLoginLoading(false);
     }
@@ -419,8 +421,8 @@ export default function MasterApp() {
       setStatus('Tasks refreshed');
     } catch (error) {
       if (tokenRef.current !== token) return;
-      setTasksLoadError(error?.message || 'Failed to load tasks');
-      setStatus(`Refresh failed: ${error?.message || 'Failed to load tasks'}`);
+      setTasksLoadError(errorMessage(error, 'Failed to load tasks'));
+      setStatus(message('Refresh failed: {detail}', { detail: errorMessage(error, 'Failed to load tasks') }));
     }
   }
 
@@ -431,27 +433,27 @@ export default function MasterApp() {
 
     try {
       if (!taskSource.trim()) {
-        throw new Error('Task instructions are required');
+        throw localeError('Task instructions are required');
       }
       if (!taskInput.trim()) {
-        throw new Error('Input JSON is required');
+        throw localeError('Input JSON is required');
       }
       try {
         JSON.parse(taskInput);
       } catch {
-        throw new Error('Input must be valid JSON');
+        throw localeError('Input must be valid JSON');
       }
       if (toNumber(maxCpt) <= 0) {
-        throw new Error('Maximum total charge (CPT, including platform fee) must be greater than 0 for managed-function tasks');
+        throw localeError('Maximum total charge (CPT, including platform fee) must be greater than 0 for managed-function tasks');
       }
 
       const effectiveTaskId = taskId.trim() || createTaskId();
       if (!effectiveTaskId) {
-        throw new Error('task_id is required');
+        throw localeError('task_id is required');
       }
       const validatedTaskId = validateTaskId(effectiveTaskId);
       if (!validatedTaskId.ok) {
-        throw new Error(validatedTaskId.message);
+        throw localeError(validatedTaskId.message);
       }
 
       const body = {
@@ -471,21 +473,21 @@ export default function MasterApp() {
 
       const { data } = await api('POST', '/api/tasks', body);
       if (!data.success) {
-        throw new Error(data.message || data.status_message || 'Task submission failed');
+        throw taskResponseError(data, 'Task submission failed', false);
       }
 
       setTaskId('');
       setTaskSource('');
       setTaskInput('');
       setSourceError(null);
-      setStatus(`Task submitted: ${validatedTaskId.taskId}`);
+      setStatus(message('Task submitted: {id}', { id: validatedTaskId.taskId }));
       void refreshBalanceAfterSubmit(token);
       if (tokenRef.current === token) {
         await refreshTasks();
         setLastRefresh(Date.now());
       }
     } catch (err) {
-      setStatus(`Submission failed: ${err.message}`);
+      setStatus(message('Submission failed: {detail}', { detail: errorMessage(err) }));
     } finally {
       setSubmitLoading(false);
     }
@@ -498,7 +500,7 @@ export default function MasterApp() {
     if (!String(rawId).trim()) { setLogLoading(null); return; }
     const validatedTaskId = validateTaskId(rawId);
     if (!validatedTaskId.ok) {
-      setTaskLog(validatedTaskId.message);
+      setTaskLog(message(validatedTaskId.message));
       setLogLoading(null);
       return;
     }
@@ -506,13 +508,13 @@ export default function MasterApp() {
 
     try {
       const { ok, data } = await api('GET', `/api/tasks/${encodeURIComponent(id)}/log`);
-      const failureMessage = taskResponseFailureMessage(data, 'Log unavailable', ok);
+      const failureMessage = taskResponseError(data, 'Log unavailable', ok);
       if (failureMessage) {
-        throw new Error(failureMessage);
+        throw failureMessage;
       }
-      setTaskLog(data.log || '(No output yet)');
+      setTaskLog(data.log ? { raw: data.log } : message('(No output yet)'));
     } catch (err) {
-      setTaskLog(taskRequestFailureText('Log', err, 'Log unavailable'));
+      setTaskLog(message('{operation} failed: {detail}', { operation: message('Log'), detail: errorMessage(err, 'Log unavailable') }));
     } finally {
       setLogLoading(null);
     }
@@ -526,7 +528,7 @@ export default function MasterApp() {
     if (!String(rawId).trim()) { setResultLoading(null); return; }
     const validatedTaskId = validateTaskId(rawId);
     if (!validatedTaskId.ok) {
-      setTaskResult(validatedTaskId.message);
+      setTaskResult(message(validatedTaskId.message));
       setResultLoading(null);
       return;
     }
@@ -537,7 +539,7 @@ export default function MasterApp() {
       if (ok && isManagedGpuResult(data)) {
         // GPU-v1 results are Nodepool-validated typed JSON, never torrents or
         // managed log guidance. Render the envelope for both success and failure.
-        setTaskResult(JSON.stringify(data.managed_gpu_result, null, 2));
+        setTaskResult({ raw: JSON.stringify(data.managed_gpu_result, null, 2) });
         setSelectedTask(id);
         return;
       }
@@ -550,28 +552,28 @@ export default function MasterApp() {
           'GET',
           `/api/tasks/${encodeURIComponent(id)}/log`
         );
-        const logFailure = taskResponseFailureMessage(
+        const logFailure = taskResponseError(
           logData,
           'Managed output unavailable',
           logOk
         );
         if (logFailure) {
-          throw new Error(logFailure);
+          throw logFailure;
         }
         const output = String(logData?.log ?? '');
         setTaskResult(
-          `${output || '(No managed output yet)'}\n\n— Managed task: output is served from the task log above.`
+          message('{output}\n\n— Managed task: output is served from the task log above.', { output: output ? { raw: output } : message('(No managed output yet)') })
         );
         setSelectedTask(id);
         return;
       }
-      const failureMessage = taskResponseFailureMessage(data, 'Result unavailable', ok);
+      const failureMessage = taskResponseError(data, 'Result unavailable', ok);
       if (failureMessage) {
-        throw new Error(failureMessage);
+        throw failureMessage;
       }
-      setTaskResult(JSON.stringify(data, null, 2));
+      setTaskResult({ raw: JSON.stringify(data, null, 2) });
     } catch (err) {
-      setTaskResult(taskRequestFailureText('Result', err, 'Result unavailable'));
+      setTaskResult(message('{operation} failed: {detail}', { operation: message('Result'), detail: errorMessage(err, 'Result unavailable') }));
     } finally {
       setResultLoading(null);
     }
@@ -593,15 +595,15 @@ export default function MasterApp() {
 
     try {
       const { ok, data } = await api('POST', `/api/tasks/${encodeURIComponent(id)}/stop`);
-      const failureMessage = taskResponseFailureMessage(data, 'Task cancellation was rejected', ok);
+      const failureMessage = taskResponseError(data, 'Task cancellation was rejected', ok);
       if (failureMessage) {
-        throw new Error(failureMessage);
+        throw failureMessage;
       }
       await refreshTasks();
       setLastRefresh(Date.now());
-      setStatus(`Task cancelled: ${id}`);
+      setStatus(message('Task cancelled: {id}', { id }));
     } catch (err) {
-      setStatus(`Cancel failed: ${err.message}`);
+      setStatus(message('Cancel failed: {detail}', { detail: errorMessage(err) }));
     } finally {
       setCancelLoading(null);
     }
@@ -662,10 +664,10 @@ export default function MasterApp() {
       a.click();
       a.remove();
       window.URL.revokeObjectURL(url);
-      setStatus(`Artifact downloaded: ${filename}`);
+      setStatus(message('Artifact downloaded: {filename}', { filename }));
     } catch (err) {
-      const message = request.didTimeout() ? 'The download timed out. Please try again.' : err.message;
-      setStatus(`Download failed: ${message}`);
+      const detail = request.didTimeout() ? message('The download timed out. Please try again.') : errorMessage(err);
+      setStatus(message('Download failed: {detail}', { detail }));
     } finally {
       request.dispose();
       setDownloadLoading(null);
@@ -727,7 +729,7 @@ export default function MasterApp() {
     ready: 'Preparing your session',
   };
   const startupLabel = startupStatus.state === 'failed'
-    ? `Hivemind could not start${startupStatus.code ? ` (${startupStatus.code})` : ''}. Close and reopen the application.`
+    ? message('Hivemind could not start{code}. Close and reopen the application.', { code: startupStatus.code ? ` (${startupStatus.code})` : '' })
     : startupStatus.state === 'error'
       ? startupStatus.message
       : !sessionReady && startupStatus.state === 'ready'
@@ -741,13 +743,12 @@ export default function MasterApp() {
           <CardContent className="startup-content">
             <span className="startup-icon" aria-hidden="true"><Workflow /></span>
             <p className="eyebrow">Hivemind</p>
-            <h1>Master console</h1>
-            <p className="startup-message" role="status" aria-live="polite">{startupLabel}</p>
+            <h1>{t("Master console")}</h1>
+            <LocaleSelect />
+            <p className="startup-message" role="status" aria-live="polite">{t(startupLabel)}</p>
             {startupBusy ? <Skeleton className="h-2 w-20" aria-hidden="true" /> : null}
             {startupStatus.state === 'error' ? (
-              <Button type="button" onClick={() => void startupController.current.start()}>
-                Check again
-              </Button>
+              <Button type="button" onClick={() => void startupController.current.start()}>{t("Check again")}</Button>
             ) : null}
           </CardContent>
         </Card>
@@ -755,7 +756,7 @@ export default function MasterApp() {
     );
   }
 
-  const isStatusError = /failed|expired/i.test(status);
+  const isStatusError = /failed|expired/i.test(typeof status === 'string' ? status : status.key);
   const showStatus = !!token || loginLoading || isStatusError;
   const taskCountsCaption = tasksLoadError
     ? 'Last loaded snapshot'
@@ -771,25 +772,24 @@ export default function MasterApp() {
             <span className="brand-mark" aria-hidden="true"><Workflow /></span>
             <div>
               <p className="eyebrow">Hivemind</p>
-              <h1>Master console</h1>
+              <h1>{t("Master console")}</h1>
             </div>
           </div>
           <div className="header-actions">
+            <LocaleSelect />
             <Button
               type="button"
               variant="outline"
               size="icon"
-              aria-label={`Switch to ${theme === 'dark' ? 'light' : 'dark'} theme`}
-              title={`Switch to ${theme === 'dark' ? 'light' : 'dark'} theme`}
+              aria-label={t(theme === 'dark' ? 'Switch to light theme' : 'Switch to dark theme')}
+              title={t(theme === 'dark' ? 'Switch to light theme' : 'Switch to dark theme')}
               onClick={() => setTheme((current) => current === 'dark' ? 'light' : 'dark')}
             >
               {theme === 'dark' ? <Sun aria-hidden="true" /> : <Moon aria-hidden="true" />}
             </Button>
             {token ? (
               <Button type="button" variant="outline" onClick={logout}>
-                <LogOut aria-hidden="true" />
-                Sign out
-              </Button>
+                <LogOut aria-hidden="true" />{t("Sign out")}</Button>
             ) : null}
           </div>
         </header>
@@ -797,13 +797,13 @@ export default function MasterApp() {
         {!token ? (
           <Card className="login-card">
             <CardHeader className="compact-card-header">
-              <CardTitle className="section-title" role="heading" aria-level="2">Sign in</CardTitle>
-              <CardDescription>Connect your Master console to your Hivemind account.</CardDescription>
+              <CardTitle className="section-title" role="heading" aria-level="2">{t("Sign in")}</CardTitle>
+              <CardDescription>{t("Connect your Master console to your Hivemind account.")}</CardDescription>
             </CardHeader>
             <CardContent>
               <form onSubmit={handleLogin} className="login-form">
                 <div className="field-stack">
-                  <Label htmlFor="master-username">Username</Label>
+                  <Label htmlFor="master-username">{t("Username")}</Label>
                   <Input
                     id="master-username"
                     autoComplete="username"
@@ -812,7 +812,7 @@ export default function MasterApp() {
                   />
                 </div>
                 <div className="field-stack">
-                  <Label htmlFor="master-password">Password</Label>
+                  <Label htmlFor="master-password">{t("Password")}</Label>
                   <Input
                     id="master-password"
                     type="password"
@@ -823,7 +823,7 @@ export default function MasterApp() {
                 </div>
                 <Button type="submit" className="login-submit" disabled={loginLoading}>
                   {loginLoading ? <RefreshCw className="animate-spin" aria-hidden="true" /> : null}
-                  {loginLoading ? 'Signing in and connecting…' : 'Sign in'}
+                  {loginLoading ? t("Signing in and connecting…") : t("Sign in")}
                 </Button>
               </form>
             </CardContent>
@@ -835,7 +835,7 @@ export default function MasterApp() {
                 <div className="account-identity">
                   <span className="account-indicator" aria-hidden="true" />
                   <div>
-                    <span className="account-label">Signed in</span>
+                    <span className="account-label">{t("Signed in")}</span>
                     <strong>{username}</strong>
                   </div>
                 </div>
@@ -845,41 +845,37 @@ export default function MasterApp() {
                   onClick={() => void retryTaskRefresh()}
                   disabled={setupPhase !== '' || loadedTasksToken !== token}
                 >
-                  <RefreshCw aria-hidden="true" />
-                  Refresh tasks
-                </Button>
+                  <RefreshCw aria-hidden="true" />{t("Refresh tasks")}</Button>
               </CardContent>
             </Card>
 
-            <section className="summary-grid" aria-label="Account and task overview">
+            <section className="summary-grid" aria-label={t("Account and task overview")}>
               <SummaryCard
                 icon={CircleDollarSign}
-                label="CPT balance"
+                label={t("CPT balance")}
                 value={balance === null
-                  ? balanceError ? 'Unavailable' : <Skeleton className="h-7 w-28" aria-label="Loading balance" />
+                  ? balanceError ? t("Unavailable") : <Skeleton className="h-7 w-28" aria-label={t("Loading balance")} />
                   : `${balance.toFixed(2)} CPT`}
                 caption={balanceError
-                  ? balance === null ? 'Could not load account balance' : 'Showing last received value'
-                  : 'Current account balance'}
+                  ? balance === null ? t("Could not load account balance") : t("Showing last received value")
+                  : t("Current account balance")}
               />
               <SummaryCard
                 icon={Activity}
-                label="Open tasks"
+                label={t("Open tasks")}
                 value={taskSummary ? taskSummary.open : '—'}
-                caption={taskCountsCaption}
+                caption={t(taskCountsCaption)}
               />
               <SummaryCard
                 icon={CheckCircle2}
-                label="Completed tasks"
+                label={t("Completed tasks")}
                 value={taskSummary ? taskSummary.completed : '—'}
-                caption={taskCountsCaption}
+                caption={t(taskCountsCaption)}
               />
             </section>
 
             {balanceError && balance !== null ? (
-              <p className="balance-note" role="note">
-                Could not refresh the balance; showing the last received value.
-              </p>
+              <p className="balance-note" role="note">{t("Could not refresh the balance; showing the last received value.")}</p>
             ) : null}
           </>
         )}
@@ -890,68 +886,62 @@ export default function MasterApp() {
             role="status"
             aria-live="polite"
           >
-            <span>{status}</span>
+            <span>{t(status)}</span>
             {token && setupErrorPhase === 'connecting' ? (
-              <Button type="button" variant="outline" size="sm" onClick={retrySetup}>
-                Retry connection
-              </Button>
+              <Button type="button" variant="outline" size="sm" onClick={retrySetup}>{t("Retry connection")}</Button>
             ) : null}
           </div>
         ) : null}
 
         {token ? (
           <Tabs value={activeTab} onValueChange={setActiveTab} className="workspace-tabs">
-            <TabsList className="workspace-tabs-list" aria-label="Master workspace">
-              <TabsTrigger value="tasks"><FileText aria-hidden="true" />Tasks</TabsTrigger>
-              <TabsTrigger value="submit"><Send aria-hidden="true" />Submit</TabsTrigger>
+            <TabsList className="workspace-tabs-list" aria-label={t("Master workspace")}>
+              <TabsTrigger value="tasks"><FileText aria-hidden="true" />{t("Tasks")}</TabsTrigger>
+              <TabsTrigger value="submit"><Send aria-hidden="true" />{t("Submit")}</TabsTrigger>
             </TabsList>
 
             <TabsContent value="tasks" className="workspace-panel animate-in fade-in-0 slide-in-from-bottom-1 duration-200">
               <Card className="tasks-card" aria-busy={taskListView === 'loading'}>
                 <CardHeader className="section-card-header">
                   <div>
-                    <CardTitle className="section-title" role="heading" aria-level="2">Your tasks</CardTitle>
+                    <CardTitle className="section-title" role="heading" aria-level="2">{t("Your tasks")}</CardTitle>
                     <CardDescription>
                       {lastRefresh
-                        ? `Updated ${Math.max(0, Math.round((Date.now() - lastRefresh) / 1000))}s ago`
-                        : 'Task status, output, and settled usage'}
+                        ? t('Updated {seconds}s ago', { seconds: Math.max(0, Math.round((Date.now() - lastRefresh) / 1000)) })
+                        : t("Task status, output, and settled usage")}
                     </CardDescription>
                   </div>
                   <Badge variant="outline">
-                    {taskSnapshotReady ? `${tasks.length} ${tasks.length === 1 ? 'task' : 'tasks'}` : 'Task list'}
+                    {taskSnapshotReady ? t(tasks.length === 1 ? '{count} task' : '{count} tasks', { count: tasks.length }) : t("Task list")}
                   </Badge>
                 </CardHeader>
                 <CardContent className="task-content">
                   {taskListView === 'loading' ? (
-                    <div className="task-skeleton" aria-label="Loading tasks" role="status">
+                    <div className="task-skeleton" aria-label={t("Loading tasks")} role="status">
                       <Skeleton className="h-28 w-full" />
                       <Skeleton className="h-28 w-full" />
                     </div>
                   ) : taskListView === 'error' ? (
                     <div className="empty-state" role="alert">
-                      <p>{tasksLoadError || 'Tasks could not be loaded.'}</p>
+                      <p>{tasksLoadError ? t(tasksLoadError) : t("Tasks could not be loaded.")}</p>
                       {setupErrorPhase === 'connecting' ? null : (
                         <Button type="button" variant="outline" onClick={() => void retryTaskRefresh()} disabled={setupPhase !== ''}>
-                          <RefreshCw aria-hidden="true" />Retry task loading
-                        </Button>
+                          <RefreshCw aria-hidden="true" />{t("Retry task loading")}</Button>
                       )}
                     </div>
                   ) : taskListView === 'empty' ? (
                     <div className="empty-state">
                       <span className="empty-state-icon" aria-hidden="true"><FileText /></span>
-                      <p>No tasks yet.</p>
+                      <p>{t("No tasks yet.")}</p>
                       <Button type="button" variant="outline" onClick={() => setActiveTab('submit')}>
-                        <Send aria-hidden="true" />Submit a task
-                      </Button>
+                        <Send aria-hidden="true" />{t("Submit a task")}</Button>
                     </div>
                   ) : (
                     <>
                       {tasksLoadError ? (
                         <div className="task-refresh-note" role="note">
-                          <span>{tasksLoadError} Showing the last received task list.</span>
-                          <Button type="button" variant="outline" size="sm" onClick={() => void retryTaskRefresh()} disabled={setupPhase !== ''}>
-                            Retry
-                          </Button>
+                          <span>{t(tasksLoadError)}{' '}{t("Showing the last received task list.")}</span>
+                          <Button type="button" variant="outline" size="sm" onClick={() => void retryTaskRefresh()} disabled={setupPhase !== ''}>{t("Retry")}</Button>
                         </div>
                       ) : null}
                       <ul className="task-list">
@@ -981,63 +971,61 @@ export default function MasterApp() {
                               <Card className="task-row">
                                 <CardContent className="task-row-content">
                                   <div className="task-row-heading">
-                                    <strong className="task-id">{id || 'Task ID unavailable'}</strong>
-                                    <Badge variant={statusVariant}>{statusText || 'Unknown status'}</Badge>
+                                    <strong className="task-id">{id || t("Task ID unavailable")}</strong>
+                                    <Badge variant={statusVariant}>{t(statusText || 'Unknown status')}</Badge>
                                   </div>
                                   {message ? <p className="task-message">{message}</p> : null}
                                   <div className="task-meta">
-                                    <span>Wall {hasWallTime ? `${(wallTimeMs / 1000).toFixed(1)}s` : '—'}</span>
+                                    <span>{t('Wall {time}', { time: hasWallTime ? `${(wallTimeMs / 1000).toFixed(1)}s` : '—' })}</span>
                                     <span>{observability.billingSettled
                                       ? observability.billedAmount === null
-                                        ? 'Charge settled; amount unknown'
-                                        : `Charged ${observability.billedAmount} CPT${historicalOverCap ? ' (above recorded max_cpt; fee included)' : ' (fee included)'}`
-                                      : 'Charge pending'}</span>
+                                        ? t("Charge settled; amount unknown")
+                                        : t('Charged {amount} CPT{note}', { amount: observability.billedAmount, note: t(historicalOverCap ? ' (above recorded max_cpt; fee included)' : ' (fee included)') })
+                                      : t("Charge pending")}</span>
                                     {observability.retryCount === null
-                                      ? <span>Retry counter unavailable</span>
+                                      ? <span>{t("Retry counter unavailable")}</span>
                                       : observability.retryCount > 0
-                                        ? <span>Retry counter {observability.retryCount}</span>
+                                        ? <span>{t('Retry counter {count}', { count: observability.retryCount })}</span>
                                         : null}
                                   </div>
                                   <Separator className="task-separator" />
                                   <dl className="observability-grid">
-                                    <dt>Computer</dt>
-                                    <dd>{observability.workerId || 'Not selected yet'}</dd>
-                                    <dt>Shared by</dt>
-                                    <dd>{observability.providerUser || 'Not available yet'}</dd>
-                                    <dt>Progress</dt>
-                                    <dd>{observability.dispatchStatus}</dd>
-                                    <dt>Aggregate replica usage</dt>
-                                    <dd>{observability.usageUnits === null ? 'Unknown' : `${observability.usageUnits} CPT before fee`}</dd>
-                                    <dt>{runtime === 'hcode' ? 'Submitted max_cpt' : 'Task charge cap'}</dt>
-                                    <dd>{observability.chargeCapCpt === null ? '—' : observability.chargeCapCpt} CPT{runtime === 'hcode' ? ' (hcode: task-wide, fee included)' : ', fee included'}</dd>
-                                    <dt>Settled charge-cap remainder</dt>
+                                    <dt>{t("Computer")}</dt>
+                                    <dd>{observability.workerId || t("Not selected yet")}</dd>
+                                    <dt>{t("Shared by")}</dt>
+                                    <dd>{observability.providerUser || t("Not available yet")}</dd>
+                                    <dt>{t("Progress")}</dt>
+                                    <dd>{t(observability.dispatchStatus)}</dd>
+                                    <dt>{t("Aggregate replica usage")}</dt>
+                                    <dd>{observability.usageUnits === null ? t("Unknown") : t('{usage} CPT before fee', { usage: observability.usageUnits })}</dd>
+                                    <dt>{runtime === 'hcode' ? t("Submitted max_cpt") : t("Task charge cap")}</dt>
+                                    <dd>{observability.chargeCapCpt === null ? '—' : observability.chargeCapCpt} CPT{runtime === 'hcode' ? t(" (hcode: task-wide, fee included)") : t(", fee included")}</dd>
+                                    <dt>{t("Settled charge-cap remainder")}</dt>
                                     <dd>
                                       {observability.settledRemainderCpt === null
-                                        ? observability.billingSettled ? 'Unknown' : 'Available after settlement'
+                                        ? observability.billingSettled ? t("Unknown") : t("Available after settlement")
                                         : `${observability.settledRemainderCpt} CPT`}
                                     </dd>
                                   </dl>
                                   {historicalOverCap ? (
-                                    <p className="task-note" role="note">
-                                      This charge exceeds the recorded max_cpt. Earlier v1 billing used max_cpt per replica, but this view does not show the billing version; review the task ledger before attributing the difference. Today’s task-wide cap is not retroactive.
-                                    </p>
+                                    <p className="task-note" role="note">{t("This charge exceeds the recorded max_cpt. Earlier v1 billing used max_cpt per replica, but this view does not show the billing version; review the task ledger before attributing the difference. Today’s task-wide cap is not retroactive.")}</p>
                                   ) : null}
                                   <div className="task-actions">
                                     <Button type="button" variant="outline" size="sm" onClick={() => void viewTaskLog(task)} disabled={isLogLoading}>
-                                      <FileText aria-hidden="true" />{isLogLoading ? 'Loading…' : 'Log'}
+                                      <FileText aria-hidden="true" />{isLogLoading ? t("Loading…") : t("Log")}
                                     </Button>
                                     {isManagedTask ? (
-                                      <span className="task-output-note">Output in Log</span>
+                                      <span className="task-output-note">{t("Output in Log")}</span>
                                     ) : (
                                       <Button type="button" variant="outline" size="sm" onClick={() => void viewTaskResult(task)} disabled={isResultLoading}>
-                                        {isResultLoading ? 'Loading…' : 'Result'}
+                                        {isResultLoading ? t("Loading…") : t("Result")}
                                       </Button>
                                     )}
                                     <Button type="button" variant="outline" size="sm" onClick={() => void downloadArtifact(task)} disabled={isDownloadLoading}>
-                                      <Download aria-hidden="true" />{isDownloadLoading ? 'Downloading…' : 'Download'}
+                                      <Download aria-hidden="true" />{isDownloadLoading ? t("Downloading…") : t("Download")}
                                     </Button>
                                     <Button type="button" variant="destructive" size="sm" onClick={() => requestTaskCancellation(task)} disabled={isCancelLoading || terminal}>
-                                      {isCancelLoading ? 'Cancelling…' : 'Cancel'}
+                                      {isCancelLoading ? t("Cancelling…") : t("Cancel")}
                                     </Button>
                                   </div>
                                 </CardContent>
@@ -1054,18 +1042,18 @@ export default function MasterApp() {
               <Card className="detail-card">
                 <CardHeader className="section-card-header">
                   <div>
-                    <CardTitle className="section-title" role="heading" aria-level="2">Task detail</CardTitle>
-                    <CardDescription>{selectedTask || 'Select a task to inspect its output'}</CardDescription>
+                    <CardTitle className="section-title" role="heading" aria-level="2">{t("Task detail")}</CardTitle>
+                    <CardDescription>{selectedTask || t("Select a task to inspect its output")}</CardDescription>
                   </div>
                 </CardHeader>
                 <CardContent className="detail-grid">
-                  <section className="detail-pane" aria-label="Task log">
-                    <h3><FileText aria-hidden="true" />Log</h3>
-                    <pre>{logLoading ? 'Loading log…' : (taskLog || '(No output yet)')}</pre>
+                  <section className="detail-pane" aria-label={t("Task log")}>
+                    <h3><FileText aria-hidden="true" />{t("Log")}</h3>
+                    <pre>{logLoading ? t("Loading log…") : t(taskLog || '(No output yet)')}</pre>
                   </section>
-                  <section className="detail-pane" aria-label="Task result">
-                    <h3><Activity aria-hidden="true" />Result</h3>
-                    <pre>{resultLoading ? 'Loading result…' : (taskResult || '(No result yet)')}</pre>
+                  <section className="detail-pane" aria-label={t("Task result")}>
+                    <h3><Activity aria-hidden="true" />{t("Result")}</h3>
+                    <pre>{resultLoading ? t("Loading result…") : t(taskResult || '(No result yet)')}</pre>
                   </section>
                 </CardContent>
               </Card>
@@ -1075,23 +1063,23 @@ export default function MasterApp() {
               <Card className="submit-card">
                 <CardHeader className="section-card-header">
                   <div>
-                    <CardTitle className="section-title" role="heading" aria-level="2">Submit a task</CardTitle>
-                    <CardDescription>hcode runs as a deterministic, replicated task.</CardDescription>
+                    <CardTitle className="section-title" role="heading" aria-level="2">{t("Submit a task")}</CardTitle>
+                    <CardDescription>{t("hcode runs as a deterministic, replicated task.")}</CardDescription>
                   </div>
                 </CardHeader>
                 <CardContent>
                   <form className="submit-form" onSubmit={(event) => { event.preventDefault(); void submitTask(); }}>
                     <div className="field-stack">
-                      <Label htmlFor="task-id">Task ID</Label>
+                      <Label htmlFor="task-id">{t("Task ID")}</Label>
                       <Input
                         id="task-id"
                         value={taskId}
                         onChange={(event) => setTaskId(event.target.value)}
-                        placeholder="Leave blank to assign an ID"
+                        placeholder={t("Leave blank to assign an ID")}
                       />
                     </div>
                     <div className="field-stack">
-                      <Label htmlFor="task-source">Task instructions</Label>
+                      <Label htmlFor="task-source">{t("Task instructions")}</Label>
                       <Textarea
                         id="task-source"
                         value={taskSource}
@@ -1099,21 +1087,21 @@ export default function MasterApp() {
                           setTaskSource(event.target.value);
                           setSourceError(event.target.value.trim() ? null : 'Task instructions are required');
                         }}
-                        placeholder="Describe the small, self-contained task to run"
+                        placeholder={t("Describe the small, self-contained task to run")}
                         rows={8}
                         aria-invalid={!!sourceError}
                         aria-describedby={sourceError ? 'task-source-error' : undefined}
                         className={cn(sourceError && 'border-destructive focus-visible:ring-destructive')}
                       />
-                      {sourceError ? <p id="task-source-error" className="field-error" role="alert">{sourceError}</p> : null}
+                      {sourceError ? <p id="task-source-error" className="field-error" role="alert">{t(sourceError)}</p> : null}
                     </div>
                     <div className="field-stack">
-                      <Label htmlFor="task-input">Input data (JSON)</Label>
+                      <Label htmlFor="task-input">{t("Input data (JSON)")}</Label>
                       <Textarea
                         id="task-input"
                         value={taskInput}
                         onChange={(event) => setTaskInput(event.target.value)}
-                        placeholder='Required, e.g. {"n": 42}'
+                        placeholder={t("Required, e.g. {\"n\": 42}")}
                         rows={5}
                         spellCheck={false}
                       />
@@ -1121,40 +1109,38 @@ export default function MasterApp() {
 
                     <div className="resource-fields">
                       <div className="field-stack">
-                        <Label htmlFor="cpu-score">CPU score</Label>
+                        <Label htmlFor="cpu-score">{t("CPU score")}</Label>
                         <Input id="cpu-score" type="number" min="0" value={cpuScore} onChange={(event) => setCpuScore(event.target.value)} />
                       </div>
                       <div className="field-stack">
-                        <Label htmlFor="gpu-score">GPU score</Label>
+                        <Label htmlFor="gpu-score">{t("GPU score")}</Label>
                         <Input id="gpu-score" type="number" min="0" value={gpuScore} onChange={(event) => setGpuScore(event.target.value)} />
                       </div>
                       <div className="field-stack">
-                        <Label htmlFor="memory-gb">Memory GB</Label>
+                        <Label htmlFor="memory-gb">{t("Memory GB")}</Label>
                         <Input id="memory-gb" type="number" min="0" value={memoryGb} onChange={(event) => setMemoryGb(event.target.value)} />
                       </div>
                       <div className="field-stack">
-                        <Label htmlFor="gpu-memory-gb">GPU memory GB</Label>
+                        <Label htmlFor="gpu-memory-gb">{t("GPU memory GB")}</Label>
                         <Input id="gpu-memory-gb" type="number" min="0" value={gpuMemoryGb} onChange={(event) => setGpuMemoryGb(event.target.value)} />
                       </div>
                       <div className="field-stack">
-                        <Label htmlFor="storage-gb">Storage GB</Label>
+                        <Label htmlFor="storage-gb">{t("Storage GB")}</Label>
                         <Input id="storage-gb" type="number" min="0" value={storageGb} onChange={(event) => setStorageGb(event.target.value)} />
                       </div>
                       <div className="field-stack">
-                        <Label htmlFor="host-count">Host count</Label>
+                        <Label htmlFor="host-count">{t("Host count")}</Label>
                         <Input id="host-count" type="number" min="1" value={hostCount} onChange={(event) => setHostCount(event.target.value)} />
                       </div>
                       <div className="field-stack charge-cap-field">
-                        <Label htmlFor="max-cpt">Task charge cap (CPT, fee included)</Label>
+                        <Label htmlFor="max-cpt">{t("Task charge cap (CPT, fee included)")}</Label>
                         <Input id="max-cpt" type="number" min="0" value={maxCpt} onChange={(event) => setMaxCpt(event.target.value)} />
                       </div>
                     </div>
-                    <p className="form-note">
-                      Three Worker replicas share this task-wide cap through a deterministic split. It includes the platform fee; automatic paid retries are disabled until a funded platform treasury is available, so retry work is not charged to you.
-                    </p>
+                    <p className="form-note">{t("Three Worker replicas share this task-wide cap through a deterministic split. It includes the platform fee; automatic paid retries are disabled until a funded platform treasury is available, so retry work is not charged to you.")}</p>
                     <div className="submit-actions">
                       <Button type="submit" disabled={submitLoading || loadedTasksToken !== token || !taskSource.trim() || !!sourceError}>
-                        <Send aria-hidden="true" />{submitLoading ? 'Sending…' : 'Send task'}
+                        <Send aria-hidden="true" />{submitLoading ? t("Sending…") : t("Send task")}
                       </Button>
                     </div>
                   </form>
@@ -1170,16 +1156,12 @@ export default function MasterApp() {
         >
           <AlertDialogContent>
             <AlertDialogHeader>
-              <AlertDialogTitle>Cancel this task?</AlertDialogTitle>
-              <AlertDialogDescription>
-                A stop request will be sent for <strong className="dialog-task-id">{pendingCancel?.id}</strong>. This cannot be undone.
-              </AlertDialogDescription>
+              <AlertDialogTitle>{t("Cancel this task?")}</AlertDialogTitle>
+              <AlertDialogDescription>{t("A stop request will be sent for")}{' '}<strong className="dialog-task-id">{pendingCancel?.id}</strong>{t(". This cannot be undone.")}</AlertDialogDescription>
             </AlertDialogHeader>
             <AlertDialogFooter>
-              <AlertDialogCancel>Keep task</AlertDialogCancel>
-              <AlertDialogAction onClick={() => void confirmTaskCancellation()}>
-                Cancel task
-              </AlertDialogAction>
+              <AlertDialogCancel>{t("Keep task")}</AlertDialogCancel>
+              <AlertDialogAction onClick={() => void confirmTaskCancellation()}>{t("Cancel task")}</AlertDialogAction>
             </AlertDialogFooter>
           </AlertDialogContent>
         </AlertDialog>

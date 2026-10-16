@@ -52,6 +52,9 @@ function addBrowserDiagnostics(page) {
 async function installMockApi(page, { startupFailure = false } = {}) {
   const fixture = {
     startupCalls: 0,
+    loginCalls: 0,
+    bootstrapCalls: 0,
+    log: 'Browser fixture output: managed result 42',
     stopCalls: 0,
     submissions: [],
     logsRead: [],
@@ -97,11 +100,13 @@ async function installMockApi(page, { startupFailure = false } = {}) {
     }
 
     if (method === 'POST' && pathname === '/api/login') {
+      fixture.loginCalls += 1;
       await fulfillJson({ success: true, token: 'browser-fixture-token' });
       return;
     }
 
     if (method === 'POST' && pathname === '/api/vpn/bootstrap') {
+      fixture.bootstrapCalls += 1;
       await fulfillJson({ success: true, state: 'ready' });
       return;
     }
@@ -134,7 +139,7 @@ async function installMockApi(page, { startupFailure = false } = {}) {
     if (method === 'GET' && logMatch) {
       const taskId = decodeURIComponent(logMatch[1]);
       fixture.logsRead.push(taskId);
-      await fulfillJson({ success: true, log: 'Browser fixture output: managed result 42' });
+      await fulfillJson({ success: true, log: fixture.log });
       return;
     }
 
@@ -205,6 +210,66 @@ test.afterEach(async ({ page }, testInfo) => {
 });
 
 test.describe('production Master shadcn UI regression', () => {
+  test('switches to Traditional Chinese without resetting drafts, sessions or raw task output', async ({ page }) => {
+    const fixture = await installMockApi(page);
+    fixture.log = 'Sign in';
+    fixture.tasks[0].status_message = 'Sign in';
+    fixture.tasks[0].usage_units = 0;
+    fixture.tasks.push(createTask('unknown-usage', { usage_units: null }));
+    await page.goto(masterUiUrl);
+    await page.getByLabel('Username').fill('locale-qa');
+    await page.getByLabel('Password').fill('fixture-password');
+    await page.getByRole('combobox', { name: 'Language' }).selectOption('zh');
+    await expect(page.locator('html')).toHaveAttribute('lang', 'zh-TW');
+    await expect(page.getByLabel('使用者名稱')).toHaveValue('locale-qa');
+    await expect(page.getByLabel('密碼')).toHaveValue('fixture-password');
+    await page.getByRole('button', { name: '登入', exact: true }).click();
+    await expect(page.getByText('已登入並準備就緒', { exact: true })).toBeVisible();
+    const row = page.locator('.task-list > li').filter({ hasText: existingTaskId });
+    await expect(row.locator('.task-message')).toHaveText('Sign in');
+    await expect(row).toContainText('0 CPT（未含平台費）');
+    await expect(page.locator('.task-list > li').filter({ hasText: 'unknown-usage' })).toContainText('未知');
+    await row.getByRole('button', { name: '日誌', exact: true }).click();
+    await expect(page.locator('.detail-pane[aria-label="任務日誌"] pre')).toHaveText('Sign in');
+    await page.getByRole('tab', { name: '提交', exact: true }).click();
+    const source = 'get(input, "text");';
+    const input = '{"text":"繁體中文 Sign in"}';
+    await page.getByLabel('任務 ID', { exact: true }).fill('locale-task');
+    await page.getByLabel('任務程式', { exact: true }).fill(source);
+    await page.getByLabel('輸入資料（JSON）').fill(input);
+    await page.getByLabel('任務收費上限（CPT，含平台費）').fill('1000');
+    await page.getByRole('combobox', { name: '語言' }).selectOption('en');
+    await expect(page.getByLabel('Task instructions')).toHaveValue(source);
+    await expect(page.getByLabel('Input data (JSON)')).toHaveValue(input);
+    await expect(page.getByLabel('Task ID', { exact: true })).toHaveValue('locale-task');
+    expect(fixture.loginCalls).toBe(1);
+    expect(fixture.bootstrapCalls).toBe(1);
+    await page.getByRole('combobox', { name: 'Language' }).selectOption('zh');
+    await page.getByRole('button', { name: '傳送任務', exact: true }).click();
+    await expect(page.getByText('任務已提交：locale-task', { exact: true })).toBeVisible();
+    expect(fixture.submissions).toHaveLength(1);
+    expect(fixture.submissions[0]).toMatchObject({ runtime: 'hcode', task_source: source, torrent: input, max_cpt: 1000 });
+    await page.getByRole('tab', { name: '任務', exact: true }).click();
+    await page.setViewportSize({ width: 320, height: 850 });
+    await assertNoHorizontalOverflow(page);
+    await page.reload();
+    await expect(page.locator('html')).toHaveAttribute('lang', 'zh-TW');
+    await expect(page.getByRole('button', { name: '登出', exact: true })).toBeVisible();
+    await expect(page.getByText('已登入並準備就緒', { exact: true })).toBeVisible();
+    expect(fixture.loginCalls).toBe(1);
+    expect(fixture.unhandledRequests).toEqual([]);
+  });
+
+  test('translates an existing startup error without restarting startup', async ({ page }) => {
+    const fixture = await installMockApi(page, { startupFailure: true });
+    await page.goto(masterUiUrl);
+    await expect(page.locator('.startup-message')).toContainText('Hivemind could not start');
+    const calls = fixture.startupCalls;
+    await page.getByRole('combobox', { name: 'Language' }).selectOption('zh');
+    await expect(page.locator('.startup-message')).toHaveText('Hivemind 無法啟動 (fixture_startup_failure)。請關閉後重新開啟應用程式。');
+    expect(fixture.startupCalls).toBe(calls);
+  });
+
   test('shows startup loading then a controlled backend startup failure', async ({ page }, testInfo) => {
     const fixture = await installMockApi(page, { startupFailure: true });
     await page.goto(masterUiUrl);

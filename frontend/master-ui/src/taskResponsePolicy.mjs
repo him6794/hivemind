@@ -1,3 +1,5 @@
+import { localeError } from './locale.mjs';
+
 const FAILURE_MESSAGE_FIELDS = ['message', 'status_message', 'log'];
 
 function usableText(value) {
@@ -30,6 +32,22 @@ export function taskListResponseFailureMessage(response) {
   return usableText(response?.message)
     || usableText(response?.status_message)
     || 'Failed to load tasks';
+}
+
+export function taskResponseError(response, fallbackMessage, transportOk = true) {
+  const text = taskResponseFailureMessage(response, fallbackMessage, transportOk);
+  if (!text) return null;
+  return FAILURE_MESSAGE_FIELDS.some((field) => usableText(response?.[field]))
+    ? new Error(text)
+    : localeError(text);
+}
+
+export function taskListResponseError(response) {
+  const text = taskListResponseFailureMessage(response);
+  if (!text) return null;
+  return response?.success !== true && (usableText(response?.message) || usableText(response?.status_message))
+    ? new Error(text)
+    : localeError(text);
 }
 
 export function taskRequestFailureText(operation, error, fallbackMessage) {
