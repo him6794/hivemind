@@ -174,6 +174,7 @@ async fn run_migrations_inner(pool: &PgPool) -> Result<()> {
         .bind(MIGRATION_ADVISORY_LOCK_KEY)
         .execute(&mut *tx)
         .await?;
+
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS users (
             id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -1617,6 +1618,49 @@ async fn run_migrations_inner(pool: &PgPool) -> Result<()> {
         .execute(&mut *tx)
         .await?;
 
+    // Old results are bound to the old runtime and semantic identity. Check
+    // every round, including older rounds no longer selected by the task.
+    // Schema creation and these checks share the migration transaction.
+    let old_cpu_blocking: bool = sqlx::query_scalar(
+        "SELECT EXISTS (
+            SELECT 1 FROM managed_consensus_attempts a
+            JOIN tasks t ON t.task_id = a.task_id
+            WHERE UPPER(BTRIM(t.runtime)) = 'MANAGED-FUNCTION-V1'
+              AND (
+                  a.state IN ('pending', 'dispatching', 'running', 'stop_pending',
+                              'cancel_pending', 'quorum_stop_pending', 'shadow_stop_pending')
+                  OR EXISTS (
+                      SELECT 1 FROM managed_consensus_worker_reservations r
+                      WHERE r.attempt_id = a.id AND r.state = 'active'
+                  )
+              )
+        )",
+    )
+    .fetch_one(&mut *tx)
+    .await?;
+    if old_cpu_blocking {
+        anyhow::bail!(
+            "hcode migration blocked: managed-function-v1 has unfinished consensus rounds or worker reservations; drain and settle them with the old Nodepool before upgrading"
+        );
+    }
+    // A typed GPU request cannot be renamed without invalidating its digest.
+    // Missing-manifest rows still follow the existing quarantine below.
+    let old_gpu_blocking: bool = sqlx::query_scalar(
+        "SELECT EXISTS (
+            SELECT 1 FROM tasks
+            WHERE UPPER(BTRIM(runtime)) = 'MANAGED-FUNCTION-GPU-V1'
+              AND UPPER(status) NOT IN ('COMPLETED', 'FAILED', 'CANCELLED', 'OBSERVED')
+              AND COALESCE(OCTET_LENGTH(managed_gpu_manifest_json), 0) > 0
+        )",
+    )
+    .fetch_one(&mut *tx)
+    .await?;
+    if old_gpu_blocking {
+        anyhow::bail!(
+            "hcode migration blocked: managed-function-gpu-v1 has unfinished typed requests; drain or cancel them with the old Nodepool before upgrading"
+        );
+    }
+
     sqlx::query(
         "INSERT INTO managed_gpu_attempt_quarantines (
              task_id, attempt_generation, worker_id, reason
@@ -1698,6 +1742,44 @@ async fn run_migrations_inner(pool: &PgPool) -> Result<()> {
     .execute(&mut *tx)
     .await?;
 
+    // Rename drained CPU tasks without rewriting execution evidence or v0 rows.
+    sqlx::query(
+        "UPDATE tasks
+         SET runtime = 'hcode'
+         WHERE UPPER(BTRIM(runtime)) = 'MANAGED-FUNCTION-V1';",
+    )
+    .execute(&mut *tx)
+    .await?;
+
+    // Rename the consensus billing/cost model versions, but only for holds
+    // that are still `held`. Settled and released holds are immutable history
+    // and keep their original identifiers. Each predicate is restricted to
+    // the exact legacy value so already-migrated rows are left alone.
+    sqlx::query(
+        "UPDATE managed_consensus_usage_holds
+         SET billing_version = 'hcode-billing-v1'
+         WHERE state = 'held'
+           AND billing_version = 'managed-function-v1-billing-v1';",
+    )
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query(
+        "UPDATE managed_consensus_usage_holds
+         SET billing_version = 'hcode-billing-v2-total-budget'
+         WHERE state = 'held'
+           AND billing_version = 'managed-function-v1-billing-v2-total-budget';",
+    )
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query(
+        "UPDATE managed_consensus_usage_holds
+         SET cost_model_version = 'hcode-execution-cpt-v1'
+         WHERE state = 'held'
+           AND cost_model_version = 'managed-function-v1-execution-cpt-v1';",
+    )
+    .execute(&mut *tx)
+    .await?;
+
     tracing::info!("Database migrations completed successfully");
     tx.commit().await?;
     Ok(())
@@ -1744,6 +1826,615 @@ pub async fn create_user(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use uuid::Uuid;
+
+    /// Managed-function-v1 -> hcode rename identities, mirroring the values
+    /// used by the production task-scheduler so the fixtures exercise the real
+    /// verification paths.
+    const OLD_CPU_RUNTIME: &str = "managed-function-v1";
+    const OLD_GPU_RUNTIME: &str = "managed-function-gpu-v1";
+    const NEW_CPU_RUNTIME: &str = "hcode";
+    const OLD_BILLING_V1: &str = "managed-function-v1-billing-v1";
+    const OLD_BILLING_V2: &str = "managed-function-v1-billing-v2-total-budget";
+    const NEW_BILLING_V1: &str = "hcode-billing-v1";
+    const NEW_BILLING_V2: &str = "hcode-billing-v2-total-budget";
+    const OLD_COST: &str = "managed-function-v1-execution-cpt-v1";
+    const NEW_COST: &str = "hcode-execution-cpt-v1";
+    const V0_RUNTIME: &str = "managed-function-v0";
+
+    /// Connect to an isolated schema, panicking (rather than silently
+    /// skipping) when the test database is required but unavailable.
+    async fn isolated_fixture(test_name: &str) -> IsolatedTestPool {
+        create_isolated_test_pool(test_name)
+            .await
+            .expect("a dedicated test database must be available")
+    }
+
+    async fn create_migration_probe_schema(pool: &PgPool) {
+        run_migrations(pool)
+            .await
+            .expect("initial schema migration must succeed");
+    }
+
+    async fn insert_task_with_runtime(
+        pool: &PgPool,
+        task_id: &str,
+        runtime: &str,
+        status: &str,
+    ) -> Uuid {
+        let id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO tasks (id, task_id, owner, status, runtime)
+             VALUES ($1, $2, 'guard-owner', $3, $4)",
+        )
+        .bind(id)
+        .bind(task_id)
+        .bind(status)
+        .bind(runtime)
+        .execute(pool)
+        .await
+        .unwrap();
+        id
+    }
+
+    async fn insert_gpu_task_with_manifest(pool: &PgPool, task_id: &str, status: &str) {
+        let id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO tasks
+                (id, task_id, owner, status, runtime, managed_gpu_manifest_json)
+             VALUES ($1, $2, 'gpu-owner', $3, $4, $5)",
+        )
+        .bind(id)
+        .bind(task_id)
+        .bind(status)
+        .bind(OLD_GPU_RUNTIME)
+        .bind(vec![1_u8, 2, 3, 4])
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    async fn insert_attempt(pool: &PgPool, task_id: &str, round: &str, state: &str) -> Uuid {
+        let id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO managed_consensus_attempts
+                (id, task_id, execution_id, round_id, request_digest,
+                 replica_count, quorum, mode, state, deadline)
+             VALUES ($1, $2, 'exec', $3, 'sha256:round', 2, 2, 'enforce', $4,
+                     NOW() + INTERVAL '1 hour')",
+        )
+        .bind(id)
+        .bind(task_id)
+        .bind(round)
+        .bind(state)
+        .execute(pool)
+        .await
+        .unwrap();
+        id
+    }
+
+    /// Bind the current attempt and optionally seed its usage hold.
+    async fn bind_attempt(
+        pool: &PgPool,
+        task_id: &str,
+        attempt_id: &Uuid,
+        hold_state: Option<(&str, &str, &str)>,
+    ) {
+        sqlx::query("UPDATE tasks SET managed_consensus_attempt_id = $1 WHERE task_id = $2")
+            .bind(attempt_id)
+            .bind(task_id)
+            .execute(pool)
+            .await
+            .unwrap();
+        if let Some((state, billing, cost)) = hold_state {
+            insert_hold(pool, task_id, attempt_id, state, billing, cost).await;
+        }
+    }
+
+    async fn insert_hold(
+        pool: &PgPool,
+        task_id: &str,
+        attempt_id: &Uuid,
+        state: &str,
+        billing_version: &str,
+        cost_model_version: &str,
+    ) {
+        // reserved_usage_cpt=24, fee=2, held_total=26 satisfies the 10% fee
+        // invariant the production settlement path enforces.
+        sqlx::query(
+            "INSERT INTO managed_consensus_usage_holds
+                (id, task_id, attempt_id, owner, max_cpt, replica_count,
+                 reserved_usage_cpt, reserved_fee_cpt, held_total_cpt,
+                 state, terminal_outcome, billing_version, cost_model_version,
+                 settlement_basis)
+             VALUES ($1, $2, $3, 'guard-owner', $7, 2, 24, 2, 26,
+                     $4, 'no_quorum', $5, $6, 'accepted-replica-executed-ops')",
+        )
+        .bind(Uuid::new_v4())
+        .bind(task_id)
+        .bind(attempt_id)
+        .bind(state)
+        .bind(billing_version)
+        .bind(cost_model_version)
+        .bind(if billing_version == OLD_BILLING_V2 {
+            26_i64
+        } else {
+            12_i64
+        })
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    async fn runtime_of(pool: &PgPool, task_id: &str) -> Option<String> {
+        sqlx::query_scalar("SELECT runtime FROM tasks WHERE task_id = $1")
+            .bind(task_id)
+            .fetch_optional(pool)
+            .await
+            .unwrap()
+    }
+
+    /// Read one hold row by attempt, in a given state.
+    async fn hold_version(
+        pool: &PgPool,
+        attempt_id: &Uuid,
+        state: &str,
+    ) -> Option<(String, String)> {
+        sqlx::query_as(
+            "SELECT billing_version, cost_model_version
+             FROM managed_consensus_usage_holds
+             WHERE attempt_id = $1 AND state = $2",
+        )
+        .bind(attempt_id)
+        .bind(state)
+        .fetch_optional(pool)
+        .await
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn hcode_migration_removes_blocking_rounds_then_renames_and_is_idempotent() {
+        let fixture = isolated_fixture("database_hcode_full").await;
+        create_migration_probe_schema(&fixture.pool).await;
+
+        // --- Old CPU rounds that must be drained first (in flight). ---
+        let active_task =
+            insert_task_with_runtime(&fixture.pool, "cpu-active", OLD_CPU_RUNTIME, "RUNNING").await;
+        let active_attempt =
+            insert_attempt(&fixture.pool, "cpu-active", "round-a", "dispatching").await;
+        bind_attempt(
+            &fixture.pool,
+            "cpu-active",
+            &active_attempt,
+            Some(("held", OLD_BILLING_V1, OLD_COST)),
+        )
+        .await;
+
+        insert_task_with_runtime(&fixture.pool, "cpu-stop-pending", OLD_CPU_RUNTIME, "FAILED")
+            .await;
+        let stop_attempt =
+            insert_attempt(&fixture.pool, "cpu-stop-pending", "round-b", "stop_pending").await;
+        bind_attempt(
+            &fixture.pool,
+            "cpu-stop-pending",
+            &stop_attempt,
+            Some(("held", OLD_BILLING_V2, OLD_COST)),
+        )
+        .await;
+
+        insert_gpu_task_with_manifest(&fixture.pool, "gpu-active", "RUNNING").await;
+
+        // --- Fully-settled old CPU history the migration may relabel. ---
+        insert_task_with_runtime(&fixture.pool, "cpu-settled", OLD_CPU_RUNTIME, "COMPLETED").await;
+        let settled_attempt =
+            insert_attempt(&fixture.pool, "cpu-settled", "round-c", "no_quorum").await;
+        bind_attempt(
+            &fixture.pool,
+            "cpu-settled",
+            &settled_attempt,
+            Some(("held", OLD_BILLING_V1, OLD_COST)),
+        )
+        .await;
+
+        // --- Frozen v0 history that must never be touched. ---
+        insert_task_with_runtime(&fixture.pool, "cpu-v0", V0_RUNTIME, "COMPLETED").await;
+        let v0_attempt = insert_attempt(&fixture.pool, "cpu-v0", "round-v0", "no_quorum").await;
+        bind_attempt(&fixture.pool, "cpu-v0", &v0_attempt, None).await;
+
+        // First pass: the in-flight rounds are present, so the guard rejects.
+        let first = run_migrations_inner(&fixture.pool).await;
+        assert!(
+            first.is_err(),
+            "migration must be fail-closed while old CPU/GPU rounds are in flight"
+        );
+
+        // Drain the in-flight rounds (as the old binary would): move the
+        // active round to a terminal state, clear the stop-pending round, and
+        // complete the GPU task.
+        sqlx::query(
+            "UPDATE managed_consensus_attempts
+             SET state = 'no_quorum' WHERE task_id = 'cpu-active' AND state = 'dispatching'",
+        )
+        .execute(&fixture.pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "UPDATE managed_consensus_attempts
+             SET state = 'cancelled'
+             WHERE task_id = 'cpu-stop-pending' AND state = 'stop_pending'",
+        )
+        .execute(&fixture.pool)
+        .await
+        .unwrap();
+        sqlx::query("UPDATE tasks SET status = 'FAILED' WHERE task_id = 'gpu-active'")
+            .execute(&fixture.pool)
+            .await
+            .unwrap();
+
+        // Second pass: nothing is in flight, so the rename proceeds.
+        run_migrations(&fixture.pool).await.unwrap();
+
+        assert_eq!(
+            runtime_of(&fixture.pool, "cpu-active").await.as_deref(),
+            Some(NEW_CPU_RUNTIME)
+        );
+        assert_eq!(
+            runtime_of(&fixture.pool, "cpu-stop-pending")
+                .await
+                .as_deref(),
+            Some(NEW_CPU_RUNTIME)
+        );
+        assert_eq!(
+            runtime_of(&fixture.pool, "cpu-settled").await.as_deref(),
+            Some(NEW_CPU_RUNTIME)
+        );
+        assert_eq!(
+            runtime_of(&fixture.pool, "cpu-v0").await.as_deref(),
+            Some(V0_RUNTIME),
+            "frozen v0 runtime must not be renamed"
+        );
+        // Terminal old-GPU task keeps its identity.
+        assert_eq!(
+            runtime_of(&fixture.pool, "gpu-active").await.as_deref(),
+            Some(OLD_GPU_RUNTIME)
+        );
+        // The settled round's held metadata was relabelled.
+        assert_eq!(
+            hold_version(&fixture.pool, &settled_attempt, "held").await,
+            Some((NEW_BILLING_V1.to_string(), NEW_COST.to_string()))
+        );
+
+        // Third pass: idempotent, no further changes.
+        run_migrations(&fixture.pool).await.unwrap();
+        assert_eq!(
+            runtime_of(&fixture.pool, "cpu-settled").await.as_deref(),
+            Some(NEW_CPU_RUNTIME)
+        );
+
+        let _ = active_task;
+        fixture.cleanup().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn hcode_migration_is_idempotent_when_nothing_is_in_flight() {
+        let fixture = isolated_fixture("database_hcode_idempotent").await;
+        create_migration_probe_schema(&fixture.pool).await;
+
+        // One fully-settled old CPU round (terminal task + terminal attempt).
+        insert_task_with_runtime(&fixture.pool, "done", OLD_CPU_RUNTIME, "COMPLETED").await;
+        let attempt = insert_attempt(&fixture.pool, "done", "round", "no_quorum").await;
+        bind_attempt(&fixture.pool, "done", &attempt, None).await;
+        insert_hold(
+            &fixture.pool,
+            "done",
+            &attempt,
+            "held",
+            OLD_BILLING_V1,
+            OLD_COST,
+        )
+        .await;
+
+        run_migrations(&fixture.pool).await.unwrap();
+        let before: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM managed_consensus_usage_holds")
+            .fetch_one(&fixture.pool)
+            .await
+            .unwrap();
+
+        // Second run: nothing left to rename.
+        run_migrations(&fixture.pool).await.unwrap();
+        let after: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM managed_consensus_usage_holds")
+            .fetch_one(&fixture.pool)
+            .await
+            .unwrap();
+        assert_eq!(before, after, "second migration must not alter hold rows");
+
+        assert_eq!(
+            runtime_of(&fixture.pool, "done").await.as_deref(),
+            Some(NEW_CPU_RUNTIME)
+        );
+        // The held row kept its new identity after the no-op second run.
+        assert_eq!(
+            hold_version(&fixture.pool, &attempt, "held").await,
+            Some((NEW_BILLING_V1.to_string(), NEW_COST.to_string()))
+        );
+
+        fixture.cleanup().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn hcode_migration_blocks_on_active_cpu_round() {
+        let fixture = isolated_fixture("database_hcode_guard_active").await;
+        create_migration_probe_schema(&fixture.pool).await;
+
+        let task =
+            insert_task_with_runtime(&fixture.pool, "cpu-active", OLD_CPU_RUNTIME, "RUNNING").await;
+        let attempt = insert_attempt(&fixture.pool, "cpu-active", "round-a", "running").await;
+        bind_attempt(
+            &fixture.pool,
+            "cpu-active",
+            &attempt,
+            Some(("held", OLD_BILLING_V1, OLD_COST)),
+        )
+        .await;
+
+        let error = run_migrations_inner(&fixture.pool)
+            .await
+            .expect_err("active old CPU round must block the migration");
+        assert!(
+            error.to_string().contains("managed-function-v1"),
+            "clear error: {error}"
+        );
+
+        // Fail-closed: no partial rename of the task runtime or hold metadata.
+        assert_eq!(
+            runtime_of(&fixture.pool, "cpu-active").await.as_deref(),
+            Some(OLD_CPU_RUNTIME)
+        );
+        assert_eq!(
+            hold_version(&fixture.pool, &attempt, "held").await,
+            Some((OLD_BILLING_V1.to_string(), OLD_COST.to_string())),
+            "hold metadata must not be renamed on a rolled-back migration"
+        );
+        let _ = task;
+
+        fixture.cleanup().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn hcode_migration_blocks_on_stop_pending_cpu_round() {
+        let fixture = isolated_fixture("database_hcode_guard_stop_pending").await;
+        create_migration_probe_schema(&fixture.pool).await;
+
+        // Terminal task whose stop report / settlement has not finished.
+        insert_task_with_runtime(&fixture.pool, "cpu-terminal", OLD_CPU_RUNTIME, "CANCELLED").await;
+        let attempt =
+            insert_attempt(&fixture.pool, "cpu-terminal", "round-x", "stop_pending").await;
+        bind_attempt(
+            &fixture.pool,
+            "cpu-terminal",
+            &attempt,
+            Some(("held", OLD_BILLING_V2, OLD_COST)),
+        )
+        .await;
+
+        let error = run_migrations_inner(&fixture.pool)
+            .await
+            .expect_err("stop-pending round must block the migration");
+        assert!(
+            error.to_string().contains("managed-function-v1"),
+            "clear error: {error}"
+        );
+
+        // No partial updates.
+        assert_eq!(
+            hold_version(&fixture.pool, &attempt, "held").await,
+            Some((OLD_BILLING_V2.to_string(), OLD_COST.to_string()))
+        );
+
+        fixture.cleanup().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn hcode_migration_checks_all_rounds_and_outstanding_worker_reservations() {
+        let fixture = isolated_fixture("database_hcode_all_rounds").await;
+        create_migration_probe_schema(&fixture.pool).await;
+        let old_runtime = format!("  {}  ", OLD_CPU_RUNTIME.to_uppercase());
+        insert_task_with_runtime(&fixture.pool, "old-round", &old_runtime, "RUNNING").await;
+        let current = insert_attempt(&fixture.pool, "old-round", "current", "no_quorum").await;
+        bind_attempt(&fixture.pool, "old-round", &current, None).await;
+        let older = insert_attempt(&fixture.pool, "old-round", "older", "pending").await;
+
+        for task_status in ["RUNNING", "COMPLETED"] {
+            sqlx::query("UPDATE tasks SET status = $1 WHERE task_id = 'old-round'")
+                .bind(task_status)
+                .execute(&fixture.pool)
+                .await
+                .unwrap();
+            for state in [
+                "pending",
+                "dispatching",
+                "running",
+                "stop_pending",
+                "cancel_pending",
+                "quorum_stop_pending",
+                "shadow_stop_pending",
+            ] {
+                sqlx::query("UPDATE managed_consensus_attempts SET state = $1 WHERE id = $2")
+                    .bind(state)
+                    .bind(older)
+                    .execute(&fixture.pool)
+                    .await
+                    .unwrap();
+                let error = run_migrations_inner(&fixture.pool).await.unwrap_err();
+                assert!(
+                    error.to_string().contains("unfinished consensus rounds"),
+                    "{error}"
+                );
+                assert_eq!(
+                    runtime_of(&fixture.pool, "old-round").await.as_deref(),
+                    Some(old_runtime.as_str())
+                );
+            }
+        }
+        sqlx::query("UPDATE managed_consensus_attempts SET state = 'no_quorum' WHERE id = $1")
+            .bind(older)
+            .execute(&fixture.pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO managed_consensus_worker_reservations (attempt_id, worker_id) VALUES ($1, 'still-stopping')")
+            .bind(older).execute(&fixture.pool).await.unwrap();
+        assert!(run_migrations_inner(&fixture.pool)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("worker reservations"));
+        sqlx::query("UPDATE managed_consensus_worker_reservations SET state = 'released', released_at = NOW() WHERE attempt_id = $1")
+            .bind(older).execute(&fixture.pool).await.unwrap();
+        run_migrations(&fixture.pool).await.unwrap();
+        assert_eq!(
+            runtime_of(&fixture.pool, "old-round").await.as_deref(),
+            Some(NEW_CPU_RUNTIME)
+        );
+        fixture.cleanup().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn hcode_migration_blocks_on_active_gpu_with_manifest() {
+        let fixture = isolated_fixture("database_hcode_guard_gpu").await;
+        create_migration_probe_schema(&fixture.pool).await;
+
+        insert_gpu_task_with_manifest(&fixture.pool, "gpu-active", "ASSIGNED").await;
+
+        let error = run_migrations_inner(&fixture.pool)
+            .await
+            .expect_err("active GPU task with a manifest must block the migration");
+        assert!(
+            error.to_string().contains("managed-function-gpu-v1"),
+            "clear error: {error}"
+        );
+
+        // Fail-closed: the GPU task keeps its identity and manifest.
+        assert_eq!(
+            runtime_of(&fixture.pool, "gpu-active").await.as_deref(),
+            Some(OLD_GPU_RUNTIME)
+        );
+
+        fixture.cleanup().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn hcode_migration_relabels_held_metadata_but_preserves_terminal_history() {
+        let fixture = isolated_fixture("database_hcode_settled_immutable").await;
+        create_migration_probe_schema(&fixture.pool).await;
+
+        // Terminal round: all attempts are settled/terminal so the guard passes.
+        // Each attempt carries a single hold in a distinct state so we can
+        // prove only `held` is relabelled.
+        insert_task_with_runtime(&fixture.pool, "done", OLD_CPU_RUNTIME, "COMPLETED").await;
+
+        let held_attempt = insert_attempt(&fixture.pool, "done", "r-held", "no_quorum").await;
+        bind_attempt(
+            &fixture.pool,
+            "done",
+            &held_attempt,
+            Some(("held", OLD_BILLING_V1, OLD_COST)),
+        )
+        .await;
+
+        let held_v2_attempt = insert_attempt(&fixture.pool, "done", "r-held-v2", "no_quorum").await;
+        insert_hold(
+            &fixture.pool,
+            "done",
+            &held_v2_attempt,
+            "held",
+            OLD_BILLING_V2,
+            OLD_COST,
+        )
+        .await;
+        let unknown_attempt = insert_attempt(&fixture.pool, "done", "r-unknown", "no_quorum").await;
+        insert_hold(
+            &fixture.pool,
+            "done",
+            &unknown_attempt,
+            "held",
+            "other-billing",
+            "other-cost",
+        )
+        .await;
+
+        let settled_attempt = insert_attempt(&fixture.pool, "done", "r-settled", "no_quorum").await;
+        bind_attempt(
+            &fixture.pool,
+            "done",
+            &settled_attempt,
+            Some(("settled", OLD_BILLING_V2, OLD_COST)),
+        )
+        .await;
+
+        let released_attempt =
+            insert_attempt(&fixture.pool, "done", "r-released", "cancelled").await;
+        bind_attempt(
+            &fixture.pool,
+            "done",
+            &released_attempt,
+            Some(("released", OLD_BILLING_V1, OLD_COST)),
+        )
+        .await;
+
+        let evidence_query =
+            "SELECT row_to_json(a)::TEXT FROM managed_consensus_attempts a ORDER BY id";
+        let amounts_query = "SELECT (to_jsonb(h) - 'billing_version' - 'cost_model_version')::TEXT FROM managed_consensus_usage_holds h ORDER BY id";
+        let evidence_before: Vec<String> = sqlx::query_scalar(evidence_query)
+            .fetch_all(&fixture.pool)
+            .await
+            .unwrap();
+        let amounts_before: Vec<String> = sqlx::query_scalar(amounts_query)
+            .fetch_all(&fixture.pool)
+            .await
+            .unwrap();
+        run_migrations(&fixture.pool).await.unwrap();
+        run_migrations(&fixture.pool).await.unwrap();
+        let evidence_after: Vec<String> = sqlx::query_scalar(evidence_query)
+            .fetch_all(&fixture.pool)
+            .await
+            .unwrap();
+        let amounts_after: Vec<String> = sqlx::query_scalar(amounts_query)
+            .fetch_all(&fixture.pool)
+            .await
+            .unwrap();
+        assert_eq!(evidence_before, evidence_after);
+        assert_eq!(amounts_before, amounts_after);
+        assert_eq!(
+            hold_version(&fixture.pool, &held_v2_attempt, "held").await,
+            Some((NEW_BILLING_V2.to_string(), NEW_COST.to_string()))
+        );
+        assert_eq!(
+            hold_version(&fixture.pool, &unknown_attempt, "held").await,
+            Some(("other-billing".to_string(), "other-cost".to_string()))
+        );
+
+        assert_eq!(
+            hold_version(&fixture.pool, &held_attempt, "held").await,
+            Some((NEW_BILLING_V1.to_string(), NEW_COST.to_string())),
+            "held metadata is relabelled"
+        );
+        assert_eq!(
+            hold_version(&fixture.pool, &settled_attempt, "settled").await,
+            Some((OLD_BILLING_V2.to_string(), OLD_COST.to_string())),
+            "settled history is immutable"
+        );
+        assert_eq!(
+            hold_version(&fixture.pool, &released_attempt, "released").await,
+            Some((OLD_BILLING_V1.to_string(), OLD_COST.to_string())),
+            "released history is immutable"
+        );
+        assert_eq!(
+            runtime_of(&fixture.pool, "done").await.as_deref(),
+            Some(NEW_CPU_RUNTIME)
+        );
+
+        fixture.cleanup().await.unwrap();
+    }
 
     #[tokio::test]
     async fn test_migration_idempotent() {
@@ -2152,6 +2843,25 @@ mod tests {
         .await
         .unwrap();
 
+        let error = run_migrations_inner(&fixture.pool).await.unwrap_err();
+        assert!(error.to_string().contains("unfinished typed requests"));
+        let original_status: String =
+            sqlx::query_scalar("SELECT status FROM tasks WHERE task_id = $1")
+                .bind(&legacy_task_id)
+                .fetch_one(&fixture.pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            original_status, "RUNNING",
+            "a blocked migration must not partially quarantine rows"
+        );
+
+        // The old Nodepool must terminate typed requests before this upgrade.
+        sqlx::query("UPDATE tasks SET status = 'CANCELLED' WHERE task_id = $1")
+            .bind(mismatched_binding_task_id)
+            .execute(&fixture.pool)
+            .await
+            .unwrap();
         run_migrations(&fixture.pool).await.unwrap();
 
         let (attempt_id, generation): (String, i64) = sqlx::query_as(
@@ -2278,10 +2988,10 @@ mod tests {
         .fetch_one(&fixture.pool)
         .await
         .unwrap();
-        assert_eq!(mismatched_status, "FAILED");
-        assert!(mismatched_worker_id.is_none());
-        let mismatch_reason: String = sqlx::query_scalar(
-            "SELECT reason
+        assert_eq!(mismatched_status, "CANCELLED");
+        assert_eq!(mismatched_worker_id.as_deref(), Some("current-worker"));
+        let mismatch_quarantines: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*)
              FROM managed_gpu_attempt_quarantines
              WHERE task_id = $1 AND attempt_generation = 1",
         )
@@ -2289,7 +2999,17 @@ mod tests {
         .fetch_one(&fixture.pool)
         .await
         .unwrap();
-        assert!(mismatch_reason.contains("matching immutable attempt binding"));
+        assert_eq!(
+            mismatch_quarantines, 0,
+            "terminal typed history is not quarantined"
+        );
+        let manifest: Vec<u8> =
+            sqlx::query_scalar("SELECT managed_gpu_manifest_json FROM tasks WHERE task_id = $1")
+                .bind(mismatched_binding_task_id)
+                .fetch_one(&fixture.pool)
+                .await
+                .unwrap();
+        assert_eq!(manifest, vec![1_u8, 2, 3]);
 
         sqlx::query("DELETE FROM tasks WHERE task_id = $1")
             .bind(mismatched_binding_task_id)
