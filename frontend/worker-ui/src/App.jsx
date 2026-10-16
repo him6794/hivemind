@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from 'react';
 import { LogOut, Moon, Sun, UserRound } from 'lucide-react';
 import './console.css';
+import { LocaleSelect, useLocale } from './LocaleProvider.jsx';
+import { errorMessage, localeError, message } from './locale.mjs';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
@@ -53,6 +55,7 @@ function validateWorkerEndpoint(value) {
 }
 
 export default function WorkerApp() {
+  const { t } = useLocale();
   const workerControlBase = String(import.meta.env.VITE_WORKER_CONTROL_BASE || 'http://127.0.0.1:18080')
     .trim()
     .replace(/\/+$/, '');
@@ -120,7 +123,7 @@ export default function WorkerApp() {
   async function refreshLocalProfile({ signal, isCurrent = () => true } = {}) {
     if (!isCurrent()) return null;
     const ipError = validateWorkerEndpoint(workerIp);
-    if (ipError) throw new Error(ipError);
+    if (ipError) throw localeError(ipError);
 
     let res;
     try {
@@ -128,12 +131,12 @@ export default function WorkerApp() {
     } catch (error) {
       if (!isCurrent()) return null;
       if (error instanceof WorkerFetchTimeoutError) throw error;
-      throw new Error('This computer app could not be reached. Make sure it is open and try again.');
+      throw localeError('This computer app could not be reached. Make sure it is open and try again.');
     }
     if (!isCurrent()) return null;
     const data = res.data;
     if (!res.ok || !data.success || !data.profile) {
-      throw new Error('This computer app could not be reached. Make sure it is open and try again.');
+      throw localeError('This computer app could not be reached. Make sure it is open and try again.');
     }
 
     const normalized = normalizeWorkerProfile(data.profile, workerIp);
@@ -147,7 +150,7 @@ export default function WorkerApp() {
   }
 
   async function bootstrapVpn(authToken, { signal, isCurrent = () => true } = {}) {
-    if (!authToken) throw new Error('Login is required before VPN bootstrap');
+    if (!authToken) throw localeError('Login is required before VPN bootstrap');
     if (!isCurrent() || sessionTokenRef.current !== authToken) return null;
 
     let res;
@@ -160,16 +163,16 @@ export default function WorkerApp() {
     } catch (error) {
       if (!isCurrent() || sessionTokenRef.current !== authToken) return null;
       if (error instanceof WorkerFetchTimeoutError) throw error;
-      throw new Error('The network connection is not ready. Please try again.');
+      throw localeError('The network connection is not ready. Please try again.');
     }
     if (!isCurrent() || sessionTokenRef.current !== authToken) return null;
     const data = res.data;
     if (res.status === 401) {
       logout('Session expired. Please log in again.');
-      throw new Error('Session expired. Please log in again.');
+      throw localeError('Session expired. Please log in again.');
     }
     if (!res.ok || !data.success || !['ready', 'disabled'].includes(String(data.state || ''))) {
-      throw new Error('The network connection is not ready. Please try again.');
+      throw localeError('The network connection is not ready. Please try again.');
     }
     setStatus(data.state === 'disabled' ? 'Connected in local mode' : 'Connected to Hivemind network');
     return data;
@@ -177,13 +180,13 @@ export default function WorkerApp() {
 
   async function registerWorker(authToken, workerProfile, endpoint, { signal, isCurrent = () => true } = {}) {
     const ownerUsername = registrationOwnerUsername(authenticatedUsername, username);
-    if (!authToken || !ownerUsername) throw new Error('Sign in before connecting this computer.');
+    if (!authToken || !ownerUsername) throw localeError('Sign in before connecting this computer.');
     if (!isCurrent() || sessionTokenRef.current !== authToken) return null;
     // Avoid a request Nodepool must reject after this tab's JWT has expired.
     if (isExpiredJwt(authToken)) {
       logout('Session expired. Please log in again.');
       setRegistration({ success: false, message: 'Session expired. Please log in again.' });
-      throw new Error('Session expired. Please log in again.');
+      throw localeError('Session expired. Please log in again.');
     }
     setStatus('Preparing this computer...');
 
@@ -200,18 +203,18 @@ export default function WorkerApp() {
       } catch (error) {
         if (!isCurrent() || sessionTokenRef.current !== authToken) return null;
         if (error instanceof WorkerFetchTimeoutError) throw error;
-        throw new Error('The network connection is not ready. Please try again.');
+        throw localeError('The network connection is not ready. Please try again.');
       }
       if (!isCurrent() || sessionTokenRef.current !== authToken) return null;
       const data = res.data;
       if (!res.ok) {
         if (res.status === 401) {
           logout('Session expired. Please log in again.');
-          throw new Error('Session expired. Please log in again.');
+          throw localeError('Session expired. Please log in again.');
         }
         throw new Error(data.message || data.status_message || `HTTP ${res.status}`);
       }
-      if (!data.success) throw new Error('This computer could not be connected. Please try again.');
+      if (!data.success) throw localeError('This computer could not be connected. Please try again.');
 
       setRegistration({
         success: true,
@@ -247,7 +250,7 @@ export default function WorkerApp() {
         try {
           res = await fetchJsonWithDeadline(request.url, request.options);
         } catch {
-          throw new Error('The worker dashboard could not be reached.');
+          throw localeError('The worker dashboard could not be reached.');
         }
         if (cancelled || sessionTokenRef.current !== token) return;
         const data = res.data;
@@ -260,7 +263,9 @@ export default function WorkerApp() {
           return;
         }
         if (!res.ok || !data.success) {
-          throw new Error(data.message || data.status_message || `Dashboard request failed (${res.status})`);
+          throw data.message || data.status_message
+            ? new Error(data.message || data.status_message)
+            : localeError('Dashboard request failed ({status})', { status: res.status });
         }
         const nextDashboard = normalizeWorkerDashboard(data);
         if (!cancelled && sessionTokenRef.current === token) {
@@ -269,7 +274,7 @@ export default function WorkerApp() {
         }
       } catch (err) {
         if (!cancelled && sessionTokenRef.current === token) {
-          setDashboardError(err.message || 'The worker dashboard could not be refreshed.');
+          setDashboardError(errorMessage(err, 'The worker dashboard could not be refreshed.'));
         }
       } finally {
         if (!cancelled && sessionTokenRef.current === token) setDashboardLoading(false);
@@ -306,7 +311,7 @@ export default function WorkerApp() {
         try {
           res = await fetchJsonWithDeadline(request.url, request.options);
         } catch {
-          throw new Error('The benchmark could not be reached.');
+          throw localeError('The benchmark could not be reached.');
         }
         if (cancelled || sessionTokenRef.current !== token) return;
         const data = res.data;
@@ -318,7 +323,9 @@ export default function WorkerApp() {
           return;
         }
         if (!res.ok || !data.success) {
-          throw new Error(data.message || data.status_message || `Benchmark request failed (${res.status})`);
+          throw data.message || data.status_message
+            ? new Error(data.message || data.status_message)
+            : localeError('Benchmark request failed ({status})', { status: res.status });
         }
         if (!cancelled && sessionTokenRef.current === token) {
           setBenchmark(normalizeBenchmark(data));
@@ -326,7 +333,7 @@ export default function WorkerApp() {
         }
       } catch (err) {
         if (!cancelled && sessionTokenRef.current === token) {
-          setBenchmarkError(err.message || 'The benchmark could not be refreshed.');
+          setBenchmarkError(errorMessage(err, 'The benchmark could not be refreshed.'));
         }
       } finally {
         if (!cancelled && sessionTokenRef.current === token) setBenchmarkLoading(false);
@@ -352,12 +359,14 @@ export default function WorkerApp() {
       }
       const data = res.data;
       if (!res.ok || !data.success) {
-        setBenchmarkError(data.message || data.status_message || 'The benchmark could not be started.');
+        setBenchmarkError(data.message || data.status_message
+          ? { raw: data.message || data.status_message }
+          : message('The benchmark could not be started.'));
       } else {
         setBenchmarkError('');
       }
     } catch (err) {
-      setBenchmarkError(err.message || 'The benchmark could not be started.');
+      setBenchmarkError(errorMessage(err, 'The benchmark could not be started.'));
     } finally {
       setBenchmarkRerunLoading(false);
     }
@@ -447,7 +456,7 @@ export default function WorkerApp() {
         }
 
         if (kind === 'restore' || kind === 'login') {
-          if (!authToken) throw new Error('Sign in before connecting this computer.');
+          if (!authToken) throw localeError('Sign in before connecting this computer.');
           setSetupPhase('connecting');
           setStatus('Signing in and connecting...');
           await bootstrapVpn(authToken, { signal, isCurrent });
@@ -459,7 +468,7 @@ export default function WorkerApp() {
         setStatus('Checking this computer...');
         const localProfile = await refreshLocalProfile({ signal, isCurrent });
         requireCurrent();
-        if (!localProfile) throw new Error('This computer profile could not be loaded. Please try again.');
+        if (!localProfile) throw localeError('This computer profile could not be loaded. Please try again.');
 
         if (authToken && kind !== 'refresh-profile') {
           setSetupPhase('services');
@@ -598,8 +607,8 @@ export default function WorkerApp() {
       size="icon"
       className="theme-toggle"
       onClick={() => setTheme((current) => current === 'dark' ? 'light' : 'dark')}
-      aria-label={theme === 'dark' ? 'Switch to light theme' : 'Switch to dark theme'}
-      title={theme === 'dark' ? 'Switch to light theme' : 'Switch to dark theme'}
+      aria-label={theme === 'dark' ? t("Switch to light theme") : t("Switch to dark theme")}
+      title={theme === 'dark' ? t("Switch to light theme") : t("Switch to dark theme")}
     >
       {theme === 'dark' ? <Sun aria-hidden="true" /> : <Moon aria-hidden="true" />}
     </Button>
@@ -609,10 +618,10 @@ export default function WorkerApp() {
 
   if (!backendReady) {
     const startupFailureMessage = startupError?.kind === 'failed'
-      ? `Worker startup failed${startupError.code ? ` (${startupError.code})` : ''}. Restart the Worker app, then check again.`
+      ? message('Worker startup failed{code}. Restart the Worker app, then check again.', { code: startupError.code ? ` (${startupError.code})` : '' })
       : startupError?.kind === 'timeout'
         ? 'Worker startup is taking longer than expected. Make sure the Worker app is running, then retry.'
-        : startupError?.message || '';
+        : startupError ? errorMessage(startupError) : '';
     return (
       <main className="app-shell">
         <div className="app-container">
@@ -621,16 +630,16 @@ export default function WorkerApp() {
               <div className="brand-mark" aria-hidden="true"><span /></div>
               <div className="brand-copy">
                 <p className="eyebrow">Hivemind · Worker</p>
-                <h1>Worker console</h1>
+                <h1>{t("Worker console")}</h1>
               </div>
             </div>
-            <div className="header-actions">{themeToggle}</div>
+            <div className="header-actions"><LocaleSelect />{themeToggle}</div>
           </header>
           <LoadingPanel
             phase={startupStatus.phase}
             error={startupFailureMessage}
             onRetry={startupError ? retryStartupCheck : undefined}
-            retryLabel={startupError?.kind === 'failed' ? 'Check again' : 'Retry startup'}
+            retryLabel={startupError?.kind === 'failed' ? t("Check again") : t("Retry startup")}
             showSkeleton={!startupError}
           />
         </div>
@@ -646,15 +655,13 @@ export default function WorkerApp() {
             <div className="brand-mark" aria-hidden="true"><span /></div>
             <div className="brand-copy">
               <p className="eyebrow">Hivemind · Worker</p>
-              <h1>Worker console</h1>
+              <h1>{t("Worker console")}</h1>
             </div>
           </div>
-          <div className="header-actions">
+          <div className="header-actions"><LocaleSelect />
             {token ? (
               <Button type="button" variant="outline" onClick={() => logout()}>
-                <LogOut aria-hidden="true" />
-                Sign out
-              </Button>
+                <LogOut aria-hidden="true" />{t("Sign out")}</Button>
             ) : null}
             {themeToggle}
           </div>
@@ -664,11 +671,11 @@ export default function WorkerApp() {
         {setupError && token && (setupErrorKind === 'restore' || setupErrorKind === 'login') ? (
           <div className="setup-alert" role="alert">
             <div>
-              <strong>Session needs attention</strong>
-              <p>{setupError}</p>
+              <strong>{t("Session needs attention")}</strong>
+              <p>{t(setupError)}</p>
             </div>
             <Button type="button" variant="outline" onClick={retryCurrentSetup} disabled={setupActive}>
-              {setupActive ? 'Connecting…' : 'Retry connection'}
+              {setupActive ? t("Connecting…") : t("Retry connection")}
             </Button>
           </div>
         ) : null}
@@ -680,21 +687,21 @@ export default function WorkerApp() {
                 <div className="account-avatar" aria-hidden="true"><UserRound /></div>
                 <div className="signed-in-copy">
                   <div className="signed-in-heading">
-                    <Badge variant="secondary">Signed in</Badge>
+                    <Badge variant="secondary">{t("Signed in")}</Badge>
                     <strong>{authenticatedUsername || username}</strong>
                   </div>
-                  <p>This computer reconnects automatically after sign-in.</p>
+                  <p>{t("This computer reconnects automatically after sign-in.")}</p>
                 </div>
               </div>
             ) : (
               <form onSubmit={handleLogin} className="login-form">
                 <div className="login-heading">
-                  <p className="section-kicker">Account</p>
-                  <h2>Sign in to connect</h2>
+                  <p className="section-kicker">{t("Account")}</p>
+                  <h2>{t("Sign in to connect")}</h2>
                 </div>
                 <div className="login-fields">
                   <div className="login-field">
-                    <Label htmlFor="worker-username">Username</Label>
+                    <Label htmlFor="worker-username">{t("Username")}</Label>
                     <Input
                       id="worker-username"
                       name="username"
@@ -705,7 +712,7 @@ export default function WorkerApp() {
                     />
                   </div>
                   <div className="login-field">
-                    <Label htmlFor="worker-password">Password</Label>
+                    <Label htmlFor="worker-password">{t("Password")}</Label>
                     <Input
                       id="worker-password"
                       name="password"
@@ -717,14 +724,14 @@ export default function WorkerApp() {
                     />
                   </div>
                   <Button type="submit" className="login-submit" disabled={loginLoading || setupActive}>
-                    {loginLoading || setupActive ? 'Connecting…' : 'Sign in and connect'}
+                    {loginLoading || setupActive ? t("Connecting…") : t("Sign in and connect")}
                   </Button>
                 </div>
               </form>
             )}
             {status ? (
               <div className={`account-status${statusIsError ? ' is-error' : ''}`} role={statusIsError ? 'alert' : 'status'}>
-                {status}
+                {t(status)}
               </div>
             ) : null}
           </CardContent>
@@ -732,9 +739,9 @@ export default function WorkerApp() {
 
         {token ? (
           <Tabs defaultValue="overview" className="worker-tabs">
-            <TabsList className="worker-tabs-list" aria-label="Worker console sections">
-              <TabsTrigger value="overview">Overview</TabsTrigger>
-              <TabsTrigger value="computer">Computer</TabsTrigger>
+            <TabsList className="worker-tabs-list" aria-label={t("Worker console sections")}>
+              <TabsTrigger value="overview">{t("Overview")}</TabsTrigger>
+              <TabsTrigger value="computer">{t("Computer")}</TabsTrigger>
             </TabsList>
             <TabsContent value="overview" className="worker-tab-content">
               <WorkerDashboard

@@ -1,3 +1,4 @@
+import { useLocale } from '../LocaleProvider.jsx';
 import { Cpu, RefreshCw } from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -10,23 +11,6 @@ import {
 } from '@/components/ui/card';
 import { Separator } from '@/components/ui/separator';
 import { Skeleton } from '@/components/ui/skeleton';
-
-function formatScore(value) {
-  if (value === null || value === undefined || !Number.isFinite(value)) return 'Unknown';
-  return new Intl.NumberFormat(undefined).format(value);
-}
-
-function formatGflops(value) {
-  if (value === null || value === undefined || !Number.isFinite(value)) return 'Unknown';
-  return `${new Intl.NumberFormat(undefined, { maximumFractionDigits: 1 }).format(value)} GFLOP/s`;
-}
-
-function formatMeasuredAt(value) {
-  if (!value) return 'Unknown';
-  const date = new Date(value);
-  if (!Number.isFinite(date.getTime())) return value;
-  return new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short' }).format(date);
-}
 
 const STATE_LABELS = {
   'not-run': 'Not run',
@@ -47,11 +31,13 @@ function stateVariant(state) {
 }
 
 function StateBadge({ state }) {
+  const { t } = useLocale();
   const key = state || 'not-run';
-  return <Badge variant={stateVariant(key)}>{STATE_LABELS[key] || key}</Badge>;
+  return <Badge variant={stateVariant(key)}>{Object.hasOwn(STATE_LABELS, key) ? t(STATE_LABELS[key]) : key}</Badge>;
 }
 
 function CaseList({ cases }) {
+  const { t, formatMetric } = useLocale();
   if (!cases.length) return null;
   return (
     <ul className="benchmark-case-list">
@@ -59,9 +45,9 @@ function CaseList({ cases }) {
         <li className="benchmark-case" key={caseEntry.name || index}>
           <span className="benchmark-case-name">{caseEntry.name}</span>
           <span className="benchmark-case-detail">
-            {caseEntry.threads !== null ? `${caseEntry.threads} thread${caseEntry.threads === 1 ? '' : 's'}` : 'Unknown'}
+            {caseEntry.threads !== null ? t(caseEntry.threads === 1 ? '{count} thread' : '{count} threads', { count: caseEntry.threads }) : t("Unknown")}
             {' · '}
-            {formatGflops(caseEntry.median_gflops)}
+            {formatMetric(caseEntry.median_gflops, 'GFLOP/s')}
           </span>
         </li>
       ))}
@@ -70,6 +56,7 @@ function CaseList({ cases }) {
 }
 
 function MeasurementRow({ label, icon: Icon, measurement }) {
+  const { t, formatMetric, formatTimestamp } = useLocale();
   const measured = measurement.state === 'ready' || measurement.state === 'stale';
   return (
     <div className="benchmark-measurement">
@@ -80,16 +67,16 @@ function MeasurementRow({ label, icon: Icon, measurement }) {
       </div>
       <dl className="benchmark-measurement-meta">
         <div>
-          <dt>Score</dt>
-          <dd>{formatScore(measurement.score)}</dd>
+          <dt>{t("Score")}</dt>
+          <dd>{formatMetric(measurement.score, '', 3)}</dd>
         </div>
         <div>
-          <dt>Threads</dt>
-          <dd>{measurement.threads === null ? 'Unknown' : measurement.threads}</dd>
+          <dt>{t("Threads")}</dt>
+          <dd>{measurement.threads === null ? t("Unknown") : measurement.threads}</dd>
         </div>
         <div>
-          <dt>Measured</dt>
-          <dd>{measurement.state === 'ready' || measurement.state === 'stale' ? formatMeasuredAt(measurement.measured_at) : '—'}</dd>
+          <dt>{t("Measured")}</dt>
+          <dd>{measurement.state === 'ready' || measurement.state === 'stale' ? formatTimestamp(measurement.measured_at) : '—'}</dd>
         </div>
       </dl>
       {measured && measurement.cases.length > 0 ? <CaseList cases={measurement.cases} /> : null}
@@ -107,19 +94,20 @@ export function WorkerBenchmark({
   rerunLoading,
   onRerun,
 }) {
+  const { t } = useLocale();
   return (
     <Card className="benchmark-card">
       <CardHeader className="computer-card-header">
         <div className="computer-card-heading">
           <span className="resource-icon" aria-hidden="true"><Cpu /></span>
           <div>
-            <CardTitle className="text-base">Hardware benchmark</CardTitle>
+            <CardTitle className="text-base">{t("Hardware benchmark")}</CardTitle>
             <CardDescription>
-              {benchmark?.suite ? `${benchmark.suite} · measured locally` : 'Measured performance, not an estimate'}
+              {benchmark?.suite ? t('{suite} · measured locally', { suite: benchmark.suite }) : t("Measured performance, not an estimate")}
             </CardDescription>
           </div>
         </div>
-        <div className="benchmark-rerun" role="group" aria-label="Rerun benchmark">
+        <div className="benchmark-rerun" role="group" aria-label={t("Rerun benchmark")}>
           <Button
             type="button"
             variant="outline"
@@ -127,9 +115,7 @@ export function WorkerBenchmark({
             onClick={() => onRerun('all')}
             disabled={rerunLoading || benchmark?.busy}
           >
-            <RefreshCw className={rerunLoading ? 'animate-spin motion-reduce:animate-none' : ''} aria-hidden="true" />
-            Rerun all
-          </Button>
+            <RefreshCw className={rerunLoading ? 'animate-spin motion-reduce:animate-none' : ''} aria-hidden="true" />{t("Rerun all")}</Button>
           <Button
             type="button"
             variant="ghost"
@@ -153,20 +139,20 @@ export function WorkerBenchmark({
       <CardContent>
         {!benchmark ? (
           benchmarkLoading ? (
-            <div className="benchmark-loading" aria-label="Loading benchmark" role="status">
+            <div className="benchmark-loading" aria-label={t("Loading benchmark")} role="status">
               <Skeleton className="benchmark-skeleton-line" />
               <Skeleton className="benchmark-skeleton-line" />
             </div>
           ) : (
-            <div className="benchmark-message" role="status">{benchmarkError || 'Benchmark is unavailable.'}</div>
+            <div className="benchmark-message" role="status">{t(benchmarkError || 'Benchmark is unavailable.')}</div>
           )
         ) : (
           <>
             <div className={`benchmark-freshness${benchmark.busy ? ' is-busy' : ''}`} role="status">
-              <strong>{benchmark.busy ? 'Measuring… this computer is not taking new tasks' : benchmark.release_build ? 'Release measurements' : 'Debug measurements (not for comparison)'}</strong>
+              <strong>{benchmark.busy ? t("Measuring… this computer is not taking new tasks") : benchmark.release_build ? t("Release measurements") : t("Debug measurements (not for comparison)")}</strong>
             </div>
             <Separator className="benchmark-separator" />
-            <MeasurementRow label="Processor" icon={Cpu} measurement={benchmark.cpu} />
+            <MeasurementRow label={t("Processor")} icon={Cpu} measurement={benchmark.cpu} />
             {benchmark.gpu.devices.length > 0 ? (
               benchmark.gpu.devices.map((device) => (
                 <div key={device.pci_bus_id || device.name} className="benchmark-gpu">
@@ -174,12 +160,12 @@ export function WorkerBenchmark({
                     {device.backend ? ` · ${device.backend}` : ''}
                     {device.device_type ? ` · ${device.device_type}` : ''}
                   </p>
-                  <MeasurementRow label="Graphics" icon={Cpu} measurement={device} />
+                  <MeasurementRow label={t("Graphics")} icon={Cpu} measurement={device} />
                 </div>
               ))
             ) : (
               <MeasurementRow
-                label="Graphics"
+                label={t("Graphics")}
                 icon={Cpu}
                 measurement={{
                   state: benchmark.gpu.state,

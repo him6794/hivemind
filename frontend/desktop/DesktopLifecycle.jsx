@@ -6,8 +6,10 @@ import {
 } from '@/components/ui/alert-dialog';
 import { createCloseController, getDesktopBridge, motionDelay } from './desktopLifecycle.mjs';
 import './desktop-lifecycle.css';
+import { useLocale } from './LocaleProvider.jsx';
 
 export function DesktopLifecycle({ children, role }) {
+  const { t } = useLocale();
   const [open, setOpen] = useState(false);
   const [pending, setPending] = useState(false);
   const [error, setError] = useState('');
@@ -81,14 +83,14 @@ export function DesktopLifecycle({ children, role }) {
           }}
         >
           <AlertDialogHeader>
-            <AlertDialogTitle>Keep {role} running?</AlertDialogTitle>
-            <AlertDialogDescription>Keep the service in the background, or quit this client.</AlertDialogDescription>
+            <AlertDialogTitle>{t('Keep {role} running?', { role })}</AlertDialogTitle>
+            <AlertDialogDescription>{t("Keep the service in the background, or quit this client.")}</AlertDialogDescription>
           </AlertDialogHeader>
-          {error && <p role="alert" className="text-sm text-destructive">{error}</p>}
+          {error && <p role="alert" className="text-sm text-destructive">{t(error)}</p>}
           <AlertDialogFooter className="gap-2 sm:space-x-0">
-            <AlertDialogCancel asChild><Button variant="outline" className="min-h-11" disabled={pending}>Cancel</Button></AlertDialogCancel>
-            <Button variant="destructive" className="min-h-11" disabled={pending} onClick={() => void resolve('quit')}>Quit</Button>
-            <Button className="min-h-11" disabled={pending} onClick={() => void resolve('background')}>Keep in background</Button>
+            <AlertDialogCancel asChild><Button variant="outline" className="min-h-11" disabled={pending}>{t("Cancel")}</Button></AlertDialogCancel>
+            <Button variant="destructive" className="min-h-11" disabled={pending} onClick={() => void resolve('quit')}>{t("Quit")}</Button>
+            <Button className="min-h-11" disabled={pending} onClick={() => void resolve('background')}>{t("Keep in background")}</Button>
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>

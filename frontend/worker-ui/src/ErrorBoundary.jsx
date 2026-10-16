@@ -1,4 +1,5 @@
 import React from 'react';
+import { LocaleContext, LocaleSelect } from './LocaleProvider.jsx';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import {
@@ -10,6 +11,7 @@ import {
 } from '@/components/ui/card';
 
 export class ErrorBoundary extends React.Component {
+  static contextType = LocaleContext;
   constructor(props) {
     super(props);
     this.state = { hasError: false, error: null };
@@ -24,18 +26,20 @@ export class ErrorBoundary extends React.Component {
   }
 
   render() {
+    const { t } = this.context;
     if (this.state.hasError) {
       const onRetry = this.props.onRetry || (() => window.location.reload());
       return (
         <main className="load-error-screen">
           <Card className="load-error-card" role="alert">
             <CardHeader>
+              <LocaleSelect />
               <Badge variant="outline" className="w-fit">Hivemind Worker</Badge>
-              <CardTitle>Worker console could not load</CardTitle>
-              <CardDescription>Try again, or restart the Worker app if the problem continues.</CardDescription>
+              <CardTitle>{t("Worker console could not load")}</CardTitle>
+              <CardDescription>{t("Try again, or restart the Worker app if the problem continues.")}</CardDescription>
             </CardHeader>
             <CardContent>
-              <Button type="button" onClick={onRetry}>Try again</Button>
+              <Button type="button" onClick={onRetry}>{t("Try again")}</Button>
             </CardContent>
           </Card>
         </main>

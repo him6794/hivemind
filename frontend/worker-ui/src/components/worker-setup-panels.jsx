@@ -1,3 +1,4 @@
+import { useLocale } from '../LocaleProvider.jsx';
 import { Check, Circle, LoaderCircle, TriangleAlert } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import {
@@ -41,6 +42,7 @@ export function LoadingPanel({
   compact = false,
   flow = compact ? 'onboarding' : 'native',
 }) {
+  const { t } = useLocale();
   const [title, description] = error
     ? ['Worker setup needs attention', 'Check the message below, then retry when the service is available.']
     : startupCopy(phase, flow);
@@ -54,8 +56,8 @@ export function LoadingPanel({
         </div>
         <div>
           <p className="section-kicker">Hivemind Worker</p>
-          <CardTitle className="startup-title">{title}</CardTitle>
-          <CardDescription>{description}</CardDescription>
+          <CardTitle className="startup-title">{t(title)}</CardTitle>
+          <CardDescription>{t(description)}</CardDescription>
         </div>
       </CardHeader>
       <CardContent>
@@ -64,7 +66,7 @@ export function LoadingPanel({
             <Skeleton /><Skeleton /><Skeleton />
           </div>
         ) : null}
-        <ol className="startup-steps" aria-label="Worker setup progress">
+        <ol className="startup-steps" aria-label={t('Worker setup progress')}>
           {STARTUP_STEPS.map(({ phase: stepPhase, label }, index) => {
             const stepLabel = flow === 'native'
               ? stepPhase === 'connecting' ? 'Prepare network' : stepPhase === 'services' ? 'Start local services' : label
@@ -80,15 +82,15 @@ export function LoadingPanel({
                 <span className="startup-step-icon" aria-hidden="true">
                   {completed ? <Check /> : current ? <Circle className="startup-current-mark" /> : <span>{index + 1}</span>}
                 </span>
-                <span>{stepLabel}</span>
+                <span>{t(stepLabel)}</span>
               </li>
             );
           })}
         </ol>
         {error ? (
           <div className="startup-error" role="alert">
-            <p>{error}</p>
-            {onRetry ? <Button type="button" variant="outline" onClick={onRetry}>{retryLabel}</Button> : null}
+            <p>{t(error)}</p>
+            {onRetry ? <Button type="button" variant="outline" onClick={onRetry}>{t(retryLabel)}</Button> : null}
           </div>
         ) : null}
       </CardContent>

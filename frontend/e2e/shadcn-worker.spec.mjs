@@ -110,6 +110,8 @@ async function installMockApi(page, { startupScenario = 'ready' } = {}) {
     flowEvents: [],
     startupCalls: 0,
     dashboardCalls: 0,
+    dashboard: createDashboard(),
+    benchmark: createBenchmark(),
     failNextDashboard: false,
     failNextProfile: false,
     unhandledRequests: [],
@@ -196,7 +198,7 @@ async function installMockApi(page, { startupScenario = 'ready' } = {}) {
         fixture.failNextDashboard = false;
         await fulfillJson({ success: false, message: 'fixture dashboard refresh failure' });
       } else {
-        await fulfillJson(createDashboard());
+        await fulfillJson(fixture.dashboard);
       }
       return;
     }
@@ -205,7 +207,12 @@ async function installMockApi(page, { startupScenario = 'ready' } = {}) {
       // The Computer tab polls this on a timer; answer it so the request never
       // lands in unhandledRequests. It is a background poll, not part of the
       // sign-in flow, so it is intentionally not recorded in flowEvents.
-      await fulfillJson(createBenchmark());
+      await fulfillJson(fixture.benchmark);
+      return;
+    }
+
+    if (method === 'POST' && pathname === '/api/benchmark/rerun') {
+      await fulfillJson({ success: true });
       return;
     }
 
@@ -279,6 +286,74 @@ test.afterEach(async ({ page }, testInfo) => {
 });
 
 test.describe('production Worker shadcn UI regression', () => {
+  test('preserves the session and raw measurements when switching to Traditional Chinese', async ({ page }) => {
+    const fixture = await installMockApi(page);
+    fixture.dashboard.assignments[0].usage_basis = 'Unknown';
+    fixture.benchmark.cpu_score = 0;
+    fixture.benchmark.report.cpu.reason = 'Unknown';
+    fixture.benchmark.report.gpu_state = 'no-device';
+    await page.goto(workerUiUrl);
+    await expect(page.getByText('This computer is ready to connect.', { exact: true })).toBeVisible();
+    await page.getByLabel('Username').fill('locale-qa');
+    await page.getByLabel('Password').fill('fixture-password');
+    await page.getByRole('combobox', { name: 'Language' }).selectOption('zh');
+    await expect(page.locator('html')).toHaveAttribute('lang', 'zh-TW');
+    await expect(page.getByLabel('使用者名稱')).toHaveValue('locale-qa');
+    await expect(page.getByLabel('密碼')).toHaveValue('fixture-password');
+    await page.getByRole('button', { name: '登入並連線', exact: true }).click();
+    await expect(page.getByText('此電腦已準備好接收任務。', { exact: true })).toBeVisible();
+    await expect(page.getByText('帳號已結算的提供者收入', { exact: true })).toBeVisible();
+    const events = [...fixture.flowEvents];
+    const processor = page.locator('.resource-card').filter({ hasText: '處理器' });
+    await expect(processor).toContainText('0 核心');
+    await expect(processor).toContainText('無法取得測量資料');
+    await expect(processor.getByRole('meter')).toHaveCount(0);
+    await expect(page.getByRole('meter', { name: '記憶體使用率' })).toHaveAttribute('aria-valuenow', '25');
+    await expect(page.locator('.assignment-card')).toContainText('0 CPT');
+    await expect(page.locator('.assignment-card')).toContainText('Unknown');
+    await expect(page.locator('.assignment-status')).toHaveText('執行中');
+    await page.getByRole('tab', { name: '電腦', exact: true }).click();
+    await expect(page.getByText('硬體效能測試', { exact: true })).toBeVisible();
+    await expect(page.locator('.benchmark-reason')).toHaveText('Unknown');
+    const cpu = page.locator('.benchmark-measurement').filter({ hasText: '處理器' });
+    await expect(cpu.locator('dd').first()).toHaveText('0');
+    await expect(page.getByText('沒有裝置', { exact: true })).toBeVisible();
+    await page.getByRole('combobox', { name: '語言' }).selectOption('en');
+    await expect(page.getByRole('tab', { name: 'Computer', exact: true })).toHaveAttribute('aria-selected', 'true');
+    await expect(page.getByText('Hardware benchmark', { exact: true })).toBeVisible();
+    expect(fixture.flowEvents).toEqual(events);
+    await page.getByRole('combobox', { name: 'Language' }).selectOption('zh');
+    await page.getByRole('button', { name: 'CPU', exact: true }).click();
+    await expect.poll(() => fixture.calls.filter(({ pathname }) => pathname === '/api/benchmark/rerun').length).toBe(1);
+    expect(fixture.calls.find(({ pathname }) => pathname === '/api/benchmark/rerun')).toMatchObject({
+      method: 'POST', authorization: 'Bearer browser-fixture-token', body: { component: 'cpu' },
+    });
+    await page.setViewportSize({ width: 320, height: 850 });
+    await assertNoHorizontalOverflow(page);
+    await page.getByRole('tab', { name: '概況', exact: true }).click();
+    await assertNoHorizontalOverflow(page);
+    await page.reload();
+    await expect(page.locator('html')).toHaveAttribute('lang', 'zh-TW');
+    await expect(page.getByText('此電腦已準備好接收任務。', { exact: true })).toBeVisible();
+    expect(fixture.flowEvents.filter((event) => event === 'login')).toHaveLength(1);
+    expect(fixture.unhandledRequests).toEqual([]);
+  });
+
+  test('translates an existing startup error and retains its diagnostic code', async ({ page }) => {
+    const fixture = await installMockApi(page, { startupScenario: 'failure-then-retry' });
+    await page.goto(workerUiUrl);
+    await expect(page.locator('.startup-title')).toHaveText('Starting Worker');
+    fixture.releaseInitialStartup();
+    await expect(page.getByRole('alert')).toContainText('Worker startup failed (fixture_startup_failure)');
+    const calls = fixture.startupCalls;
+    await page.getByRole('combobox', { name: 'Language' }).selectOption('zh');
+    await expect(page.locator('.startup-title')).toHaveText('Worker 設定需要處理');
+    await expect(page.getByRole('alert')).toContainText('Worker 啟動失敗 (fixture_startup_failure)');
+    expect(fixture.startupCalls).toBe(calls);
+    await page.getByRole('button', { name: '重新檢查', exact: true }).click();
+    await expect(page.getByRole('heading', { name: '登入以連線' })).toBeVisible();
+  });
+
   test('shows startup progress, handles a startup failure, and retries successfully', async ({ page }, testInfo) => {
     const fixture = await installMockApi(page, { startupScenario: 'failure-then-retry' });
     await page.goto(workerUiUrl);

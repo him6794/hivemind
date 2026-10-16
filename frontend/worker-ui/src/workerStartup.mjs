@@ -1,3 +1,5 @@
+import { message } from './locale.mjs';
+
 export const WORKER_STARTUP_TIMEOUT_MS = 60_000;
 export const WORKER_STARTUP_POLL_INTERVAL_MS = 1_000;
 
@@ -16,6 +18,7 @@ export class WorkerStartupError extends Error {
     };
     super(messages[kind] || messages.request);
     this.name = 'WorkerStartupError';
+    this.uiMessage = message(this.message);
     this.kind = kind;
     this.code = typeof code === 'string' && SAFE_FAILURE_CODE.test(code) ? code : null;
   }
@@ -25,6 +28,7 @@ export class WorkerFetchTimeoutError extends Error {
   constructor() {
     super('The local Worker request timed out.');
     this.name = 'WorkerFetchTimeoutError';
+    this.uiMessage = message(this.message);
   }
 }
 
