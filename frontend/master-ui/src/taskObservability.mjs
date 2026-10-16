@@ -20,7 +20,7 @@ export function normalizeTaskObservability(task = {}) {
     ? nonNegativeNumberOrNull(task.retry_count)
     : 0;
   const runtime = text(task.runtime || task.runtime_version || task.Runtime).trim();
-  const isManagedV1 = runtime === 'managed-function-v1';
+  const isManagedV1 = runtime === 'hcode';
   const reportedDispatchStatus = text(task.dispatch_status);
   const workerId = text(task.worker_id);
   const taskStatus = text(task.status || task.Status).toUpperCase();

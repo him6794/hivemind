@@ -156,7 +156,7 @@ describe('managed GPU result detection', () => {
         success: true,
         result_torrent: '',
         managed_gpu_result: {
-          runtime_version: 'managed-function-gpu-v1',
+          runtime_version: 'hcode-gpu',
           status: 'completed',
         },
       }),
@@ -166,7 +166,7 @@ describe('managed GPU result detection', () => {
       isManagedGpuResult({
         success: false,
         managed_gpu_result: {
-          runtime_version: 'managed-function-gpu-v1',
+          runtime_version: 'hcode-gpu',
           status: 'failed',
         },
       }),
@@ -181,7 +181,7 @@ describe('managed GPU result detection', () => {
       false,
     );
     assert.equal(
-      isManagedGpuResult({ managed_gpu_result: [{ runtime_version: 'managed-function-gpu-v1' }] }),
+      isManagedGpuResult({ managed_gpu_result: [{ runtime_version: 'hcode-gpu' }] }),
       false,
     );
     assert.equal(isManagedGpuResult({ managed_gpu_result: null }), false);

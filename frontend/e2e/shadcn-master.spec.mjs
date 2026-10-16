@@ -13,7 +13,7 @@ function createTask(taskId, overrides = {}) {
     task_id: taskId,
     status: 'RUNNING',
     status_message: 'Running the browser fixture task',
-    runtime: 'managed-function-v1',
+    runtime: 'hcode',
     wall_time_ms: 1250,
     worker_id: 'fixture-worker-01',
     provider_user: 'fixture-provider',
@@ -280,7 +280,7 @@ test.describe('production Master shadcn UI regression', () => {
     expect(fixture.submissions).toHaveLength(1);
     expect(fixture.submissions[0]).toMatchObject({
       task_id: submittedTaskId,
-      runtime: 'managed-function-v1',
+      runtime: 'hcode',
       task_source: 'return input.value;',
       torrent: '{"value":42}',
       max_cpt: 12,

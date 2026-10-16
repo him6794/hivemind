@@ -456,10 +456,10 @@ export default function MasterApp() {
 
       const body = {
         task_id: validatedTaskId.taskId,
-        runtime: 'managed-function-v1',
+        runtime: 'hcode',
         task_source: taskSource,
       };
-      // managed-function-v1 tasks carry their JSON input in the `torrent` field.
+      // hcode tasks carry their JSON input in the `torrent` field.
       if (taskInput.trim()) body.torrent = taskInput;
       if (cpuScore > 0) body.cpu_score = toNumber(cpuScore);
       if (gpuScore > 0) body.gpu_score = toNumber(gpuScore);
@@ -961,7 +961,7 @@ export default function MasterApp() {
                           const normalizedStatus = statusText.toUpperCase();
                           const message = task.status_message || task.StatusMessage || '';
                           const runtime = String(task.runtime || task.runtime_version || task.Runtime || '').trim();
-                          const isManagedTask = runtime === 'managed-function-v0' || runtime === 'managed-function-v1';
+                          const isManagedTask = runtime === 'managed-function-v0' || runtime === 'hcode';
                           const wallTimeValue = task.wall_time_ms ?? task.WallTimeMs;
                           const wallTimeMs = Number(wallTimeValue);
                           const hasWallTime = wallTimeValue !== null && wallTimeValue !== undefined && wallTimeValue !== '' && Number.isFinite(wallTimeMs);
@@ -1008,8 +1008,8 @@ export default function MasterApp() {
                                     <dd>{observability.dispatchStatus}</dd>
                                     <dt>Aggregate replica usage</dt>
                                     <dd>{observability.usageUnits === null ? 'Unknown' : `${observability.usageUnits} CPT before fee`}</dd>
-                                    <dt>{runtime === 'managed-function-v1' ? 'Submitted max_cpt' : 'Task charge cap'}</dt>
-                                    <dd>{observability.chargeCapCpt === null ? '—' : observability.chargeCapCpt} CPT{runtime === 'managed-function-v1' ? ' (new v1: task-wide, fee included)' : ', fee included'}</dd>
+                                    <dt>{runtime === 'hcode' ? 'Submitted max_cpt' : 'Task charge cap'}</dt>
+                                    <dd>{observability.chargeCapCpt === null ? '—' : observability.chargeCapCpt} CPT{runtime === 'hcode' ? ' (hcode: task-wide, fee included)' : ', fee included'}</dd>
                                     <dt>Settled charge-cap remainder</dt>
                                     <dd>
                                       {observability.settledRemainderCpt === null
@@ -1076,7 +1076,7 @@ export default function MasterApp() {
                 <CardHeader className="section-card-header">
                   <div>
                     <CardTitle className="section-title" role="heading" aria-level="2">Submit a task</CardTitle>
-                    <CardDescription>Managed-function-v1 runs as a deterministic, replicated task.</CardDescription>
+                    <CardDescription>hcode runs as a deterministic, replicated task.</CardDescription>
                   </div>
                 </CardHeader>
                 <CardContent>

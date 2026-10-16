@@ -58,6 +58,6 @@ export function isManagedGpuResult(response) {
     result !== null &&
     typeof result === 'object' &&
     !Array.isArray(result) &&
-    result.runtime_version === 'managed-function-gpu-v1'
+    result.runtime_version === 'hcode-gpu'
   );
 }

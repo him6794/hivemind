@@ -3,7 +3,7 @@
 //     -> hivemind-rs/crates/proto/src/lib.rs
 //   ExecutionLimits::for_managed_function_budget()
 //     -> executor-rs/crates/managed-function-runtime/src/lib.rs
-//   managed-function-v1-semantics.json -> v1 runtime and settlement contract
+//   hcode-semantics.json -> v1 runtime and settlement contract
 //   HTTP routes and validation rules    -> hivemind-rs/crates/master-api/src/{routes,handlers}.rs
 //   product limitations                 -> docs/PUBLIC_NETWORK_LIMITATIONS.md
 // Keep one copy of every number here so the two locales can never drift apart.
@@ -43,7 +43,7 @@ const SUBMIT_EXAMPLE = `curl -X POST http://localhost:8082/api/tasks \\
   -H "Content-Type: application/json" \\
   -d '{
     "task_id": "row-score-001",
-    "runtime": "managed-function-v1",
+    "runtime": "hcode",
     "task_source": "let n = len(get(input, \\"rows\\")); n;",
     "torrent": "{\\"rows\\": [1, 2, 3]}",
     "max_cpt": 500,
@@ -83,7 +83,7 @@ const definitions = {
     hero: {
       badge: 'Official site',
       title: 'Run tasks on a shared network',
-      body: 'Set a task-wide maximum charge that includes the platform fee, then let Hivemind choose available computers. The default three managed-function-v1 replicas share the execution budget deterministically; the network validates their evidence before settlement.',
+      body: 'Set a task-wide maximum charge that includes the platform fee, then let Hivemind choose available computers. The default three hcode replicas share the execution budget deterministically; the network validates their evidence before settlement.',
       primaryCta: 'Create account',
       secondaryCta: 'Read the docs',
       bullets: [
@@ -244,7 +244,7 @@ const definitions = {
         ],
         taskFields: [
           { name: 'task_id', type: 'string', required: 'yes', note: `ASCII letters, digits, - _ . only. No "..". Up to ${LIMITS.taskIdBytes}.` },
-          { name: 'runtime', type: 'string', required: 'yes', note: 'Must be managed-function-v1. managed-function-v0 is retired and rejected for new tasks.' },
+          { name: 'runtime', type: 'string', required: 'yes', note: 'Must be hcode. managed-function-v0 is retired and rejected for new tasks.' },
           { name: 'task_source', type: 'string', required: 'yes', note: `The managed function source text. Up to ${LIMITS.taskSourceBytes}.` },
           { name: 'torrent', type: 'string', required: 'yes', note: `The JSON input document, sent as a string. Reachable inside the function as input. Up to ${LIMITS.jsonInputBytes}.` },
           { name: 'max_cpt', type: 'integer', required: 'yes', note: 'A positive maximum total task charge, including the 10% platform fee and all replicas (three by default). The fee-exclusive execution budget is split into identical deterministic integer replica allowances; any remainder stays with the owner.' },
@@ -257,7 +257,7 @@ const definitions = {
           { name: 'location', type: 'string', required: 'no', note: 'Preferred worker location label.' },
         ],
         language: {
-          intro: 'managed-function-v1 is the supported managed job format. It is a small, metered language: max_cpt is a task-wide maximum charge including fees, and the default three replicas split the fee-exclusive execution budget into identical deterministic allowances. Structural safety limits remain bounded, and there is no way to reach the host.',
+          intro: 'hcode is the supported managed job format. It is a small, metered language: max_cpt is a task-wide maximum charge including fees, and the default three replicas split the fee-exclusive execution budget into identical deterministic allowances. Structural safety limits remain bounded, and there is no way to reach the host.',
           statements: [
             'let name = expression;',
             'fn name(a, b) { return expression; }',
@@ -316,7 +316,7 @@ const definitions = {
           { id: 'submitRate', name: 'Submissions per minute', value: `${LIMITS.submitPerMinute} per account`, note: 'Default. Over the limit returns 429.' },
         ],
         billing: {
-          title: 'How a managed-function-v1 task is settled',
+          title: 'How a hcode task is settled',
           body: 'V1 measures actual valid replica execution, not wall-clock time. max_cpt is the task-wide maximum total charge, including the 10% platform fee. The default three replicas receive identical deterministic integer execution budgets from the fee-exclusive cap; any remainder stays with the owner. Nodepool aggregates valid usage and the fee without exceeding max_cpt. Automatic paid retries are disabled until a funded platform treasury is available, so no retry work is charged to the task owner.',
           formula: 'max_cpt = whole-task charge cap, fee included\nreplica_budget = equal deterministic integer shares of fee-exclusive budget\ncharged_cpt = aggregate_valid_replica_usage + 10% fee\ncharged_cpt ≤ max_cpt\nrefund_cpt = held_cpt − charged_cpt\nexample: max_cpt=100 → 30 CPT × 3 replicas; worst-case hold=99 CPT',
           rows: [
@@ -528,7 +528,7 @@ const definitions = {
     hero: {
       badge: '官方網站',
       title: '在共享網路上執行工作',
-      body: '設定包含平台費的整份工作最高收費，再讓 Hivemind 選擇可用的電腦。managed-function-v1 預設由三個副本確定性分配執行額度；網路會先驗證執行證據再結算。',
+      body: '設定包含平台費的整份工作最高收費，再讓 Hivemind 選擇可用的電腦。hcode 預設由三個副本確定性分配執行額度；網路會先驗證執行證據再結算。',
       primaryCta: '建立帳號',
       secondaryCta: '閱讀文件',
       bullets: [
@@ -689,7 +689,7 @@ const definitions = {
         ],
         taskFields: [
           { name: 'task_id', type: 'string', required: '必填', note: `僅限 ASCII 字母、數字與 - _ .，不可含 ".."，長度上限 ${LIMITS.taskIdBytes}。` },
-          { name: 'runtime', type: 'string', required: '必填', note: '必須是 managed-function-v1。managed-function-v0 已退役，新工作會被拒絕。' },
+          { name: 'runtime', type: 'string', required: '必填', note: '必須是 hcode。managed-function-v0 已退役，新工作會被拒絕。' },
           { name: 'task_source', type: 'string', required: '必填', note: `managed function 原始碼，上限 ${LIMITS.taskSourceBytes}。` },
           { name: 'torrent', type: 'string', required: '必填', note: `JSON 輸入文件，以字串傳入，在函式中以 input 取用，上限 ${LIMITS.jsonInputBytes}。` },
           { name: 'max_cpt', type: 'integer', required: '必填', note: '正整數的整份任務最高收費，包含 10% 平台費與所有副本（預設三個）。扣除費用後的執行額度會確定性地分成相同整數副本額度；餘額留在任務擁有者帳戶。' },
@@ -702,7 +702,7 @@ const definitions = {
           { name: 'location', type: 'string', required: '選填', note: '偏好的 worker 位置標籤。' },
         ],
         language: {
-          intro: 'managed-function-v1 是目前支援的 managed 工作格式。它是一個小型、會計量的語言：max_cpt 是包含費用的整份工作最高收費，預設三個副本會確定性地平分扣除平台費後的執行額度。結構性安全限制仍受約束，且沒有任何管道可以碰到宿主機。',
+          intro: 'hcode 是目前支援的 managed 工作格式。它是一個小型、會計量的語言：max_cpt 是包含費用的整份工作最高收費，預設三個副本會確定性地平分扣除平台費後的執行額度。結構性安全限制仍受約束，且沒有任何管道可以碰到宿主機。',
           statements: [
             'let name = expression;',
             'fn name(a, b) { return expression; }',
@@ -761,7 +761,7 @@ const definitions = {
           { id: 'submitRate', name: '每分鐘送出次數', value: `每帳號 ${LIMITS.submitPerMinute} 次`, note: '預設值，超過回傳 429。' },
         ],
         billing: {
-          title: 'managed-function-v1 怎麼結算',
+          title: 'hcode 怎麼結算',
           body: 'V1 依有效副本的實際執行量結算，而不是看牆鐘時間。max_cpt 是整份任務的最高總收費，包含 10% 平台費。預設三個副本會從扣除費用後的額度中取得相同且確定性的整數執行預算；餘額留在任務擁有者帳戶。Nodepool 合計有效用量與費用，總扣款不會超過 max_cpt。平台資金池尚未備妥前，自動付費重試會停用，不會向任務擁有者收取重試用量。',
           formula: 'max_cpt = 整份任務最高收費，含費用\nreplica_budget = 扣除費用後額度的相同確定性整數分配\ncharged_cpt = 有效副本用量合計 + 10% 費用\ncharged_cpt ≤ max_cpt\nrefund_cpt = held_cpt − charged_cpt\n例如：max_cpt=100 → 每個副本 30 CPT；最壞情況保留 99 CPT',
           rows: [

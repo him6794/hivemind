@@ -3,7 +3,7 @@ param(
     [Parameter(Mandatory = $true)][string]$Token,
     [Parameter(Mandatory = $true)][string]$TaskSourcePath,
     [string]$TaskInputPath,
-    [ValidateSet("managed-function-v1")][string]$Runtime = "managed-function-v1",
+    [ValidateSet("hcode")][string]$Runtime = "hcode",
     [int[]]$WorkerCounts = @(3, 5),
     [int[]]$TaskCounts = @(10, 100),
     [int]$CpuScore = 1,
@@ -259,7 +259,7 @@ function Invoke-HivemindSmokeBenchmark {
     function Submit-HivemindTask {
         param([Parameter(Mandatory = $true)][string]$TaskId)
 
-        # managed-function-v1 tasks carry their JSON input in the `torrent` field;
+        # hcode tasks carry their JSON input in the `torrent` field;
         # Nodepool stores it verbatim as the task input reference.
         $body = [ordered]@{
             task_id     = $TaskId
@@ -303,7 +303,7 @@ function Invoke-HivemindSmokeBenchmark {
             throw "Could not read the worker list before ${scenario}: $($_.Exception.Message)"
         }
         if ($workers.Count -lt $workerTarget) {
-            throw "Scenario ${scenario} requires at least $workerTarget registered Workers for managed-function-v1 consensus; observed $($workers.Count)."
+            throw "Scenario ${scenario} requires at least $workerTarget registered Workers for hcode consensus; observed $($workers.Count)."
         }
 
         $scenarioRows = New-Object System.Collections.Generic.List[object]

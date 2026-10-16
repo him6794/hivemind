@@ -51,7 +51,7 @@ function New-TestBenchmarkRow {
     }
 }
 
-Assert-Equal -Expected "managed-function-v1" -Actual $Runtime -Message "The benchmark must default to the active V1 runtime."
+Assert-Equal -Expected "hcode" -Actual $Runtime -Message "The benchmark must default to the active V1 runtime."
 Assert-Equal -Expected 3 -Actual $WorkerCounts[0] -Message "The first default scenario must require three workers."
 Assert-Equal -Expected 5 -Actual $WorkerCounts[1] -Message "The second default scenario must require five workers."
 Assert-Equal -Expected 10 -Actual $TaskCounts[0] -Message "The first default scenario must submit ten tasks."

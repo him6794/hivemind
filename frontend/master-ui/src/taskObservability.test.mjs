@@ -7,7 +7,7 @@ test('normalizes managed-v1 retry counter and task billing fields separately', (
     normalizeTaskObservability({
       worker_id: 'worker-a',
       provider_user: 'alice',
-      runtime: 'managed-function-v1',
+      runtime: 'hcode',
       managed_consensus: { state: 'no_quorum', votes_received: 1, replica_count: 3 },
       dispatch_status: 'REDISPATCHED',
       retry_count: 2,
@@ -35,7 +35,7 @@ test('uses managed-v1 retry-counter terminology when dispatch fields are absent'
   assert.deepEqual(
     normalizeTaskObservability({
       worker_ip: '10.0.0.4',
-      runtime: 'managed-function-v1',
+      runtime: 'hcode',
       retry_count: 1,
       managed_executed_ops: 12,
       max_cpt: 20,
@@ -64,7 +64,7 @@ test('keeps unknown, invalid, and negative metrics distinct from genuine zero', 
 
   for (const invalid of [undefined, null, '', '  ', 'invalid', -1, NaN, Infinity, true]) {
     const observability = normalizeTaskObservability({
-      runtime: 'managed-function-v1',
+      runtime: 'hcode',
       retry_count: invalid,
       usage_units: invalid,
       managed_executed_ops: invalid,
@@ -104,7 +104,7 @@ test('falls back from unavailable usage_units to valid managed execution ops', (
 
 test('preserves genuine zero usage, cap, and settled charge values', () => {
   const observability = normalizeTaskObservability({
-    runtime: 'managed-function-v1',
+    runtime: 'hcode',
     status: 'COMPLETED',
     retry_count: 0,
     usage_units: 0,
@@ -137,7 +137,7 @@ test('distinguishes pending charges, settled unknown charges, and charged zero',
 
 test('flags historical v1 charges above the new cap without clamping actual billing', () => {
   const observability = normalizeTaskObservability({
-    runtime: 'managed-function-v1',
+    runtime: 'hcode',
     max_cpt: 100,
     billed_amount: 960,
     billing_settled: true,
@@ -150,13 +150,13 @@ test('flags historical v1 charges above the new cap without clamping actual bill
 
 test('uses neutral progress when a failed v1 task has no consensus details', () => {
   assert.equal(
-    normalizeTaskObservability({ runtime: 'managed-function-v1', status: 'FAILED' }).dispatchStatus,
+    normalizeTaskObservability({ runtime: 'hcode', status: 'FAILED' }).dispatchStatus,
     'UNKNOWN'
   );
-  assert.equal(normalizeTaskObservability({ runtime: 'managed-function-v1' }).dispatchStatus, 'UNKNOWN');
+  assert.equal(normalizeTaskObservability({ runtime: 'hcode' }).dispatchStatus, 'UNKNOWN');
   assert.equal(
     normalizeTaskObservability({
-      runtime: 'managed-function-v1',
+      runtime: 'hcode',
       managed_consensus: { state: 'stop_pending', votes_received: 1, replica_count: 3 },
     }).dispatchStatus,
     'STOP_PENDING'
