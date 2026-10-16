@@ -56,7 +56,7 @@ pub fn parse_cli_args(args: &[String]) -> Result<CliCommand> {
         .get(2)
         .ok_or_else(|| {
             anyhow!(
-                "Usage: hivemind submit <function-source> --username <user> --password <pass> [--input <json>|--input-file <path>] [--task-id <id>]"
+                "Usage: hivemind submit <function-source> --username <user> --password <pass> [--input <json>] [--task-id <id>]"
             )
         })?
         .clone();
@@ -695,6 +695,26 @@ pub fn format_task_result(body: &serde_json::Value) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn submit_usage_documents_inline_input_and_rejects_input_file() {
+        let args = vec!["hivemind".to_string(), "submit".to_string()];
+        let usage = parse_cli_args(&args)
+            .expect_err("missing source should display usage")
+            .to_string();
+        assert!(usage.contains("[--input <json>]"));
+        assert!(!usage.contains("--input-file"));
+
+        let args = vec![
+            "hivemind".to_string(),
+            "submit".to_string(),
+            "sum.hdsl".to_string(),
+            "--input-file".to_string(),
+            "input.json".to_string(),
+        ];
+        let err = parse_cli_args(&args).expect_err("input-file is not a supported submit flag");
+        assert_eq!(err.to_string(), "unknown submit flag --input-file");
+    }
 
     #[test]
     fn parses_submit_function_with_resource_and_budget_flags() {
