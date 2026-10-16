@@ -167,6 +167,41 @@ fn hcode_gpu_rejects_retired_runtime_and_derived_contract_ids() {
 }
 
 #[test]
+fn hcode_gpu_rejects_retired_result_and_device_protocols() {
+    let request = request();
+    let mut capability = capability("gpu-a", 0, "GPU-aaaaaaaa");
+    let registration = registration(vec![capability.clone()]);
+    let mut result = completed_result(&request, &registration);
+    let mut requirement = request.gpu_requirement.clone();
+
+    assert_eq!(result.protocol_version, "hcode-gpu-result-v1");
+    assert_eq!(capability.protocol_version, "hcode-gpu-capability-v1");
+    assert_eq!(requirement.protocol_version, "hcode-gpu-requirement-v1");
+    result.validate_against(&request, &registration).unwrap();
+    capability.validate().unwrap();
+    requirement.validate().unwrap();
+
+    result.protocol_version = "managed-function-gpu-result-v1".into();
+    assert_eq!(
+        result
+            .validate_against(&request, &registration)
+            .unwrap_err()
+            .code,
+        general_compute_runtime::ValidationErrorCode::ResultBindingMismatch
+    );
+    capability.protocol_version = "managed-function-gpu-capability-v1".into();
+    assert_eq!(
+        capability.validate().unwrap_err(),
+        "managed GPU capability protocol is unsupported"
+    );
+    requirement.protocol_version = "managed-function-gpu-requirement-v1".into();
+    assert_eq!(
+        requirement.validate().unwrap_err(),
+        "managed GPU requirement protocol is unsupported"
+    );
+}
+
+#[test]
 fn request_rejects_generic_semantics_and_cpu_fallback() {
     let mut digest_request = request();
     digest_request.semantics_manifest_sha256 = format!("sha256:{}", "b".repeat(64));
