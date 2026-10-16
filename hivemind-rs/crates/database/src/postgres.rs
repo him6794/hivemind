@@ -1947,7 +1947,7 @@ mod tests {
                  reserved_usage_cpt, reserved_fee_cpt, held_total_cpt,
                  state, terminal_outcome, billing_version, cost_model_version,
                  settlement_basis)
-             VALUES ($1, $2, $3, 'guard-owner', $7, 2, 24, 2, 26,
+             VALUES ($1, $2, $3, 'guard-owner', 12, 2, 24, 2, 26,
                      $4, 'no_quorum', $5, $6, 'accepted-replica-executed-ops')",
         )
         .bind(Uuid::new_v4())
@@ -1956,11 +1956,6 @@ mod tests {
         .bind(state)
         .bind(billing_version)
         .bind(cost_model_version)
-        .bind(if billing_version == OLD_BILLING_V2 {
-            26_i64
-        } else {
-            12_i64
-        })
         .execute(pool)
         .await
         .unwrap();
