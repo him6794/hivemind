@@ -8,7 +8,7 @@ The canonical supplied light/dark OKLCH tokens live in `frontend/shadcn-theme.cs
 
 `frontend/desktop/` holds the canonical Master/Worker lifecycle templates. The clients intentionally contain local copies, not imports outside their build contexts. Update the canonical files and both client copies together. The generator preserves existing files rather than overwriting local customizations; rerunning it does not propagate edits into existing copies. The parity tests detect drift.
 
-Authentication and product boundaries are unchanged: the website stays an account center, Master owns task operations, and Worker owns local computer operations. Bearer sessions are not persisted in localStorage; only theme preferences are.
+Authentication and product boundaries are unchanged: the website stays an account center, Master owns task operations, and Worker owns local computer operations. Bearer sessions are not persisted in localStorage. Browser theme and language preferences use localStorage; native language persistence uses the separate store below.
 
 ## Motion and window lifecycle
 
@@ -22,7 +22,11 @@ Ownership and activation use separate non-inheritable, remote-rejecting named pi
 
 The pipe DACL is a Windows logon-session boundary, not executable authentication. Processes under the same logon SID are trusted: a malicious same-logon process can pre-create the predictable owner/activation endpoints, return a false activation acknowledgment, and receive the targeted foreground permission. Resistance to such local pipe squatting is outside this boundary; the singleton protocol does not grant Nodepool authentication or cross-user privileges.
 
-The helper's native WebView2 message channel accepts only fixed window actions, an exact loopback sender origin, and its per-instance nonce. Messages are JSON **text**, not JavaScript objects, because the existing Wry message receiver accepts only strings. No generic Tauri permissions or HTTP shutdown endpoint are granted.
+The helper's native WebView2 message channels accept only fixed window actions and language preference reads/writes, an exact loopback sender origin, and a private per-instance nonce. Messages are JSON **text**, not JavaScript objects, because the existing Wry message receiver accepts only strings. Each channel has a strict schema and a 512-byte limit. Locale replies also carry a per-document correlation token so replies from before a reload cannot settle new requests. No generic Tauri permissions, filesystem API, or HTTP shutdown endpoint are granted.
+
+The WebView remains incognito with DevTools disabled. Only the language (`en` or `zh`, exactly two bytes) persists at `%LOCALAPPDATA%\Hivemind\ui-preferences\<master|worker>\<UI port>\locale.v1`. The role comes from the native entrypoint and the port from the validated loopback URL; JavaScript cannot select a path, role, or port. `LOCALAPPDATA` must be absolute; missing or invalid roots fail without falling back to the working directory. Reads use the current file, and writes flush a new same-directory temporary file before atomically replacing the old one. This does not guarantee recovery from every filesystem or power-loss failure.
+
+Native clients wait for their initial locale read before mounting the application. A missing preference defaults to English; a failed read also defaults to English and shows an error, without writing a replacement. Language changes update context without remounting the application or restarting authentication/bootstrap. A save is confirmed only after the native write acknowledgment. Quit waits for pending saves; if saving fails or times out, the first Quit shows a warning and a second explicit Quit permits exit. Login tokens, sessions, forms, theme, and other WebView storage are not included in this preference store.
 
 Confirmed Quit emits a private stdout marker to the owning backend. EOF or malformed markers do not request a backend shutdown. The backend also observes this signal during initialization so a stalled startup cannot prevent Quit. A small native fallback dialog remains usable when React has not loaded or its bundle fails. Its explicit viewport positioning resists frontend CSS resets, and its entrance/exit animations respect reduced motion. Pending actions, including Escape, are coalesced; failed actions restore visibility and permit retry.
 
@@ -39,7 +43,7 @@ npm --prefix frontend test
 npm --prefix frontend/master-ui test
 npm --prefix frontend/worker-ui test
 npm --prefix frontend run test:ui-contract
-node --test scripts/native-ui-bridge.test.mjs
+node --test scripts/native-ui-bridge.test.mjs scripts/native-ui-smoke.test.mjs
 npm --prefix frontend run test:ui
 ```
 
@@ -51,10 +55,13 @@ For an interactive Windows desktop with WebView2 installed and ports 8082/18080 
 cargo build --manifest-path hivemind-rs/Cargo.toml -p hivemind-bin --no-default-features --features master-webview,worker-webview --bins
 node scripts/native-ui-smoke.mjs
 node scripts/native-ui-runtime-smoke.mjs
+node scripts/native-ui-locale-smoke.mjs
 ```
 
 The native harness uses real WM_CLOSE, Windows UI Automation, and clicks the actual notification-area icon. Screenshots use the client's own HWND, not the foreground desktop. It also checks early close, a missing React bundle, and parent-pipe EOF. The runtime harness launches the dedicated Master and Worker binaries in unique temporary directories with a filtered environment, updates disabled, and an isolated loopback upstream. It verifies that background preserves the real HTTP service, repeated EXE launches (including copied directories) restore the same backend/helper/HWND, minimized windows are restored, distinct roles/UI ports coexist, and Quit closes the listener and permits a fresh restart.
 
-To verify fresh packaged clients instead of debug executables, set `HIVEMIND_NATIVE_MASTER_BUNDLE` and `HIVEMIND_NATIVE_WORKER_BUNDLE` to their separate bundle directories before running `native-ui-runtime-smoke.mjs`. The harness copies the entire bundles into isolated temporary directories and uses their bundled UI assets. Use only fresh, unlaunched bundles without credentials or runtime state. `HIVEMIND_NATIVE_EVIDENCE_DIR` optionally selects a separate evidence directory.
+To verify fresh packaged clients instead of debug executables, set `HIVEMIND_NATIVE_MASTER_BUNDLE` and `HIVEMIND_NATIVE_WORKER_BUNDLE` to their separate bundle directories before running the native harnesses. The harnesses copy the entire bundles into isolated temporary directories and use their bundled UI assets. Use only fresh, unlaunched bundles without credentials or runtime state. `HIVEMIND_NATIVE_EVIDENCE_DIR` optionally selects a separate evidence directory. Run native suites sequentially on the interactive desktop.
+
+All native harnesses isolate `LOCALAPPDATA` in fresh temporary roots rather than reading or changing the operator's preferences. The locale harness requires both bundle overrides and uses UI Automation to select languages and completely quit/restart the real clients, reusing only its own preference root for persistence checks. It also checks rapid selection before Quit, moving the extracted bundle, role/port separation, and actual filesystem failure with the second-Quit escape. A separate same-origin helper fixture first seeds synthetic session tokens and general localStorage, then verifies that a full helper restart clears them while preserving language. This fixture does not authenticate a real account. Browser reload alone is not evidence of native cross-process persistence.
 
 Browser evidence is written under `test_logs/frontend-ui/`, including `results.json`; native evidence uses `test_logs/native-ui/`, including `*-result.json`. Override these locations with `HIVEMIND_E2E_EVIDENCE_DIR` and `HIVEMIND_NATIVE_EVIDENCE_DIR` respectively. These checks do not use real account credentials, register a live worker, submit work, or verify consensus/billing settlement. Database-backed Rust tests require an explicitly attached test database; a green run without one is not settlement evidence.

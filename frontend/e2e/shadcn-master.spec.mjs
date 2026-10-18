@@ -1,5 +1,6 @@
 import { expect, test } from '@playwright/test';
 import { waitForStableDisplay } from './shadcn-display.mjs';
+import { nativeLocaleContract } from './native-locale-contract.mjs';
 
 const masterUiUrl = process.env.HIVEMIND_MASTER_UI_URL || 'http://127.0.0.1:4173';
 const existingTaskId = 'browser-open-task';
@@ -210,6 +211,8 @@ test.afterEach(async ({ page }, testInfo) => {
 });
 
 test.describe('production Master shadcn UI regression', () => {
+  nativeLocaleContract({ role: 'master', url: masterUiUrl, installMockApi });
+
   test('switches to Traditional Chinese without resetting drafts, sessions or raw task output', async ({ page }) => {
     const fixture = await installMockApi(page);
     fixture.log = 'Sign in';

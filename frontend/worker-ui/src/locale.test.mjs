@@ -1,8 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { LOCALES, createFormatters, errorMessage, localeError, localeTag, message, normalizeLocale, readLocale, saveLocale, t } from './locale.mjs';
+import { LOCALES, createFormatters, createLocaleAdapter, errorMessage, localeError, localeTag, message, normalizeLocale, readLocale, saveLocale, t } from './locale.mjs';
 import { getWorkerSetupErrorMessage, WorkerFetchTimeoutError, WorkerLoginError, WorkerStartupError } from './workerStartup.mjs';
 import { PROVIDER_CREDITS_DETAIL, PROVIDER_CREDITS_LABEL } from './workerDashboard.mjs';
+import { testNativeLocaleAdapter } from '../../desktop/localeAdapter.contract.mjs';
+
+testNativeLocaleAdapter(createLocaleAdapter);
 
 test('English is the default and only supported locales are accepted', () => {
   for (const value of [null, undefined, '', 'fr', 'zh-TW', '__proto__']) {

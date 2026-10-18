@@ -5,6 +5,7 @@ param(
     [string]$Screenshot
 )
 $ErrorActionPreference = 'Stop'
+[Console]::OutputEncoding = New-Object System.Text.UTF8Encoding $false
 $client = [System.Diagnostics.Process]::GetProcessById($ClientProcessId)
 if ($client.ProcessName -notin @('hivemind-master-ui', 'hivemind-worker-ui')) {
     throw 'This test helper only controls Hivemind UI helper processes.'

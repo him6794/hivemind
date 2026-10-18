@@ -1,5 +1,6 @@
 import { expect, test } from '@playwright/test';
 import { waitForStableDisplay } from './shadcn-display.mjs';
+import { nativeLocaleContract } from './native-locale-contract.mjs';
 
 const workerUiUrl = process.env.HIVEMIND_WORKER_UI_URL || 'http://127.0.0.1:4174';
 const sessionKey = 'hivemind.worker.session.v1';
@@ -286,6 +287,8 @@ test.afterEach(async ({ page }, testInfo) => {
 });
 
 test.describe('production Worker shadcn UI regression', () => {
+  nativeLocaleContract({ role: 'worker', url: workerUiUrl, installMockApi });
+
   test('preserves the session and raw measurements when switching to Traditional Chinese', async ({ page }) => {
     const fixture = await installMockApi(page);
     fixture.dashboard.assignments[0].usage_basis = 'Unknown';

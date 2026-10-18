@@ -1,5 +1,8 @@
 export const zh = {
   'Language': '語言',
+  'Could not read the language preference. Using English.': '無法讀取語言偏好，暫時使用英文。',
+  'Language changed, but saving could not be confirmed.': '語言已切換，但無法確認是否已儲存。',
+  'Language may not have been saved. Press Quit again to exit.': '語言可能未儲存，再按結束可離開。',
   'Worker console': 'Worker 控制台',
   'Switch to light theme': '切換為淺色主題',
   'Switch to dark theme': '切換為深色主題',

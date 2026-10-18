@@ -7,7 +7,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
-import { until, windowAction } from './native-ui-smoke.mjs';
+import { nativeTestEnvironment, until, windowAction } from './native-ui-smoke.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const evidence = path.join(root, process.env.HIVEMIND_NATIVE_EVIDENCE_DIR || 'test_logs/native-ui');
@@ -99,7 +99,7 @@ async function checkIndependentClient(role, env, port, label, verify) {
   const directory = await mkdtemp(path.join(os.tmpdir(), `hivemind-${role}-${label}-`));
   const bundle = await prepareClient(role, directory);
   env = {
-    ...env,
+    ...await nativeTestEnvironment(env),
     [role === 'master' ? 'MASTER_HTTP_ADDR' : 'WORKER_CONTROL_HTTP_ADDR']: `127.0.0.1:${port}`,
     MASTER_UI_DIR: bundle && role === 'master' ? path.join(directory, 'master-ui') : path.join(root, 'frontend/master-ui/dist'),
     WORKER_UI_DIR: bundle && role === 'worker' ? path.join(directory, 'worker-ui') : path.join(root, 'frontend/worker-ui/dist'),
@@ -116,7 +116,7 @@ async function checkIndependentClient(role, env, port, label, verify) {
     parent.once('error', reject);
   });
   const statusUrl = `http://127.0.0.1:${port}/api/startup-status`;
-  const result = { role, label, directory, backendPid: parent.pid, checks: [] };
+  const result = { role, label, directory, localAppData: env.LOCALAPPDATA, backendPid: parent.pid, checks: [] };
   let helper;
   try {
     await until(async () => {
@@ -159,7 +159,7 @@ async function runRole(role) {
     upstream.listen(0, '127.0.0.1', resolve);
   });
   const safeKeys = new Set(['systemroot', 'windir', 'comspec', 'path', 'temp', 'tmp', 'userprofile', 'localappdata', 'appdata', 'programdata', 'programfiles', 'programfiles(x86)', 'number_of_processors', 'processor_architecture']);
-  const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => safeKeys.has(key.toLowerCase())));
+  const env = await nativeTestEnvironment(Object.fromEntries(Object.entries(process.env).filter(([key]) => safeKeys.has(key.toLowerCase()))));
   const port = role === 'master' ? 8082 : 18080;
   Object.assign(env, {
     NODEPOOL_GRPC_ENDPOINT: `http://127.0.0.1:${upstream.address().port}`,
@@ -189,7 +189,7 @@ async function runRole(role) {
     parent.once('exit', (code, signal) => resolve({ code, signal }));
     parent.once('error', reject);
   });
-  const result = { role, directory, bundle: bundle ? path.resolve(bundle) : null, checks: [] };
+  const result = { role, directory, localAppData: env.LOCALAPPDATA, bundle: bundle ? path.resolve(bundle) : null, checks: [] };
   let helper;
   const statusUrl = `http://127.0.0.1:${port}/api/startup-status`;
   try {

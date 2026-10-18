@@ -1,7 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { LOCALES, errorMessage, localeError, localeTag, message, normalizeLocale, readLocale, saveLocale, t } from './locale.mjs';
+import { LOCALES, createLocaleAdapter, errorMessage, localeError, localeTag, message, normalizeLocale, readLocale, saveLocale, t } from './locale.mjs';
 import { taskListResponseError, taskResponseError } from './taskResponsePolicy.mjs';
+import { testNativeLocaleAdapter } from '../../desktop/localeAdapter.contract.mjs';
+
+testNativeLocaleAdapter(createLocaleAdapter);
 
 const storageKey = 'hivemind.master.locale.v1';
 

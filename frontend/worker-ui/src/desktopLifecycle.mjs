@@ -20,7 +20,7 @@ function withDeadline(operation, timeoutMs) {
   return Promise.race([operation, deadline]).finally(() => clearTimeout(timer));
 }
 
-export function createCloseController({ bridge, setVisibility, delay = 180, timeoutMs = 5000, wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms)) }) {
+export function createCloseController({ bridge, setVisibility, delay = 180, timeoutMs = 10000, wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms)) }) {
   let busy = false;
   return {
     get busy() { return busy; },

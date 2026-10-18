@@ -16,7 +16,10 @@ fn main() {
     if let Some(done) = hivemind_bin::try_benchmark_helper(&args) {
         std::process::exit(i32::from(!done));
     }
-    if let Err(error) = local_ui_webview::run("Hivemind Worker") {
+    if let Err(error) = local_ui_webview::run(
+        "Hivemind Worker",
+        hivemind_client_runtime::ClientRole::Worker,
+    ) {
         let _ = writeln!(std::io::stderr().lock(), "hivemind-worker-ui: {error:#}");
         std::process::exit(1);
     }

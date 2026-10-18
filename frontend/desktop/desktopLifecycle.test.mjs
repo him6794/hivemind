@@ -63,6 +63,19 @@ test('a rejected or timed-out host action restores visible state and permits ret
   assert.equal(controller.busy, false);
 });
 
+test('an unconfirmed locale save leaves the close decision open and preserves its retry error', async () => {
+  let attempts = 0;
+  const { controller, states } = fixture({
+    bridge: () => ({ resolveClose: async () => {
+      if (++attempts === 1) throw Object.assign(new Error('not saved'), { code: 'locale-not-saved' });
+    } }),
+  });
+  await assert.rejects(controller.resolve('quit'), (error) => error.code === 'locale-not-saved');
+  assert.equal(controller.busy, false);
+  assert.equal(await controller.resolve('quit'), true);
+  assert.deepEqual(states, ['closing', 'visible', 'closing', 'visible']);
+});
+
 test('invalid actions cannot reach the host', async () => {
   const { controller, actions } = fixture();
   await assert.rejects(controller.resolve('shell'), /Invalid/);

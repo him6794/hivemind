@@ -63,8 +63,10 @@ export function DesktopLifecycle({ children, role }) {
         dialogOpen.current = false;
         setOpen(false);
       }
-    } catch {
-      if (alive.current) setError('Could not close the window. Try again.');
+    } catch (error) {
+      if (alive.current) setError(error?.code === 'locale-not-saved'
+        ? 'Language may not have been saved. Press Quit again to exit.'
+        : 'Could not close the window. Try again.');
     } finally {
       if (alive.current) setPending(false);
     }

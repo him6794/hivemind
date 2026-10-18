@@ -12,7 +12,10 @@ mod local_ui_webview;
 
 #[cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))]
 fn main() {
-    if let Err(error) = local_ui_webview::run("Hivemind Master") {
+    if let Err(error) = local_ui_webview::run(
+        "Hivemind Master",
+        hivemind_client_runtime::ClientRole::Master,
+    ) {
         let _ = writeln!(std::io::stderr().lock(), "hivemind-master-ui: {error:#}");
         std::process::exit(1);
     }

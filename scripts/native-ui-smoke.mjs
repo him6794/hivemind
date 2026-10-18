@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
 import { spawn, execFile } from 'node:child_process';
 import { createServer } from 'node:http';
-import { readFile, mkdir, writeFile } from 'node:fs/promises';
+import { readFile, mkdir, mkdtemp, writeFile } from 'node:fs/promises';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
@@ -11,6 +12,12 @@ const exec = promisify(execFile);
 const evidence = path.join(root, process.env.HIVEMIND_NATIVE_EVIDENCE_DIR || 'test_logs/native-ui');
 const mime = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css', '.svg': 'image/svg+xml', '.png': 'image/png', '.ico': 'image/x-icon' };
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+async function nativeTestEnvironment(source = process.env) {
+  const env = Object.fromEntries(Object.entries(source).filter(([key]) => key.toLowerCase() !== 'localappdata'));
+  env.LOCALAPPDATA = await mkdtemp(path.join(os.tmpdir(), 'hivemind-native-preferences-'));
+  return env;
+}
 
 async function until(check, label, timeout = 25_000) {
   const deadline = Date.now() + timeout;
@@ -79,12 +86,18 @@ async function runRole(role) {
     ? path.join(path.resolve(bundle), `hivemind-${role}-ui.exe`)
     : path.join(root, `hivemind-rs/target/debug/hivemind-${role}-ui.exe`);
   const children = [];
-  const result = { role, checks: [], requests };
+  const preferenceRoots = [];
+  const testEnv = async () => {
+    const env = await nativeTestEnvironment();
+    preferenceRoots.push(env.LOCALAPPDATA);
+    return env;
+  };
+  const result = { role, checks: [], requests, preferenceRoots };
   let child;
   let stdout = '';
   let stderr = '';
   try {
-    child = spawn(executable, [url], { stdio: ['pipe', 'pipe', 'pipe'] });
+    child = spawn(executable, [url], { env: await testEnv(), stdio: ['pipe', 'pipe', 'pipe'] });
     children.push(child);
     child.stdout.on('data', (chunk) => { stdout += chunk; });
     child.stderr.on('data', (chunk) => { stderr += chunk; });
@@ -133,7 +146,7 @@ async function runRole(role) {
     assert.equal(requests.some((request) => request.startsWith('/__hivemind_desktop__/')), false);
     result.checks.push('explicit Quit emits private parent shutdown marker and exits cleanly; no control HTTP requests');
 
-    const eofChild = spawn(executable, [url], { stdio: ['pipe', 'pipe', 'pipe'] });
+    const eofChild = spawn(executable, [url], { env: await testEnv(), stdio: ['pipe', 'pipe', 'pipe'] });
     children.push(eofChild);
     let eofOutput = '';
     eofChild.stdout.on('data', (chunk) => { eofOutput += chunk; });
@@ -146,7 +159,7 @@ async function runRole(role) {
     result.checks.push('closing the private parent lifetime pipe stops helper without requesting backend quit');
 
     fixtureMode = 'missing-bundle';
-    child = spawn(executable, [url], { stdio: ['pipe', 'pipe', 'pipe'] });
+    child = spawn(executable, [url], { env: await testEnv(), stdio: ['pipe', 'pipe', 'pipe'] });
     children.push(child);
     let fallbackOutput = '';
     child.stdout.on('data', (chunk) => { fallbackOutput += chunk; });
@@ -196,7 +209,7 @@ async function runRole(role) {
   }
 }
 
-export { until, windowAction };
+export { nativeTestEnvironment, until, windowAction };
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   if (process.platform !== 'win32') throw new Error('Native UI smoke testing requires Windows.');

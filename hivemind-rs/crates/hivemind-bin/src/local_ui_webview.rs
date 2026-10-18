@@ -1,4 +1,9 @@
 use anyhow::{anyhow, Context, Result};
+use hivemind_client_runtime::ClientRole;
+
+#[path = "local_ui_locale.rs"]
+mod locale;
+use locale::{Locale, LocaleStore};
 use std::ffi::OsString;
 use std::io::{Read, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -39,6 +44,51 @@ struct WindowMessage {
     id: u32,
 }
 
+#[derive(serde::Deserialize)]
+#[serde(tag = "action", rename_all = "lowercase", deny_unknown_fields)]
+enum LocaleMessage {
+    Read {
+        channel: String,
+        nonce: String,
+        page: String,
+        id: u32,
+    },
+    Write {
+        channel: String,
+        nonce: String,
+        page: String,
+        id: u32,
+        locale: Locale,
+    },
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum LocaleAction {
+    Read,
+    Write(Locale),
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct LocaleRequest {
+    action: LocaleAction,
+    page: String,
+    id: u32,
+}
+
+impl LocaleRequest {
+    fn response(&self, result: Result<Option<Locale>>) -> serde_json::Value {
+        match result {
+            Ok(locale) => serde_json::json!({
+                "page": self.page, "id": self.id, "ok": true, "locale": locale,
+            }),
+            Err(error) => {
+                eprintln!("Local UI locale preference failed: {error:#}");
+                serde_json::json!({"page": self.page, "id": self.id, "ok": false})
+            }
+        }
+    }
+}
+
 struct WindowLifecycle {
     origin: LocalUiOrigin,
     nonce: String,
@@ -54,9 +104,13 @@ impl WindowLifecycle {
         }
     }
 
+    fn allows_message(&self, source: &str, message: &str) -> bool {
+        message.len() <= 512
+            && Url::parse(source).is_ok_and(|source| self.origin.allows_navigation_to(&source))
+    }
+
     fn parse_message(&self, source: &str, message: &str) -> Option<(WindowAction, u32)> {
-        let source = Url::parse(source).ok()?;
-        if !self.origin.allows_navigation_to(&source) || message.len() > 512 {
+        if !self.allows_message(source, message) {
             return None;
         }
         let message: WindowMessage = serde_json::from_str(message).ok()?;
@@ -65,6 +119,38 @@ impl WindowLifecycle {
             return None;
         }
         Some((message.action, message.id))
+    }
+
+    fn parse_locale_message(&self, source: &str, message: &str) -> Option<LocaleRequest> {
+        if !self.allows_message(source, message) {
+            return None;
+        }
+        let (channel, nonce, page, id, action) = match serde_json::from_str(message).ok()? {
+            LocaleMessage::Read {
+                channel,
+                nonce,
+                page,
+                id,
+            } => (channel, nonce, page, id, LocaleAction::Read),
+            LocaleMessage::Write {
+                channel,
+                nonce,
+                page,
+                id,
+                locale,
+            } => (channel, nonce, page, id, LocaleAction::Write(locale)),
+        };
+        if channel != "hivemind-locale-v1"
+            || nonce != self.nonce
+            || id == 0
+            || page.len() != 32
+            || !page
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            return None;
+        }
+        Some(LocaleRequest { action, page, id })
     }
 
     fn initialization_script(&self) -> Result<String> {
@@ -151,6 +237,22 @@ fn handle_window_action(
     if ok && action == WindowAction::Quit {
         app.exit(0);
     }
+}
+
+fn handle_locale_action(app: &AppHandle, store: &LocaleStore, request: LocaleRequest) {
+    let Some(window) = app.get_webview_window(WINDOW_LABEL) else {
+        return;
+    };
+    let result = match request.action {
+        LocaleAction::Read => store.read(),
+        LocaleAction::Write(locale) => store.write(locale).map(|()| Some(locale)),
+    };
+    // Echo the document token so a delayed reply cannot settle a request after reload.
+    // A successful write response is emitted only after the atomic replacement.
+    let response = request.response(result);
+    let _ = window.eval(format!(
+        "window.dispatchEvent(new CustomEvent('hivemind:locale-response',{{detail:{response}}}))"
+    ));
 }
 
 fn install_tray(app: &AppHandle, lifecycle: Arc<WindowLifecycle>, title: &str) -> Result<()> {
@@ -292,8 +394,9 @@ where
     Ok((url, origin))
 }
 
-pub fn run(window_title: &str) -> Result<()> {
+pub fn run(window_title: &str, role: ClientRole) -> Result<()> {
     let (url, origin) = parse_helper_arguments(std::env::args_os().skip(1))?;
+    let locale_store = Arc::new(LocaleStore::new(role, origin));
     let bootstrap_url = Url::parse(BOOTSTRAP_URL).context("invalid local UI bootstrap URL")?;
     let window_title = window_title.to_owned();
     let lifecycle = Arc::new(WindowLifecycle::new(origin));
@@ -360,6 +463,7 @@ pub fn run(window_title: &str) -> Result<()> {
                         &platform_webview,
                         app_for_webview,
                         lifecycle_for_webview,
+                        locale_store,
                     )
                     .map(|()| {
                         // The only non-loopback navigation is the inert bootstrap page.
@@ -394,6 +498,7 @@ fn configure_native_webview(
     webview: &tauri::webview::PlatformWebview,
     app: AppHandle,
     lifecycle: Arc<WindowLifecycle>,
+    locale_store: Arc<LocaleStore>,
 ) -> Result<()> {
     let core = unsafe { webview.controller().CoreWebView2() }
         .context("failed to access the WebView2 controller")?;
@@ -416,9 +521,16 @@ fn configure_native_webview(
                     let app = app.clone();
                     let lifecycle = Arc::clone(&lifecycle);
                     let dispatcher = app.clone();
-                    // Dispatch outside Wry's WebView lock. This channel grants only window actions.
+                    // Dispatch outside Wry's WebView lock. Keep both narrow channels ordered.
                     let _ = dispatcher.run_on_main_thread(move || {
                         handle_window_action(&app, &lifecycle, action, id);
+                    });
+                } else if let Some(request) = lifecycle.parse_locale_message(&source, &message) {
+                    let app = app.clone();
+                    let store = Arc::clone(&locale_store);
+                    let dispatcher = app.clone();
+                    let _ = dispatcher.run_on_main_thread(move || {
+                        handle_locale_action(&app, &store, request);
                     });
                 }
                 Ok(())
@@ -588,6 +700,143 @@ mod tests {
                 lifecycle.parse_message(source, &invalid_message).is_none(),
                 "accepted {invalid_message}"
             );
+        }
+    }
+
+    #[test]
+    fn locale_ipc_requires_exact_source_nonce_channel_and_bounded_document_token() {
+        let lifecycle = WindowLifecycle::new(LocalUiOrigin { port: 8080 });
+        let source = "http://127.0.0.1:8080/";
+        let page = uuid::Uuid::new_v4().simple().to_string();
+        let valid = serde_json::json!({
+            "channel": "hivemind-locale-v1", "nonce": lifecycle.nonce,
+            "page": page, "action": "read", "id": 1,
+        });
+        let encoded = valid.to_string();
+        let request = lifecycle.parse_locale_message(source, &encoded).unwrap();
+        assert_eq!(request.action, super::LocaleAction::Read);
+        assert_eq!(request.page, page);
+        assert_eq!(request.id, 1);
+        assert!(lifecycle.parse_message(source, &encoded).is_none());
+        for invalid_source in [
+            "http://127.0.0.1:8081/",
+            "https://127.0.0.1:8080/",
+            "http://localhost:8080/",
+            "http://user@127.0.0.1:8080/",
+            "http://127.0.0.2:8080/",
+            "about:blank",
+            "https://example.com/",
+        ] {
+            assert!(lifecycle
+                .parse_locale_message(invalid_source, &encoded)
+                .is_none());
+        }
+        for (field, value) in [
+            ("nonce", serde_json::json!("unknown")),
+            ("channel", serde_json::json!("hivemind-window-v1")),
+            ("action", serde_json::json!("shell")),
+            ("id", serde_json::json!(0)),
+            ("id", serde_json::json!(-1)),
+            ("id", serde_json::json!(4294967296_u64)),
+            ("id", serde_json::json!(1.5)),
+            ("page", serde_json::json!("")),
+            ("page", serde_json::json!("a".repeat(31))),
+            ("page", serde_json::json!("a".repeat(33))),
+            ("page", serde_json::json!("A".repeat(32))),
+            ("page", serde_json::json!("g".repeat(32))),
+            ("page", serde_json::json!(null)),
+            ("path", serde_json::json!("locale.v1")),
+            ("role", serde_json::json!("worker")),
+            ("port", serde_json::json!(8081)),
+            ("locale", serde_json::json!("en")),
+        ] {
+            let mut invalid = valid.clone();
+            invalid[field] = value;
+            assert!(
+                lifecycle
+                    .parse_locale_message(source, &invalid.to_string())
+                    .is_none(),
+                "{invalid}"
+            );
+        }
+        for field in ["channel", "nonce", "page", "action", "id"] {
+            let mut invalid = valid.clone();
+            invalid.as_object_mut().unwrap().remove(field);
+            assert!(lifecycle
+                .parse_locale_message(source, &invalid.to_string())
+                .is_none());
+        }
+        let padded = format!("{encoded}{}", " ".repeat(512 - encoded.len()));
+        assert!(lifecycle.parse_locale_message(source, &padded).is_some());
+        assert!(lifecycle
+            .parse_locale_message(source, &(padded + " "))
+            .is_none());
+        assert!(lifecycle
+            .parse_locale_message(source, "invalid-json")
+            .is_none());
+    }
+
+    #[test]
+    fn locale_write_schema_is_strict_and_responses_echo_document_and_request() {
+        let lifecycle = WindowLifecycle::new(LocalUiOrigin { port: 8080 });
+        let source = "http://127.0.0.1:8080/";
+        let page = uuid::Uuid::new_v4().simple().to_string();
+        let valid = serde_json::json!({
+            "channel": "hivemind-locale-v1", "nonce": lifecycle.nonce,
+            "page": page, "action": "write", "id": 42, "locale": "zh",
+        });
+        let request = lifecycle
+            .parse_locale_message(source, &valid.to_string())
+            .unwrap();
+        assert_eq!(
+            request.action,
+            super::LocaleAction::Write(super::Locale::Zh)
+        );
+        assert_eq!(
+            request.response(Ok(Some(super::Locale::Zh))),
+            serde_json::json!({
+                "page": page, "id": 42, "ok": true, "locale": "zh",
+            })
+        );
+        let failed = request.response(Err(anyhow::anyhow!("not saved")));
+        assert_eq!(
+            failed,
+            serde_json::json!({"page": page, "id": 42, "ok": false})
+        );
+        for (field, value) in [
+            ("locale", serde_json::json!("zh-TW")),
+            ("locale", serde_json::json!("EN")),
+            ("locale", serde_json::json!(null)),
+            ("path", serde_json::json!("elsewhere")),
+            ("value", serde_json::json!("zh")),
+            ("action", serde_json::json!("read")),
+        ] {
+            let mut invalid = valid.clone();
+            invalid[field] = value;
+            assert!(lifecycle
+                .parse_locale_message(source, &invalid.to_string())
+                .is_none());
+        }
+        let mut missing_locale = valid;
+        missing_locale.as_object_mut().unwrap().remove("locale");
+        assert!(lifecycle
+            .parse_locale_message(source, &missing_locale.to_string())
+            .is_none());
+    }
+
+    #[test]
+    fn locale_fields_do_not_expand_the_window_message_schema() {
+        let lifecycle = WindowLifecycle::new(LocalUiOrigin { port: 8080 });
+        let mut message = serde_json::json!({
+            "channel": "hivemind-window-v1", "nonce": lifecycle.nonce,
+            "action": "quit", "id": 1,
+        });
+        for (field, value) in [("page", "abcdef"), ("locale", "zh"), ("path", "locale.v1")] {
+            message[field] = serde_json::json!(value);
+            assert!(lifecycle
+                .parse_message("http://127.0.0.1:8080/", &message.to_string())
+                .is_none());
+            message.as_object_mut().unwrap().remove(field);
         }
     }
 
