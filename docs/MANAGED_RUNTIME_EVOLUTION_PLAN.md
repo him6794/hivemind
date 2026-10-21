@@ -816,3 +816,128 @@ Open items:
 - I2 decision (above).
 - Raw CSV, JSON, and log slices are in `C:\hm-bench\results` and are not
   committed.
+
+### Settlement lock-order and deadlock retry checkpoint (2026-10-21)
+
+Commit `27231242`. The deadlock reported above is reproduced by
+`concurrent_settlements_with_reversed_provider_order_do_not_deadlock`. A holder
+transaction pins one provider account, so the first settlement queues on it and
+the second queues behind the first. Each settlement takes its provider accounts in
+replica order, the two form a cycle, and PostgreSQL aborts one of them with
+SQLSTATE 40P01.
+
+RED: the test fails with a deadlock at `a7ac5c25`, the earliest commit tried, at
+`f62f4bfc` (T0.1), and at `8ad89641`, the head before this change. The defect
+predates T0.1 and T1.2. The baseline's ranking kept the bench's replica-to-provider
+mapping stable, which is why the baseline showed no deadlocks. Random selection
+makes the reversed mapping common. The settlement code is unchanged since the
+baseline.
+
+Fix: `lock_user_accounts` in the database crate takes the row locks of every
+account whose balance a transaction changes, in ascending username order, before
+the first balance update. It is applied to the managed v1 usage-only settlement,
+the certified settlement, the legacy managed completion, the general-compute
+completion (the provider lookup moved ahead of the debit), and user transfers.
+The GPU completion already locked its owner and provider in sorted order and was
+left as it was.
+
+Retry: the certified settlement, the no-quorum finalization, the stop-pending
+finalization, the GPU completion, and the general-compute completion retry a
+transaction that fails with 40P01, at most three attempts in total. Each attempt
+starts a new transaction. The retry is insurance; the ordering removes the cycle.
+User transfers have no retry.
+
+GREEN: the regression test passes three times in a row at `27231242`. The
+task-scheduler suite passes (196 tests) with the database attached.
+
+### Certified expired-quorum guard checkpoint (2026-10-21)
+
+Commit `61d9226d`. The expiry path finalized a stopped enforce attempt as
+no-quorum without checking whether its persisted replies already formed a
+certificate. When the certified settlement failed, the usage-only no-quorum path
+settled the hold and failed the task, charging the requester for accepted replica
+usage. All 64 failed head tasks in the T1.4 run had this shape.
+
+`settle_persisted_quorum` rebuilds the certificate from the persisted replies. If
+one exists, it settles it. A failed settlement leaves the attempt active, and the
+next expiry pass retries it. Neither the expiry path nor the in-loop no-quorum path
+finalizes such an attempt. A quorum that never settles stays active, and each pass
+logs a warning. This is deliberate: the task is not failed and the requester is not
+charged.
+
+The same commit fixes `persisted_managed_consensus_observation`. It compared the
+stored digest with the digest of the full result bytes, but the dispatcher stores
+the canonical digest. Every reply that carried usage was rejected, so startup
+recovery ignored all persisted replies. Recovery now resumes from them. This changes
+restart behavior and is covered by the same commit.
+
+RED: `expired_quorum_with_failed_settlement_stays_active_and_unbilled` injects the
+failure at the certificate insert, which only the certified path performs. With the
+guard disabled it fails with "a certified quorum must not be finalized". With the
+guard it passes.
+
+### initial_replicas switch checkpoint (2026-10-21)
+
+Commit `d027a125`. `MANAGED_CONSENSUS_INITIAL_REPLICAS` sets how many replicas an
+enforce-mode hcode attempt dispatches up front. Unset dispatches all
+`MANAGED_CONSENSUS_REPLICA_COUNT` replicas, which is the behavior before lazy
+dispatch existed. A value from quorum up to the replica count enables lazy dispatch.
+
+Separability. Each T1.2 change was checked against `a16c1feb`, the commit before it:
+
+- Dispatch count: read from the config now. Spares are created only when the
+  initial count is below the replica count, as before.
+- Early exit when quorum is unreachable: the one loop change that affected a fully
+  dispatched attempt. The pre-T1.2 loop waited for in-flight replicas. The exit is
+  now limited to lazily dispatched attempts.
+- Settlement count checks (plan, usage-only, certified, stop-pending finalization):
+  a fully dispatched attempt always has exactly `replica_count` replica rows, so the
+  relaxed checks accept and reject the same attempts as the strict ones.
+- Evidence classification existed before T1.2.
+- Vote recording, the stop and drain sequence, and observation handling match the
+  pre-T1.2 loop.
+
+The switch therefore separates without a schema change. The equivalence rests on the
+test suite and this review, not on a trace comparison.
+
+Tests: task-scheduler 197 pass, config 37 pass, the workspace checks, clippy with
+`-D warnings` on the changed crates, and rustfmt.
+
+Documentation: the contract and manual were returned to their previous text
+(`dce1bd76` reverts `b48b80ee`), so the cost-model documents describe the default
+unchanged. The opt-in is documented in `managed-consensus-state.md`, the README, the
+getting-started guide, the public limitations, the smoke benchmark guide, and
+`.env.example` (`12b25406`).
+
+### Cost-model decision (I2), resolved
+
+The replica count still appears in cost-model documentation (manual §8.2 and
+`HCODE_RUNTIME.md`). No identifier was bumped: `hcode-execution-cpt-v1` and the
+manifest digest are unchanged. The switch keeps the default dispatch identical, so
+the documented default stays accurate. A v2 identity waits for a real buyer.
+
+### v2 design memo (deferred)
+
+Not part of this change. Recorded so the decisions are not lost.
+
+- Cost-model v2 (`hcode-execution-cpt-v2`): needs new runtime, cost-model, and
+  manifest identifiers under the manifest's `change_policy`, a drain, and a
+  migration. Only with a real buyer.
+- Default flip of `initial_replicas` to quorum: wait until the burst slot-wait and
+  timeout-latency items below are settled.
+- Failed-task billing: a certified quorum whose settlement fails now stays active
+  and is not billed. A task without a certificate still settles accepted usage
+  through the usage-only path, so a task that times out or disagrees can end FAILED
+  and be billed. Decide whether a FAILED task should be billed at all.
+- Burst slot waits: lazy and full dispatch both wait on Worker slots, and stuck
+  attempts hold reservations until their deadline. Needs per-Worker occupancy
+  instrumentation before any change.
+- Timeout escalation latency: after a timeout the third replica waits for the full
+  deadline. Earlier escalation is a design change and is not applied.
+- Selection: uniform random over the hard filters stays. No weighting.
+
+### Status of the open items above
+
+- Settlement lock order: fixed in `27231242`.
+- Billing for failed tasks: unchanged; see the v2 memo.
+- Burst slot waits: not changed. The rerun below measures them.
