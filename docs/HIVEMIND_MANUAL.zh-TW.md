@@ -40,7 +40,7 @@ Hivemind 是以 Rust 為核心的分散式批次運算 runtime。使用者透過
 | --- | --- |
 | Managed DSL hcode | 封閉 interpreter、計量、執行限制與多 Worker consensus；接受新任務 |
 | Managed DSL v0 | 僅供歷史資料相容讀取；拒絕新提交，未完成舊工作於啟動時退役 |
-| Nodepool consensus | 預設 3 個不同 Worker（enforce 模式先派 2 個，需要時才派第三個）、2 個一致結果；成功 output 需 certificate，不是獨立正確性證明或硬體 usage attestation |
+| Nodepool consensus | 預設 3 個不同 Worker、2 個一致結果；成功 output 需 certificate，不是獨立正確性證明或硬體 usage attestation |
 | CPT 帳務 | Nodepool 管理 hold、有效 usage、fee、payment／refund；CPT 是內部單位，沒有兌換或外部支付網路 |
 | 官網 | 產品入口、註冊、登入與帳號餘額；不提供任務操作或 Worker 控制 |
 | Master UI | 任務提交、查詢、logs、observability、下載與歷史；沒有 API key 管理或任意 ZIP executable 提交 |
@@ -581,8 +581,6 @@ refund  = 99 - 30 = 69
 ```
 
 Provider payout 等於各 replica 的有效 usage；平台費是加在 aggregate usage 上的整數向下取整 10%，不是先對各 provider rounding，也不是從 provider payout 再扣 10%。
-
-**實際扣款與副本派送：** Enforce 模式先派送 quorum 數量（預設 2）的副本，第三個副本只在無法達成 quorum，或 deadline 到期仍沒有 certificate 時才派送。Hold 仍以 `R` 個副本保留，未派送副本的 allowance 在結算時退回。因此沒有分歧或逾時的任務，只對兩個副本的 accepted usage 加手續費計費，而不是三個；出現不一致或逾時副本時，才可能計入第三個副本。每個副本的 allowance 仍由 configured `R` 推導，公式與單一副本的計費方式不變。
 
 Enforce attempt creation 在 transaction 中建立 hold 並調整 payer balance；settlement 不對同一 hold 再扣一次，而是寫帳務、credit providers、refund unused hold。Invalid financial state／provider account／overflow 等檢查不成立時，transaction 不能假裝已完成。
 

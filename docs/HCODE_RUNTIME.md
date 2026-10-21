@@ -85,13 +85,10 @@ are pinned by
 and digest
 `1fb0e736676b6cc9d7090094b0e57e37f691b2b191eda5b9c7298a848bdc9593`.
 
-- Each managed task is assigned to distinct Workers up to the configured
-  replica count (three by default), with a two-replica quorum; at most seven
-  replicas may be configured. Enforce mode dispatches the two-replica quorum
-  first and adds the third replica only when the replicas in flight cannot
-  reach quorum, or when the deadline passes without a certificate. A single
-  Worker cannot establish a quorum or authorize a successful result. Valid work
-  from a lone replica can still be paid and charged when quorum is not reached.
+- Each managed task is assigned to three distinct Workers by default, with a
+  two-replica quorum; at most seven replicas may be configured. A single Worker
+  cannot establish a quorum or authorize a successful result. Valid work from
+  a lone replica can still be paid and charged when quorum is not reached.
 - For a new hcode task, `max_cpt` is the maximum total charge for the entire task,
   including the platform fee and all configured replicas (three by default). It
   is not a per-replica allowance. Nodepool deterministically derives one identical integer execution
@@ -116,10 +113,8 @@ and digest
   certificate participants.
 - Nodepool holds the worst-case charges for the deterministic per-replica
   budgets before enforce-mode dispatch, settles actual accepted usage plus its
-  calculated fee, and refunds unused held CPT. A replica that is never
-  dispatched has no accepted usage, so its allowance is refunded in full.
-  Observe mode records shadow evidence only and never creates a hold or
-  financial ledger mutation.
+  calculated fee, and refunds unused held CPT. Observe mode records shadow
+  evidence only and never creates a hold or financial ledger mutation.
 - Automatic paid retries are disabled; no retry work is charged to the task
   owner. Automatic retries remain off until a funded platform treasury is
   available.
@@ -359,14 +354,6 @@ the default three-replica set, Nodepool assigns the same deterministic integer
 usage budget to each replica from the fee-exclusive cap, leaving any indivisible
 remainder with the owner. A valid divergent replica need not be a certificate
 participant to have its verified work included in the capped task settlement.
-
-The hold is unchanged: it still reserves every configured replica until
-settlement. What changed is how many replicas execute. Enforce mode dispatches
-the two-replica quorum first, so a task that reaches quorum without
-disagreement or timeout is charged for two replicas' accepted usage plus the
-fee, not three. A disagreeing or timed-out replica adds the third replica, and
-that task can then be charged for up to three. Per-replica budgets are derived
-from the configured replica count, so the budget per replica does not change.
 
 No certificate is fabricated merely to justify payment. Accepted terminal
 evidence may settle an enforce-mode hold without a winning certificate, but
