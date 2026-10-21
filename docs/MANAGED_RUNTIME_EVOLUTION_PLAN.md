@@ -640,3 +640,178 @@ Unfinished in Phase 1:
   Workers. No test exercises that path yet.
 - Expected replica counts depend on disagreement and timeout rates, which have
   not been measured.
+
+### T1.4 benchmark checkpoint (2026-10-21)
+
+Local before/after run of the lazy third replica (`2255b79f`, docs at
+`0e6427d4`) against the pre-change baseline `a7ac5c25`, on one Windows host.
+These numbers are non-production and indicative only. This checkpoint closes
+the T1.4 item listed as not run above.
+
+Environment: ASUSTeK ASUSPRO D840MB_M840MB; Intel Core i7-8700 3.20 GHz, 6 cores
+and 12 threads; 31.9 GB RAM; Windows 11 Education 22631; PowerShell 5.1.22621;
+rustc and cargo 1.98.1; PostgreSQL 18.3 and Redis on localhost. Both builds use
+the debug profile with `CARGO_BUILD_JOBS=1`. Binary SHA-256 values are in the
+raw `environment.txt`: base `AA2585E0…`, head `DB124657…`. Consensus settings
+are identical: enforce mode, 3 replicas, quorum 2, 30 s timeout, and
+`MANAGED_CONSENSUS_REQUIRE_DISTINCT_OWNERS=true` (the baseline ignores it).
+
+Setup: one Nodepool, one Master, and three Workers, each under a different
+provider account. Each Worker is reached through a fault proxy in one of three
+modes: `normal`; `wrong` (a wrong result with a valid digest); `timeout` (the
+reply is held for 35 s). Each scenario sets one faulty Worker. The main campaign
+runs 3 repetitions per scenario with 20 tasks per run, base and head
+interleaved. The stress set runs 2 repetitions of the normal path with 60 tasks
+per run. Each run starts from an idle queue.
+
+Metrics: exec/task counts distinct replica IDs that reached a Worker, from the
+proxy log. worker-s/task sums proxy forward durations and excludes held replies.
+billed is `tasks.billed_amount`. Latency is DB `created_at` to `completed_at`
+over completed tasks. Failed tasks have no `completed_at`, so latency percentiles
+exclude them. p95 is nearest-rank.
+
+Main campaign (3 × 20 tasks per cell):
+
+| build | scenario | completed | exec/task | worker-s/task | billed CPT | median s | p95 s | timed-out replicas/task | escalated |
+|---|---|---|---|---|---|---|---|---|---|
+| base | normal | 100.0% | 2.95 | 0.08 | 346.9 | 2.05 | 5.43 | 0.00 | 0.0% |
+| head | normal | 75.0% | 2.00 | 0.03 | 242.0 | 3.51 | 4.23 | 0.00 | 0.0% |
+| base | wrong | 100.0% | 3.00 | 0.05 | 363.0 | 3.32 | 5.04 | 0.00 | 0.0% |
+| head | wrong | 73.3% | 2.65 | 0.05 | 320.7 | 4.40 | 10.57 | 0.00 | 65.0% |
+| base | timeout | 100.0% | 3.00 | 0.05 | 242.0 | 9.79 | 19.69 | 1.00 | 0.0% |
+| head | timeout | 88.3% | 2.63 | 0.04 | 240.0 | 30.17 | 35.07 | 0.63 | 63.3% |
+
+Stress (normal path, 2 × 60 tasks per build):
+
+| build | completed | failed | deadlock log lines | exec/task | median s | p95 s |
+|---|---|---|---|---|---|---|
+| base | 100.0% | 0 | 0 | 2.97 | 2.46 | 2.83 |
+| head | 78.3% | 26 | 26 (13 per run) | 2.00 | 15.53 | 25.43 |
+
+Findings:
+
+1. Replica execution and charge. Head executes fewer replicas in every
+   scenario. On the normal path it executes 2.00 instead of 2.95 and bills 242
+   CPT instead of 347 (−30%). With a wrong result the gap is smaller (2.65 vs
+   3.00; 321 vs 363 CPT). With a timeout it is nearly zero, because the
+   timed-out replica is not billed in either build.
+
+2. Timeout latency is clearly worse: median 30.2 s vs 9.8 s, p95 35.1 s vs 19.7
+   s. A third replica is dispatched only after the 30 s deadline passes without
+   quorum, so a held replica costs the full window. This follows from the
+   escalation design. Nothing was changed.
+
+3. Wrong-result p95 is worse (10.6 s vs 5.0 s), but the sample is small: about
+   45 completed tasks per build. The per-run p95 ranges overlap (4.5–5.1 s), so
+   the gap is not separable at this size.
+
+4. Burst latency is clearly worse: stress p95 25.4 s vs 2.8 s. In the slowest
+   tasks the replies arrived about 0.05 s after dispatch, but dispatch itself was
+   delayed by about 30 s. The Nodepool log shows repeated `consensus Worker …
+   has no available execution slot` warnings, roughly every 5 s, before the
+   attempt was dispatched. Head logs 84–98 such warnings per stress run. The
+   baseline logs none in the same burst. The slot check is the same code in both
+   builds (`task_repository.rs:2222` in base; `ensure_consensus_worker_slot` in
+   head). One candidate cause is that reservations from stuck attempts count
+   against capacity until their deadline. That is not verified, and the first
+   warning came before the first deadlock, so deadlocks do not explain the whole
+   gap.
+
+5. Settlement deadlock. This is the blocking problem.
+   - All 64 failed head tasks share one signature: `FAILED`, `managed consensus
+     deadline exceeded`, `managed_consensus_state = no_quorum`, hold settled, and
+     121–363 CPT billed. Each stress run's Nodepool log holds 13 `deadlock
+     detected` lines and 13 `Managed consensus execution failed` warnings, one per
+     failed task. The main runs have no log slice, so their cause is inferred from
+     the matching DB signature.
+   - The PostgreSQL log shows two transactions, each running `UPDATE users SET
+     balance = balance + $1 ... WHERE username = $2 AND is_active = true AND
+     balance <= $3`, each waiting on the other's row lock. This is the provider
+     credit loop in settlement. It walks payouts sorted by `replica_id`
+     (`task_repository.rs:781`; the baseline sorts the same way at `:719`). What
+     differs is the mapping from `replica-N` to provider account. Uniform
+     selection (`f62f4bfc`) can place replica-1 and replica-2 on different
+     accounts from one task to the next, so two settlements can lock the same two
+     accounts in opposite order. The baseline ranking kept that mapping mostly
+     stable. This is a hypothesis and has not been reproduced in isolation.
+   - When settlement deadlocks after a certificate has formed, the task ends
+     `FAILED`, but the requester is still charged for accepted usage. The path is
+     `settle_managed_v1_hold_without_certificate` with reason `no_quorum`
+     (`task_repository.rs:2981`). The contract allows usage-only settlement, but a
+     billed failed task is a product decision, not only a bug.
+   - The baseline completed 100% of 180 main tasks and 120 stress tasks, and its
+     stress logs contain no deadlock lines.
+
+6. Selection. Replicas are drawn uniformly at random from Workers that pass the
+   hard filters (status, `queue_capacity`, memory), one per provider account. No
+   weighting was added. The degradations above are reported as measured.
+
+Cost-model decision (I2): not applied. It needs a decision.
+
+- Grep result. The replica count appears in `HIVEMIND_MANUAL.zh-TW.md` §8.2
+  (`reserved_usage = R × a`, example `R = 3`) and in `docs/HCODE_RUNTIME.md`
+  ("three distinct Workers by default"). It does not appear in the frozen manifest
+  `hcode-semantics.json` or in its digest `1fb0e736…`. The manifest records only
+  per-replica allowance vocabulary and has no replica or quorum count. Cost
+  vectors, per-replica budget derivation, the fee rule, and settlement inputs are
+  unchanged.
+- Under the rule, the count appears in a cost-model document and the case is
+  undecidable, so the bump applies. It is not a one-string edit. The manifest's
+  `change_policy` is `immutable`, and a replacement publishes new runtime,
+  cost-model, and manifest identifiers. The runtime identifier is `hcode`, which
+  clients submit, so the change needs a drain and a migration. Editing the
+  cost-model ID in place would break that policy. Not applied here.
+- Decision needed: either publish a v2 identity (new runtime, cost-model, and
+  manifest identifiers, with a coordinated upgrade), or record an explicit
+  exception for this dispatch change. Until one is chosen, `2255b79f` should not
+  be deployed.
+- Fee change, documented in `docs/HCODE_RUNTIME.md` and manual §8.2: a normal
+  task is charged for two replicas. The third is charged only after
+  disagreement, timeout, or deadline. The hold still covers every configured
+  replica, and undispatched allowances are refunded.
+
+Known flaky test (pre-existing, not fixed):
+`update::tests::activation_rolls_back_when_replacement_process_cannot_start` in
+`hivemind-client-runtime`. On `a7ac5c25`, ten solo runs each hit the 300 s cap.
+The lazy-third checkpoint recorded 85 of 85 passing for the library run alone,
+so the hang depends on timing. Workspace runs skip it with
+`--skip activation_rolls_back_when_replacement_process_cannot_start`.
+
+Workspace run on the `0e6427d4` source (`b48b80ee` changed only docs since):
+`hivemind-rs` workspace, debug profile, `-j 1`, `HIVEMIND_REQUIRE_TEST_DATABASE=1`
+against `hivemind_test`, `--skip activation_rolls_back_when_replacement_process_cannot_start`.
+Exit code 0. 41 test binaries reported 837 passed, 0 failed, 0 ignored. One test
+was filtered out, the skipped one. The binary that holds it ran 84 of 85 tests.
+Database-backed tests ran against the database, because the require flag turns
+a missing database into a failure. The `executor-rs` workspace was not run as a
+whole in this checkpoint.
+
+Limitations:
+
+- Debug builds. Both builds report `CpuScore 0` (the smoke script's setting), so
+  placement has no CPU term. `benchmark.ps1` reached a ready CPU state, but
+  scoring needs a release build.
+- Worker-seconds sit near the proxy's resolution (0.03–0.13 s per task).
+- Samples are small and variance is high. The base normal per-run median ranges
+  from 1.98 to 5.14 s.
+- Nodepool, Master, Workers, proxies, and PostgreSQL share one host.
+- `scripts/hivemind-smoke-benchmark.ps1` sends `task_source` as `{"value": …}`
+  under Windows PowerShell 5.1, because `Get-Content -Raw` adds note properties.
+  Every submission then returns 422. The bench used a copy that reads the files
+  with `ReadAllText`. The repository script is unchanged.
+- The benchmark Nodepool sets `HIVEMIND_ADMIN_USERS` to the requester so the
+  smoke script can list Workers. Admin status controls listing and admin routes,
+  not scheduling or settlement.
+
+Open items:
+
+- Settlement lock order. Make the credit order deterministic across tasks, for
+  example by provider account name, and add a two-settlement concurrency test.
+  Fix before `2255b79f` is deployed.
+- Billing for failed tasks. Decide whether usage-only settlement applies when a
+  task ends `FAILED`.
+- Burst slot waits. Instrument per-Worker slot occupancy, then decide whether
+  stuck attempts should release reservations earlier.
+- I2 decision (above).
+- Raw CSV, JSON, and log slices are in `C:\hm-bench\results` and are not
+  committed.
