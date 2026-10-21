@@ -29,6 +29,8 @@ use hivemind_proto::{
     WORKER_STATUS_MESSAGE_MAX_BYTES,
 };
 use prost::Message;
+use rand::rngs::StdRng;
+use rand::SeedableRng;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -232,17 +234,15 @@ impl Dispatcher {
                 "Skipping managed consensus workers without a callback or provider identity"
             );
         }
-        let mut candidates = self.rank_workers_by_cache_affinity(task, &eligible).await?;
+        // Worker status and CPU usage are self-reported heartbeat values, so they
+        // do not rank replicas. Every admitted Worker is a candidate and the
+        // replica set is drawn uniformly, with at most one Worker per owner.
+        let candidates = scheduler::eligible_for_task(&selection_task, &eligible, true);
         let required = usize::from(policy.replica_count);
-        let mut selected = Vec::with_capacity(required);
-        for _ in 0..required {
-            let Some(worker) = scheduler::find_best_worker(&selection_task, &candidates).await
-            else {
-                return Ok(None);
-            };
-            candidates.retain(|candidate| candidate.worker_id != worker.worker_id);
-            selected.push(worker);
-        }
+        let mut rng = StdRng::from_entropy();
+        let Some(selected) = scheduler::select_replicas(candidates, required, &mut rng) else {
+            return Ok(None);
+        };
         self.repo
             .create_managed_consensus_attempt(
                 task,
@@ -8183,6 +8183,167 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(active_reservations, 0);
+        fixture.cleanup().await.ok();
+    }
+
+    fn public_managed_dsl_worker(worker_id: &str, owner: &str) -> WorkerNode {
+        let mut worker = make_worker(worker_id, 4, 16, WorkerStatus::Idle);
+        worker.username = owner.into();
+        worker.ip = "127.0.0.1:1".into();
+        let mut report = hivemind_models::WorkerCapabilityReport::public_managed_dsl();
+        for capability in &mut report.capabilities {
+            if capability.runtime == MANAGED_DSL_V1_RUNTIME_VERSION {
+                capability.max_usage_units = 1000;
+            }
+        }
+        let capabilities_json = report.capabilities_json().unwrap();
+        worker.admission_mode = hivemind_models::PUBLIC_DYNAMIC_ADMISSION_MODE.into();
+        worker.dynamic_capabilities_digest = Some(format!(
+            "sha256:{:x}",
+            Sha256::digest(capabilities_json.as_bytes())
+        ));
+        worker.dynamic_capabilities_json = Some(capabilities_json);
+        worker.dynamic_admission_ready = true;
+        worker.dynamic_observed_at = Some(Utc::now());
+        worker
+    }
+
+    #[tokio::test]
+    async fn managed_consensus_dispatch_places_at_most_one_replica_per_owner() {
+        let lock = dispatcher_db_lock();
+        let _guard = lock.lock().await;
+        let Some((db, fixture)) = test_db("dispatcher_consensus_distinct_owners").await else {
+            return;
+        };
+        let repo = Arc::new(TaskRepository::new(db.pool.clone()));
+        let dispatcher = Dispatcher::new(
+            hivemind_database::DatabaseManager {
+                pool: db.pool.clone(),
+            },
+            30,
+            0,
+        )
+        .with_managed_consensus_config(&ManagedConsensusConfig::default());
+        let unique = uuid::Uuid::new_v4().to_string();
+        let owner = format!("dispatcher-distinct-owner-{unique}");
+        sqlx::query(
+            "INSERT INTO users (username, password_hash, balance) VALUES ($1, 'hash', 1000)",
+        )
+        .bind(&owner)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+        let providers: Vec<String> = ["a", "b", "c"]
+            .iter()
+            .map(|label| format!("dispatcher-distinct-provider-{label}-{unique}"))
+            .collect();
+        for provider in &providers {
+            sqlx::query(
+                "INSERT INTO users (username, password_hash, balance) VALUES ($1, 'hash', 0)",
+            )
+            .bind(provider)
+            .execute(&db.pool)
+            .await
+            .unwrap();
+        }
+        // Six Workers in owner order (a, a, b, b, c, c). A first-come selection
+        // would take both of owner a's Workers and violate the owner rule.
+        let mut workers = Vec::new();
+        for (index, provider) in providers.iter().flat_map(|p| [p, p]).enumerate() {
+            let worker_id = format!("dispatcher-distinct-worker-{index}-{unique}");
+            sqlx::query(
+                "INSERT INTO worker_nodes (worker_id, username, ip, cpu_cores, memory_gb,
+                 cpu_score, gpu_score, gpu_memory_gb, storage_total_gb, storage_available_gb)
+                 VALUES ($1, $2, '127.0.0.1:1', 4, 16, 400, 0, 0, 500, 200)",
+            )
+            .bind(&worker_id)
+            .bind(provider)
+            .execute(&db.pool)
+            .await
+            .unwrap();
+            workers.push(public_managed_dsl_worker(&worker_id, provider));
+        }
+
+        let create_task = |task_id: String| {
+            let mut task = make_task(&task_id, TaskStatus::Pending, 0);
+            task.owner = owner.clone();
+            task.runtime = Some(MANAGED_DSL_V1_RUNTIME_VERSION.into());
+            task.task_source = Some("return input".into());
+            task.torrent_source = Some("{}".into());
+            task.deterministic = true;
+            task.max_cpt = 100;
+            task.req_cpu_score = 0;
+            task.req_memory_gb = 0;
+            task.req_storage_gb = 0;
+            task
+        };
+        let task_id = format!("dispatcher-distinct-owner-task-{unique}");
+        let task = repo.create(&create_task(task_id.clone())).await.unwrap();
+        repo.set_managed_consensus_policy(
+            &task_id,
+            u32::from(CONSENSUS_PROTOCOL_VERSION),
+            3,
+            2,
+            "enforce",
+        )
+        .await
+        .unwrap();
+
+        let (_attempt, assignments) = dispatcher
+            .dispatch_managed_consensus(&task, &workers)
+            .await
+            .unwrap()
+            .expect("three distinct owners are eligible");
+        let owner_by_worker: HashMap<&str, &str> = workers
+            .iter()
+            .map(|worker| (worker.worker_id.as_str(), worker.username.as_str()))
+            .collect();
+        let selected_owners: HashSet<&str> = assignments
+            .iter()
+            .map(|assignment| owner_by_worker[assignment.worker_id.as_str()])
+            .collect();
+        assert_eq!(assignments.len(), 3);
+        assert_eq!(
+            selected_owners.len(),
+            3,
+            "replicas must belong to three distinct owners"
+        );
+
+        // With two owners available, replica_count cannot be met. The task stays
+        // pending and no attempt is created, so the replica count is not lowered.
+        let two_owner_task_id = format!("dispatcher-distinct-owner-two-{unique}");
+        let two_owner_task = repo
+            .create(&create_task(two_owner_task_id.clone()))
+            .await
+            .unwrap();
+        repo.set_managed_consensus_policy(
+            &two_owner_task_id,
+            u32::from(CONSENSUS_PROTOCOL_VERSION),
+            3,
+            2,
+            "enforce",
+        )
+        .await
+        .unwrap();
+        let two_owner_workers: Vec<WorkerNode> = workers
+            .iter()
+            .filter(|worker| worker.username != providers[2])
+            .cloned()
+            .collect();
+        assert!(dispatcher
+            .dispatch_managed_consensus(&two_owner_task, &two_owner_workers)
+            .await
+            .unwrap()
+            .is_none());
+        let attempts: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM managed_consensus_attempts WHERE task_id = $1",
+        )
+        .bind(&two_owner_task_id)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+        assert_eq!(attempts, 0);
+
         fixture.cleanup().await.ok();
     }
 

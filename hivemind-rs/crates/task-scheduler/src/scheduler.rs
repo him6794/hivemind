@@ -10,7 +10,9 @@ use hivemind_models::{
     Task, WorkerCapabilityReport, WorkerNode, WorkerRuntimeCapability, WorkerStatus,
     PRIVATE_STATIC_ADMISSION_MODE, PUBLIC_DYNAMIC_ADMISSION_MODE, WORKER_CAPABILITY_REPORT_VERSION,
 };
+use rand::seq::SliceRandom;
 use sha2::{Digest, Sha256};
+use std::collections::HashSet;
 
 pub const PUBLIC_DYNAMIC_CAPABILITY_MAX_AGE_SECS: i64 = 30;
 
@@ -174,107 +176,147 @@ pub fn managed_dsl_snapshot_for_worker(worker: &WorkerNode) -> Option<&str> {
     }
 }
 
-/// Find the best worker for a given task based on resource requirements and availability.
-/// Considers CPU score, GPU score, RAM, VRAM, and storage.
-pub async fn find_best_worker(task: &Task, workers: &[WorkerNode]) -> Option<WorkerNode> {
-    fn effective_i32(hardware: i32, limit: i32) -> i32 {
-        if limit > 0 {
-            hardware.min(limit)
-        } else {
-            hardware
-        }
+fn effective_i32(hardware: i32, limit: i32) -> i32 {
+    if limit > 0 {
+        hardware.min(limit)
+    } else {
+        hardware
     }
+}
 
-    fn effective_i64(hardware: i64, limit: i64) -> i64 {
-        if limit > 0 {
-            hardware.min(limit)
-        } else {
-            hardware
-        }
+fn effective_i64(hardware: i64, limit: i64) -> i64 {
+    if limit > 0 {
+        hardware.min(limit)
+    } else {
+        hardware
     }
+}
 
-    fn measured_scores(w: &WorkerNode) -> (i32, i32) {
-        // The scheduler uses the Nodepool-verified benchmark scores, not the
-        // historical `cpu_score`/`gpu_score` scalars (which the registration
-        // loop zeros because the heuristic was removed). A positive task
-        // requirement with no usable measured score fails closed instead of
-        // matching by default. Computed once per worker per pass, so the
-        // stored report is parsed a single time; the model helper already
-        // drops the CPU score when the provider cap is below the budget.
-        let (cpu, gpu) = w.measured_scores();
-        (cpu.unwrap_or(0), gpu.unwrap_or(0))
-    }
+fn measured_scores(w: &WorkerNode) -> (i32, i32) {
+    // The scheduler uses the Nodepool-verified benchmark scores, not the
+    // historical `cpu_score`/`gpu_score` scalars (which the registration
+    // loop zeros because the heuristic was removed). A positive task
+    // requirement with no usable measured score fails closed instead of
+    // matching by default. Computed once per worker per pass, so the
+    // stored report is parsed a single time; the model helper already
+    // drops the CPU score when the provider cap is below the budget.
+    let (cpu, gpu) = w.measured_scores();
+    (cpu.unwrap_or(0), gpu.unwrap_or(0))
+}
 
-    fn effective_available_memory_gb(w: &WorkerNode) -> i32 {
-        w.available_memory_gb
-            .min(effective_i32(w.memory_gb, w.memory_gb_limit))
-    }
+fn effective_available_memory_gb(w: &WorkerNode) -> i32 {
+    w.available_memory_gb
+        .min(effective_i32(w.memory_gb, w.memory_gb_limit))
+}
 
-    fn effective_available_storage_gb(w: &WorkerNode) -> i64 {
-        w.storage_available_gb
-            .min(effective_i64(w.storage_available_gb, w.storage_gb_limit))
-    }
+fn effective_available_storage_gb(w: &WorkerNode) -> i64 {
+    w.storage_available_gb
+        .min(effective_i64(w.storage_available_gb, w.storage_gb_limit))
+}
 
-    fn accepts_task(w: &WorkerNode, task: &Task, allow_busy: bool) -> bool {
-        let status_ok = if allow_busy {
-            matches!(
-                w.status,
-                WorkerStatus::Active | WorkerStatus::Idle | WorkerStatus::Busy
-            )
-        } else {
-            matches!(w.status, WorkerStatus::Active | WorkerStatus::Idle)
-        };
+fn accepts_task(w: &WorkerNode, task: &Task, allow_busy: bool) -> bool {
+    let status_ok = if allow_busy {
+        matches!(
+            w.status,
+            WorkerStatus::Active | WorkerStatus::Idle | WorkerStatus::Busy
+        )
+    } else {
+        matches!(w.status, WorkerStatus::Active | WorkerStatus::Idle)
+    };
 
-        let general_compute_compatible = match task.runtime.as_deref().map(str::trim) {
-            Some("hcode") | Some("production_sandboxed_dsl") => {
-                worker_supports_managed_dsl_request(
-                    managed_dsl_snapshot_for_worker(w),
-                    task.runtime.as_deref().unwrap_or_default(),
-                    task.managed_dsl_backend_id.as_deref(),
-                    task.managed_dsl_semantics_manifest_sha256.as_deref(),
-                    task.max_cpt,
+    let general_compute_compatible = match task.runtime.as_deref().map(str::trim) {
+        Some("hcode") | Some("production_sandboxed_dsl") => worker_supports_managed_dsl_request(
+            managed_dsl_snapshot_for_worker(w),
+            task.runtime.as_deref().unwrap_or_default(),
+            task.managed_dsl_backend_id.as_deref(),
+            task.managed_dsl_semantics_manifest_sha256.as_deref(),
+            task.max_cpt,
+        ),
+        Some(GENERAL_COMPUTE_RUNTIME_VERSION) => task
+            .general_compute_manifest_json
+            .as_deref()
+            .and_then(|manifest| serde_json::from_slice::<GeneralComputeRequest>(manifest).ok())
+            .is_some_and(|request| {
+                worker_supports_general_compute_request(
+                    &request,
+                    general_compute_snapshot_for_worker(w),
                 )
-            }
-            Some(GENERAL_COMPUTE_RUNTIME_VERSION) => task
-                .general_compute_manifest_json
-                .as_deref()
-                .and_then(|manifest| serde_json::from_slice::<GeneralComputeRequest>(manifest).ok())
-                .is_some_and(|request| {
-                    worker_supports_general_compute_request(
+            }),
+        Some(MANAGED_GPU_RUNTIME_VERSION) => task
+            .managed_gpu_manifest_json
+            .as_deref()
+            .and_then(|manifest| serde_json::from_slice::<ManagedGpuRequest>(manifest).ok())
+            .is_some_and(|request| {
+                u64::try_from(task.max_cpt).ok() == Some(request.reservation_cpt)
+                    && worker_supports_managed_gpu_request(
                         &request,
                         general_compute_snapshot_for_worker(w),
                     )
-                }),
-            Some(MANAGED_GPU_RUNTIME_VERSION) => task
-                .managed_gpu_manifest_json
-                .as_deref()
-                .and_then(|manifest| serde_json::from_slice::<ManagedGpuRequest>(manifest).ok())
-                .is_some_and(|request| {
-                    u64::try_from(task.max_cpt).ok() == Some(request.reservation_cpt)
-                        && worker_supports_managed_gpu_request(
-                            &request,
-                            general_compute_snapshot_for_worker(w),
-                        )
-                }),
-            // A missing runtime is the legacy task route. Any explicit but
-            // unknown runtime must fail closed instead of inheriting generic
-            // Worker admission.
-            None => true,
-            Some(_) => false,
-        };
+            }),
+        // A missing runtime is the legacy task route. Any explicit but
+        // unknown runtime must fail closed instead of inheriting generic
+        // Worker admission.
+        None => true,
+        Some(_) => false,
+    };
 
-        let (cpu_score, gpu_score) = measured_scores(w);
-        status_ok
-            && w.provider_enabled
-            && general_compute_compatible
-            && cpu_score >= task.req_cpu_score
-            && gpu_score >= task.req_gpu_score
-            && effective_available_memory_gb(w) >= task.req_memory_gb
-            && effective_i32(w.gpu_memory_gb, w.gpu_memory_gb_limit) >= task.req_gpu_memory_gb
-            && effective_available_storage_gb(w) >= task.req_storage_gb
-            && w.min_cpt_per_hour <= task.max_cpt
+    let (cpu_score, gpu_score) = measured_scores(w);
+    status_ok
+        && w.provider_enabled
+        && general_compute_compatible
+        && cpu_score >= task.req_cpu_score
+        && gpu_score >= task.req_gpu_score
+        && effective_available_memory_gb(w) >= task.req_memory_gb
+        && effective_i32(w.gpu_memory_gb, w.gpu_memory_gb_limit) >= task.req_gpu_memory_gb
+        && effective_available_storage_gb(w) >= task.req_storage_gb
+        && w.min_cpt_per_hour <= task.max_cpt
+}
+
+/// Workers that pass the admission filter used by [`find_best_worker`], in input order.
+///
+/// `allow_busy = false` keeps Active and Idle Workers. `allow_busy = true` also
+/// keeps Busy Workers. Status comes from the Worker's own heartbeat, so selection
+/// that must not be steered by it should pass `true` and choose uniformly with
+/// [`select_replicas`].
+pub fn eligible_for_task(task: &Task, workers: &[WorkerNode], allow_busy: bool) -> Vec<WorkerNode> {
+    workers
+        .iter()
+        .filter(|w| accepts_task(w, task, allow_busy))
+        .cloned()
+        .collect()
+}
+
+/// Choose `k` Workers uniformly at random, with at most one Worker per owner.
+///
+/// Owners are compared by trimmed `username`. Returns `None` when fewer than `k`
+/// distinct owners are eligible; callers keep the task pending rather than lower
+/// the replica count. Worker-reported metrics are not consulted.
+pub fn select_replicas(
+    mut eligible: Vec<WorkerNode>,
+    k: usize,
+    rng: &mut impl rand::Rng,
+) -> Option<Vec<WorkerNode>> {
+    if k == 0 {
+        return Some(Vec::new());
     }
+    eligible.shuffle(rng);
+    let mut owners = HashSet::new();
+    let mut selected = Vec::with_capacity(k);
+    for worker in eligible {
+        if !owners.insert(worker.username.trim().to_owned()) {
+            continue;
+        }
+        selected.push(worker);
+        if selected.len() == k {
+            return Some(selected);
+        }
+    }
+    None
+}
 
+/// Find the best worker for a given task based on resource requirements and availability.
+/// Considers CPU score, GPU score, RAM, VRAM, and storage.
+pub async fn find_best_worker(task: &Task, workers: &[WorkerNode]) -> Option<WorkerNode> {
     let mut candidates: Vec<&WorkerNode> = workers
         .iter()
         .filter(|w| accepts_task(w, task, false))
@@ -1249,5 +1291,173 @@ mod tests {
         let best = find_best_worker(&task, &workers).await;
         assert!(best.is_some());
         assert_eq!(best.unwrap().worker_id, "effective-winner");
+    }
+
+    fn owned_worker(id: &str, owner: &str, cpu_usage: f64, status: WorkerStatus) -> WorkerNode {
+        let mut worker = make_worker(id, 4, 16, cpu_usage, status);
+        worker.username = owner.into();
+        worker
+    }
+
+    fn seeded_rng(seed: u64) -> rand::rngs::StdRng {
+        rand::SeedableRng::seed_from_u64(seed)
+    }
+
+    fn legacy_task() -> Task {
+        Task {
+            id: uuid::Uuid::new_v4(),
+            task_id: "legacy-selection".into(),
+            owner: "requester".into(),
+            worker_id: None,
+            worker_ip: None,
+            status: hivemind_models::TaskStatus::Pending,
+            status_message: None,
+            output: None,
+            result_torrent: None,
+            torrent_source: Some("btih".into()),
+            runtime: None,
+            task_source: None,
+            general_compute_manifest_json: None,
+            managed_gpu_manifest_json: None,
+            managed_dsl_backend_id: None,
+            managed_dsl_semantics_manifest_sha256: None,
+            expected_btih: None,
+            cpu_usage: 0.0,
+            memory_usage: 0.0,
+            gpu_usage: 0.0,
+            gpu_memory_usage: 0.0,
+            req_cpu_score: 0,
+            req_gpu_score: 0,
+            req_memory_gb: 0,
+            req_gpu_memory_gb: 0,
+            req_storage_gb: 0,
+            host_count: 1,
+            max_cpt: 1000,
+            billing_settled: false,
+            billed_amount: 0,
+            managed_executed_ops: 0,
+            managed_output_bytes: 0,
+            managed_receipt_json: None,
+            retry_count: 0,
+            max_retries: 3,
+            deadline: None,
+            deterministic: false,
+            side_effects: false,
+            priority: 0,
+            cpu_time_ms: 0,
+            wall_time_ms: 0,
+            peak_memory_mb: 0,
+            download_bytes: 0,
+            cache_hits: 0,
+            execution_observation_json: None,
+            created_at: chrono::Utc::now(),
+            last_update: chrono::Utc::now(),
+            completed_at: None,
+        }
+    }
+
+    #[test]
+    fn select_replicas_never_repeats_an_owner() {
+        let workers = vec![
+            owned_worker("w1", "owner-a", 0.0, WorkerStatus::Idle),
+            owned_worker("w2", "owner-a", 0.0, WorkerStatus::Idle),
+            owned_worker("w3", "owner-a", 0.0, WorkerStatus::Idle),
+            owned_worker("w4", "owner-b", 0.0, WorkerStatus::Idle),
+            owned_worker("w5", "owner-c", 0.0, WorkerStatus::Idle),
+            owned_worker("w6", "owner-d", 0.0, WorkerStatus::Idle),
+        ];
+
+        for seed in 0..500 {
+            let selected = select_replicas(workers.clone(), 3, &mut seeded_rng(seed))
+                .unwrap_or_else(|| panic!("seed {seed} found no three distinct owners"));
+            let owners: HashSet<&str> = selected.iter().map(|w| w.username.as_str()).collect();
+            assert_eq!(selected.len(), 3);
+            assert_eq!(owners.len(), 3, "seed {seed} repeated an owner");
+        }
+    }
+
+    #[test]
+    fn select_replicas_returns_none_without_enough_distinct_owners() {
+        let workers = vec![
+            owned_worker("w1", "owner-a", 0.0, WorkerStatus::Idle),
+            owned_worker("w2", "owner-a", 0.0, WorkerStatus::Idle),
+            owned_worker("w3", "owner-b", 0.0, WorkerStatus::Idle),
+            owned_worker("w4", "owner-b", 0.0, WorkerStatus::Idle),
+            owned_worker("w5", "owner-b", 0.0, WorkerStatus::Idle),
+        ];
+
+        for seed in 0..50 {
+            assert!(select_replicas(workers.clone(), 3, &mut seeded_rng(seed)).is_none());
+        }
+        assert!(select_replicas(workers, 2, &mut seeded_rng(0)).is_some());
+    }
+
+    #[test]
+    fn select_replicas_draws_owners_uniformly_regardless_of_reported_usage() {
+        // owner-a reports the lowest load, so a load-ranked selection would
+        // always choose it. A uniform draw picks each owner in half of the trials.
+        let workers = vec![
+            owned_worker("w1", "owner-a", 0.0, WorkerStatus::Idle),
+            owned_worker("w2", "owner-b", 10.0, WorkerStatus::Idle),
+            owned_worker("w3", "owner-c", 20.0, WorkerStatus::Idle),
+            owned_worker("w4", "owner-d", 30.0, WorkerStatus::Idle),
+        ];
+        let mut counts = std::collections::HashMap::<String, u32>::new();
+        for seed in 0..2000 {
+            for worker in select_replicas(workers.clone(), 2, &mut seeded_rng(seed)).unwrap() {
+                *counts.entry(worker.username).or_default() += 1;
+            }
+        }
+
+        for owner in ["owner-a", "owner-b", "owner-c", "owner-d"] {
+            let count = counts.get(owner).copied().unwrap_or(0);
+            assert!(
+                (800..=1200).contains(&count),
+                "{owner} was selected {count} times in 2000 draws"
+            );
+        }
+    }
+
+    #[test]
+    fn select_replicas_is_reproducible_for_a_fixed_seed() {
+        let workers: Vec<WorkerNode> = (0..6)
+            .map(|index| {
+                owned_worker(
+                    &format!("w{index}"),
+                    &format!("owner-{index}"),
+                    0.0,
+                    WorkerStatus::Idle,
+                )
+            })
+            .collect();
+        let worker_ids = |selected: Vec<WorkerNode>| -> Vec<String> {
+            selected.into_iter().map(|w| w.worker_id).collect()
+        };
+
+        let first = select_replicas(workers.clone(), 3, &mut seeded_rng(7)).unwrap();
+        let second = select_replicas(workers, 3, &mut seeded_rng(7)).unwrap();
+        assert_eq!(worker_ids(first), worker_ids(second));
+    }
+
+    #[test]
+    fn eligible_for_task_admits_busy_workers_only_when_requested() {
+        let task = legacy_task();
+        let workers = vec![
+            owned_worker("idle", "owner-a", 0.0, WorkerStatus::Idle),
+            owned_worker("busy", "owner-b", 0.0, WorkerStatus::Busy),
+            owned_worker("offline", "owner-c", 0.0, WorkerStatus::Offline),
+        ];
+        let ids = |eligible: Vec<WorkerNode>| -> Vec<String> {
+            eligible.into_iter().map(|w| w.worker_id).collect()
+        };
+
+        assert_eq!(
+            ids(eligible_for_task(&task, &workers, false)),
+            vec!["idle".to_owned()]
+        );
+        assert_eq!(
+            ids(eligible_for_task(&task, &workers, true)),
+            vec!["idle".to_owned(), "busy".to_owned()]
+        );
     }
 }
