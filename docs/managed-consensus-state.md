@@ -46,10 +46,12 @@ Only deterministic, side-effect-free managed DSL tasks are eligible. The
 
 ## Replica dispatch and escalation
 
-Enforce-mode `hcode` attempts start with `MANAGED_CONSENSUS_QUORUM` replicas
-(two by default), not `MANAGED_CONSENSUS_REPLICA_COUNT`. Nodepool adds the next
-replica only when the replicas in flight cannot reach quorum, or when the attempt
-deadline passes with quorum still missing:
+By default, enforce-mode `hcode` attempts dispatch all
+`MANAGED_CONSENSUS_REPLICA_COUNT` replicas at once. Lazy dispatch is opt-in: set
+`MANAGED_CONSENSUS_INITIAL_REPLICAS` to a value from `MANAGED_CONSENSUS_QUORUM` up
+to the replica count, and the attempt starts with that many replicas. Nodepool then
+adds the next replica only when the replicas in flight cannot reach quorum, or when
+the attempt deadline passes with quorum still missing:
 
 - A disagreement, a refused or failed replica, or a timeout can trigger
   escalation. The added Worker comes from the same eligible pool. It must satisfy
@@ -70,9 +72,10 @@ replica reports through its own assignment-bound execution token. Lazy dispatch
 changes how many replicas run, not which results are accepted.
 
 The usage hold still reserves the worst case for `MANAGED_CONSENSUS_REPLICA_COUNT`
-replicas. A replica that was never dispatched has no evidence and no payout, so
-its allowance returns to the owner as a refund at settlement. Observe mode and
-other managed runtimes assign every replica at dispatch.
+replicas. With lazy dispatch, a replica that was never dispatched has no evidence
+and no payout, so its allowance returns to the owner as a refund at settlement.
+Observe mode and other managed runtimes assign every replica at dispatch, and so
+does enforce mode unless `MANAGED_CONSENSUS_INITIAL_REPLICAS` is set.
 
 ## Acceptance and settlement
 

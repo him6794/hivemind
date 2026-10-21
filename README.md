@@ -168,9 +168,10 @@ cd frontend; npm run test:e2e
 ```
 
 The harness can allocate ephemeral host ports. The root stack contains one
-Worker; default enforced task execution and settlement need two eligible Workers
-from distinct owners, and a third when the first two disagree or time out, in a
-separate test.
+Worker; default enforced task execution and settlement need three eligible Workers
+from distinct owners, with two matching results for a certificate, in a separate
+test. Setting `MANAGED_CONSENSUS_INITIAL_REPLICAS=2` dispatches two first and adds
+the third only when the first two disagree or time out.
 
 After verification, return to the repository root and run `docker compose down`.
 Raw Compose requires supplied secrets and a matching Worker execution key pair;
@@ -249,6 +250,7 @@ login handles VPN enrollment and Nodepool discovery through the overlay.
 | `MANAGED_CONSENSUS_ROLLOUT_MODE` | `enforce` | `disabled`, `observe`, or `enforce`; successful output requires a strict-majority certificate; valid hcode usage is validated separately for payment |
 | `MANAGED_CONSENSUS_REPLICA_COUNT` | `3` | Distinct Worker replicas per managed task |
 | `MANAGED_CONSENSUS_QUORUM` | `2` | Matching replicas required; must be a strict majority |
+| `MANAGED_CONSENSUS_INITIAL_REPLICAS` | unset | Replicas an enforce-mode hcode attempt dispatches up front. Unset dispatches all `MANAGED_CONSENSUS_REPLICA_COUNT`; set to `MANAGED_CONSENSUS_QUORUM` to add the rest only on disagreement or timeout |
 | `MANAGED_CONSENSUS_TIMEOUT_SECS` | `120` | Deadline for one consensus round |
 | `MANAGED_CONSENSUS_MAX_RESULT_BYTES` | `262144` | Nodepool/Worker cap for one consensus result |
 | `MANAGED_CONSENSUS_REQUIRE_DISTINCT_OWNERS` | `true` | Replicas of one managed task must come from distinct owners; `false` is for local smoke and E2E runs where one account operates several Workers |

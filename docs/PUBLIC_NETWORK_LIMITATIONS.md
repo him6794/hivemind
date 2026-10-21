@@ -22,9 +22,10 @@ independence. The trust model is defined in [AGENT.md](../AGENT.md).
   with no file, network, import, subprocess, DLL, or arbitrary native API access.
 - `managed-function-v0` is retained for historical reads. New v0 submissions are
   rejected and unfinished historical work is retired.
-- Default enforced consensus dispatches two Workers from distinct owners and adds
-  a third only after disagreement or timeout. It requires two matching canonical
-  results and does not fall back to single-Worker completion.
+- Default enforced consensus dispatches three Workers from distinct owners. It
+  requires two matching canonical results and does not fall back to single-Worker
+  completion. With `MANAGED_CONSENSUS_INITIAL_REPLICAS=2`, two Workers are
+  dispatched first and a third is added only after disagreement or timeout.
 - Worker IDs do not establish distinct owners. A colluding majority or a shared
   interpreter bug can produce matching, incorrect output.
 - A quorum certificate records authenticated agreement, not independently

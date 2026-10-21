@@ -10,9 +10,10 @@ dispatch, execute, and complete active `hcode` tasks. It does not
 validate public marketplace pricing, fiat conversion, or untrusted provider
 operation.
 
-V1 enforced consensus starts with two eligible Workers and adds a third only
+V1 enforced consensus dispatches three eligible Workers by default. With
+`MANAGED_CONSENSUS_INITIAL_REPLICAS=2` it starts with two and adds a third only
 after disagreement or timeout. The consensus scenario keeps a worker target of
-three so escalation can be exercised. The script fails before submission when a
+three so both modes can be exercised. The script fails before submission when a
 scenario has fewer registered Workers than its target, rather than silently
 measuring a one-Worker path.
 
