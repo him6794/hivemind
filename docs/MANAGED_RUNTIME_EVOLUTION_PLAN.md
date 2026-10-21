@@ -773,8 +773,9 @@ Cost-model decision (I2): not applied. It needs a decision.
 Known flaky test (pre-existing, not fixed):
 `update::tests::activation_rolls_back_when_replacement_process_cannot_start` in
 `hivemind-client-runtime`. On `a7ac5c25`, ten solo runs each hit the 300 s cap.
-The lazy-third checkpoint recorded 85 of 85 passing for the library run alone,
-so the hang depends on timing. Workspace runs skip it with
+The lazy-third checkpoint recorded the library's 85 tests passing when the
+library was run alone. Why the filtered solo run of this one test stalls while
+the library run passes is not established. Workspace runs skip the test with
 `--skip activation_rolls_back_when_replacement_process_cannot_start`.
 
 Workspace run on the `0e6427d4` source (`b48b80ee` changed only docs since):
