@@ -87,6 +87,7 @@ pub struct Dispatcher {
     worker_execution_private_key_pem: String,
     managed_consensus_rollout_mode: ManagedConsensusRolloutMode,
     managed_consensus_replica_count: u16,
+    managed_consensus_initial_replicas: Option<u16>,
     managed_consensus_quorum: u16,
     managed_consensus_max_replicas: u16,
     managed_consensus_timeout_secs: u64,
@@ -163,6 +164,7 @@ impl Dispatcher {
                 .unwrap_or_default(),
             managed_consensus_rollout_mode: ManagedConsensusRolloutMode::Enforce,
             managed_consensus_replica_count: 3,
+            managed_consensus_initial_replicas: None,
             managed_consensus_quorum: 2,
             managed_consensus_max_replicas: 7,
             managed_consensus_timeout_secs: 120,
@@ -180,6 +182,7 @@ impl Dispatcher {
     pub fn with_managed_consensus_config(mut self, config: &ManagedConsensusConfig) -> Self {
         self.managed_consensus_rollout_mode = config.rollout_mode;
         self.managed_consensus_replica_count = config.replica_count;
+        self.managed_consensus_initial_replicas = config.initial_replicas;
         self.managed_consensus_quorum = config.quorum;
         self.managed_consensus_max_replicas = config.max_replicas;
         self.managed_consensus_timeout_secs = config.timeout_secs;
@@ -254,6 +257,7 @@ impl Dispatcher {
             &policy.mode,
             policy.replica_count,
             policy.quorum,
+            self.managed_consensus_initial_replicas,
         );
         let mut rng = StdRng::from_entropy();
         let Some(selected) = scheduler::select_replicas(
@@ -2503,16 +2507,21 @@ struct ManagedConsensusEscalation {
     owner_rule: scheduler::OwnerRule,
 }
 
-/// Replicas assigned at dispatch. Enforce-mode hcode starts at quorum and escalates
-/// for the rest. Every other managed attempt assigns its full replica set.
+/// Replicas assigned at dispatch. Enforce-mode hcode starts at `initial_replicas` and
+/// escalates for the rest; unset means the full set, as before. Every other managed
+/// attempt assigns its full replica set.
 fn initial_replica_count(
     runtime: Option<&str>,
     mode: &str,
     replica_count: u16,
     quorum: u16,
+    initial_replicas: Option<u16>,
 ) -> u16 {
     if mode == "enforce" && runtime.map(str::trim) == Some(MANAGED_DSL_V1_RUNTIME_VERSION) {
-        quorum
+        initial_replicas
+            .unwrap_or(replica_count)
+            .max(quorum)
+            .min(replica_count)
     } else {
         replica_count
     }
@@ -2716,10 +2725,12 @@ async fn execute_managed_consensus_attempt(
     }
 
     loop {
-        // Once quorum cannot be reached by the replicas already in flight, add a
-        // spare or stop. Waiting on in-flight replicas cannot help then.
+        // A lazily dispatched attempt adds a spare or stops once quorum cannot be
+        // reached by the replicas in flight. A fully dispatched attempt keeps waiting
+        // for them, as it did before lazy dispatch existed.
         let outstanding = workers.len();
-        if best_matching_count(&observations) + outstanding < quorum {
+        let lazily_dispatched = escalation.dispatched < usize::from(policy.replica_count);
+        if lazily_dispatched && best_matching_count(&observations) + outstanding < quorum {
             if let Some(assignment) = add_managed_consensus_spare(
                 &repo,
                 &task,
@@ -7189,15 +7200,21 @@ mod tests {
     }
 
     #[test]
-    fn initial_replica_count_starts_lazy_only_for_enforce_hcode() {
+    fn initial_replica_count_dispatches_every_replica_unless_configured() {
         let hcode = Some(MANAGED_DSL_V1_RUNTIME_VERSION);
-        assert_eq!(initial_replica_count(hcode, "enforce", 3, 2), 2);
-        assert_eq!(initial_replica_count(hcode, "observe", 3, 2), 3);
+        // Unset keeps the full set for every attempt.
+        assert_eq!(initial_replica_count(hcode, "enforce", 3, 2, None), 3);
+        // Lazy dispatch needs an explicit initial count and enforce-mode hcode.
+        assert_eq!(initial_replica_count(hcode, "enforce", 3, 2, Some(2)), 2);
+        assert_eq!(initial_replica_count(hcode, "observe", 3, 2, Some(2)), 3);
         assert_eq!(
-            initial_replica_count(Some("production_sandboxed_dsl"), "enforce", 3, 2),
+            initial_replica_count(Some("production_sandboxed_dsl"), "enforce", 3, 2, Some(2)),
             3
         );
-        assert_eq!(initial_replica_count(None, "enforce", 3, 2), 3);
+        assert_eq!(initial_replica_count(None, "enforce", 3, 2, Some(2)), 3);
+        // The configured count is clamped to the policy, never below quorum.
+        assert_eq!(initial_replica_count(hcode, "enforce", 5, 3, Some(2)), 3);
+        assert_eq!(initial_replica_count(hcode, "enforce", 3, 2, Some(9)), 3);
     }
 
     #[test]
@@ -8792,7 +8809,10 @@ mod tests {
             30,
             0,
         )
-        .with_managed_consensus_config(&ManagedConsensusConfig::default());
+        .with_managed_consensus_config(&ManagedConsensusConfig {
+            initial_replicas: Some(2),
+            ..ManagedConsensusConfig::default()
+        });
         let unique = uuid::Uuid::new_v4().to_string();
         let owner = format!("dispatcher-distinct-owner-{unique}");
         sqlx::query(
@@ -8935,6 +8955,7 @@ mod tests {
         )
         .with_managed_consensus_config(&ManagedConsensusConfig {
             require_distinct_owners: false,
+            initial_replicas: Some(2),
             ..ManagedConsensusConfig::default()
         });
         let unique = uuid::Uuid::new_v4().to_string();
@@ -9429,6 +9450,7 @@ mod tests {
         )
         .with_managed_consensus_config(&ManagedConsensusConfig {
             timeout_secs: 30,
+            initial_replicas: Some(2),
             ..ManagedConsensusConfig::default()
         });
         let unique = uuid::Uuid::new_v4().to_string();

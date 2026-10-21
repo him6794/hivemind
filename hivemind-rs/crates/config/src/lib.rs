@@ -90,6 +90,12 @@ pub struct ManagedConsensusConfig {
     pub rollout_mode: ManagedConsensusRolloutMode,
     #[serde(default = "default_consensus_replica_count")]
     pub replica_count: u16,
+    /// Replicas dispatched when an enforce-mode hcode attempt is created. Unset dispatches
+    /// all `replica_count` replicas at once. A smaller value dispatches that many and
+    /// adds the rest only when the dispatched replicas cannot reach quorum or the
+    /// deadline passes without a certificate.
+    #[serde(default)]
+    pub initial_replicas: Option<u16>,
     #[serde(default = "default_consensus_quorum")]
     pub quorum: u16,
     #[serde(default = "default_consensus_max_replicas")]
@@ -149,6 +155,7 @@ impl Default for ManagedConsensusConfig {
         Self {
             rollout_mode: ManagedConsensusRolloutMode::default(),
             replica_count: default_consensus_replica_count(),
+            initial_replicas: None,
             quorum: default_consensus_quorum(),
             max_replicas: default_consensus_max_replicas(),
             timeout_secs: default_consensus_timeout_secs(),
@@ -171,6 +178,14 @@ impl ManagedConsensusConfig {
                 "managed consensus quorum must be a strict majority of {}, got {}",
                 self.replica_count, self.quorum
             ));
+        }
+        if let Some(initial) = self.initial_replicas {
+            if !(self.quorum..=self.replica_count).contains(&initial) {
+                return Err(format!(
+                    "managed consensus initial replicas must be between quorum {} and replica count {}, got {}",
+                    self.quorum, self.replica_count, initial
+                ));
+            }
         }
         if self.max_replicas > hivemind_managed_consensus::MAX_REPLICAS {
             return Err(format!(
@@ -779,6 +794,10 @@ impl HivemindConfig {
             self.managed_consensus.replica_count =
                 parse_env("MANAGED_CONSENSUS_REPLICA_COUNT", &value)?;
         }
+        if let Ok(value) = std::env::var("MANAGED_CONSENSUS_INITIAL_REPLICAS") {
+            self.managed_consensus.initial_replicas =
+                Some(parse_env("MANAGED_CONSENSUS_INITIAL_REPLICAS", &value)?);
+        }
         if let Ok(value) = std::env::var("MANAGED_CONSENSUS_QUORUM") {
             self.managed_consensus.quorum = parse_env("MANAGED_CONSENSUS_QUORUM", &value)?;
         }
@@ -1381,6 +1400,48 @@ mod tests {
         }
         let error = result.unwrap_err().to_string();
         assert!(error.contains("MANAGED_CONSENSUS_REQUIRE_DISTINCT_OWNERS"));
+    }
+
+    #[test]
+    fn managed_consensus_initial_replicas_defaults_to_the_full_set() {
+        assert_eq!(ManagedConsensusConfig::default().initial_replicas, None);
+        // Configs written before the field existed still dispatch every replica.
+        let legacy: ManagedConsensusConfig =
+            serde_json::from_str(r#"{"replica_count":3,"quorum":2}"#).unwrap();
+        assert_eq!(legacy.initial_replicas, None);
+        let lazy: ManagedConsensusConfig =
+            serde_json::from_str(r#"{"initial_replicas":2}"#).unwrap();
+        assert_eq!(lazy.initial_replicas, Some(2));
+    }
+
+    #[test]
+    fn managed_consensus_initial_replicas_must_sit_between_quorum_and_replica_count() {
+        let with_initial = |initial_replicas| ManagedConsensusConfig {
+            initial_replicas,
+            ..ManagedConsensusConfig::default()
+        };
+        assert!(with_initial(None).validate().is_ok());
+        assert!(with_initial(Some(2)).validate().is_ok());
+        assert!(with_initial(Some(3)).validate().is_ok());
+        for invalid in [1, 4] {
+            let error = with_initial(Some(invalid)).validate().unwrap_err();
+            assert!(error.contains("initial replicas"));
+        }
+    }
+
+    #[test]
+    fn managed_consensus_initial_replicas_loads_from_environment() {
+        let _environment_lock = lock_environment();
+        let old = std::env::var_os("MANAGED_CONSENSUS_INITIAL_REPLICAS");
+        std::env::set_var("MANAGED_CONSENSUS_INITIAL_REPLICAS", "2");
+
+        let loaded = HivemindConfig::load_from_env();
+
+        match old {
+            Some(value) => std::env::set_var("MANAGED_CONSENSUS_INITIAL_REPLICAS", value),
+            None => std::env::remove_var("MANAGED_CONSENSUS_INITIAL_REPLICAS"),
+        }
+        assert_eq!(loaded.managed_consensus.initial_replicas, Some(2));
     }
 
     #[test]
