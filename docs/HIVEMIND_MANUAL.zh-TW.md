@@ -332,6 +332,7 @@ JWT secret 不可使用 `CHANGE_ME_IN_PRODUCTION`，service validation 也要求
 | `MANAGED_CONSENSUS_MAX_REPLICAS` | 7 | Policy validation 上界 |
 | `MANAGED_CONSENSUS_TIMEOUT_SECS` | 120 | Round deadline，與 Worker runtime timeout 不是同一控制 |
 | `MANAGED_CONSENSUS_MAX_RESULT_BYTES` | 262144 | Configured result bound 仍受 typed protocol cap |
+| `MANAGED_CONSENSUS_REQUIRE_DISTINCT_OWNERS` | `true` | 同一任務的副本須來自不同 owner；`false` 僅供本機 smoke 與 E2E，且同一帳號開多個 Worker 時使用 |
 | `HIVEMIND_ADMIN_USERS` | Unset／comma-separated usernames | Master admin routes 另需 bearer 與 server permission |
 | `HIVEMIND_TASK_SUBMIT_LIMIT_PER_MINUTE` | 60；≤0 封鎖提交 | Master process-local per-owner 60 秒 window，不是 unlimited switch |
 | `LOG_LEVEL` | `info` | 不因 debug 就可以記錄 raw secrets |

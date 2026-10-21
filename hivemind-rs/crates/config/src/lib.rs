@@ -98,6 +98,10 @@ pub struct ManagedConsensusConfig {
     pub timeout_secs: u64,
     #[serde(default = "default_consensus_max_result_bytes")]
     pub max_result_bytes: usize,
+    /// Replicas of one managed task must belong to distinct owners. Disable only
+    /// for local smoke and E2E runs in which one account operates several Workers.
+    #[serde(default = "default_consensus_require_distinct_owners")]
+    pub require_distinct_owners: bool,
 }
 
 fn default_consensus_replica_count() -> u16 {
@@ -118,6 +122,10 @@ fn default_consensus_timeout_secs() -> u64 {
 
 fn default_consensus_max_result_bytes() -> usize {
     256 * 1024
+}
+
+fn default_consensus_require_distinct_owners() -> bool {
+    true
 }
 
 fn default_client_updates_enabled() -> bool {
@@ -145,6 +153,7 @@ impl Default for ManagedConsensusConfig {
             max_replicas: default_consensus_max_replicas(),
             timeout_secs: default_consensus_timeout_secs(),
             max_result_bytes: default_consensus_max_result_bytes(),
+            require_distinct_owners: default_consensus_require_distinct_owners(),
         }
     }
 }
@@ -785,6 +794,10 @@ impl HivemindConfig {
             self.managed_consensus.max_result_bytes =
                 parse_env("MANAGED_CONSENSUS_MAX_RESULT_BYTES", &value)?;
         }
+        if let Ok(value) = std::env::var("MANAGED_CONSENSUS_REQUIRE_DISTINCT_OWNERS") {
+            self.managed_consensus.require_distinct_owners =
+                parse_env("MANAGED_CONSENSUS_REQUIRE_DISTINCT_OWNERS", &value)?;
+        }
         self.managed_consensus
             .validate()
             .map_err(|error| anyhow::anyhow!("invalid managed consensus configuration: {error}"))?;
@@ -1309,6 +1322,65 @@ mod tests {
         };
         let error = config.validate().unwrap_err();
         assert!(error.contains("supported range"));
+    }
+
+    #[test]
+    fn managed_consensus_requires_distinct_owners_by_default() {
+        assert!(ManagedConsensusConfig::default().require_distinct_owners);
+        assert!(
+            HivemindConfig::default()
+                .managed_consensus
+                .require_distinct_owners
+        );
+    }
+
+    #[test]
+    fn managed_consensus_distinct_owner_setting_is_backward_compatible_in_json() {
+        // Configs written before the field existed keep the strict default.
+        let legacy: ManagedConsensusConfig =
+            serde_json::from_str(r#"{"replica_count":3,"quorum":2}"#).unwrap();
+        assert!(legacy.require_distinct_owners);
+
+        let opted_out: ManagedConsensusConfig =
+            serde_json::from_str(r#"{"require_distinct_owners":false}"#).unwrap();
+        assert!(!opted_out.require_distinct_owners);
+
+        // deny_unknown_fields rejects a misspelled key instead of ignoring it.
+        assert!(serde_json::from_str::<ManagedConsensusConfig>(
+            r#"{"require_distinct_owner":false}"#
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn managed_consensus_distinct_owner_setting_loads_from_environment() {
+        let _environment_lock = lock_environment();
+        let old = std::env::var_os("MANAGED_CONSENSUS_REQUIRE_DISTINCT_OWNERS");
+        std::env::set_var("MANAGED_CONSENSUS_REQUIRE_DISTINCT_OWNERS", "false");
+
+        let loaded = HivemindConfig::load_from_env();
+
+        match old {
+            Some(value) => std::env::set_var("MANAGED_CONSENSUS_REQUIRE_DISTINCT_OWNERS", value),
+            None => std::env::remove_var("MANAGED_CONSENSUS_REQUIRE_DISTINCT_OWNERS"),
+        }
+        assert!(!loaded.managed_consensus.require_distinct_owners);
+    }
+
+    #[test]
+    fn managed_consensus_distinct_owner_setting_rejects_non_boolean_values() {
+        let _environment_lock = lock_environment();
+        let old = std::env::var_os("MANAGED_CONSENSUS_REQUIRE_DISTINCT_OWNERS");
+        std::env::set_var("MANAGED_CONSENSUS_REQUIRE_DISTINCT_OWNERS", "sometimes");
+
+        let result = HivemindConfig::default().apply_env_overrides();
+
+        match old {
+            Some(value) => std::env::set_var("MANAGED_CONSENSUS_REQUIRE_DISTINCT_OWNERS", value),
+            None => std::env::remove_var("MANAGED_CONSENSUS_REQUIRE_DISTINCT_OWNERS"),
+        }
+        let error = result.unwrap_err().to_string();
+        assert!(error.contains("MANAGED_CONSENSUS_REQUIRE_DISTINCT_OWNERS"));
     }
 
     #[test]

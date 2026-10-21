@@ -314,7 +314,10 @@ agree on a wrong result.
 - **Managed tasks do not produce a successful result**: check admission,
   readiness, runtime identity, per-replica budgets, and the round deadline
   (`MANAGED_CONSENSUS_TIMEOUT_SECS`). The default needs three eligible Workers
-  and two matching results; one root Compose Worker is insufficient. New v1
+  from three distinct owners and two matching results; one root Compose Worker
+  is insufficient. A single account can run the pool only with
+  `MANAGED_CONSENSUS_REQUIRE_DISTINCT_OWNERS=false`, which is for local smoke and
+  E2E runs. New v1
   automatic paid retries are disabled. Outstanding replicas must be stopped or
   fenced; unconfirmed stops retain durable slot reservations. Valid attempt-bound
   usage can still be billed for failed or no-quorum tasks.

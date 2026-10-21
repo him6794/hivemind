@@ -250,6 +250,7 @@ login handles VPN enrollment and Nodepool discovery through the overlay.
 | `MANAGED_CONSENSUS_QUORUM` | `2` | Matching replicas required; must be a strict majority |
 | `MANAGED_CONSENSUS_TIMEOUT_SECS` | `120` | Deadline for one consensus round |
 | `MANAGED_CONSENSUS_MAX_RESULT_BYTES` | `262144` | Nodepool/Worker cap for one consensus result |
+| `MANAGED_CONSENSUS_REQUIRE_DISTINCT_OWNERS` | `true` | Replicas of one managed task must come from distinct owners; `false` is for local smoke and E2E runs where one account operates several Workers |
 | `LOG_LEVEL` | `info` | Log level (debug, info, warn, error) |
 
 ## API Reference

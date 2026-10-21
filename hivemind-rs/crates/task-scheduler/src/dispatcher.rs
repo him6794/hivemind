@@ -90,6 +90,7 @@ pub struct Dispatcher {
     managed_consensus_max_replicas: u16,
     managed_consensus_timeout_secs: u64,
     managed_consensus_max_result_bytes: usize,
+    managed_consensus_owner_rule: scheduler::OwnerRule,
     session_registry: Option<SharedSessionRegistry>,
 }
 
@@ -165,6 +166,7 @@ impl Dispatcher {
             managed_consensus_max_replicas: 7,
             managed_consensus_timeout_secs: 120,
             managed_consensus_max_result_bytes: 256 * 1024,
+            managed_consensus_owner_rule: scheduler::OwnerRule::Distinct,
             session_registry: None,
         }
     }
@@ -181,6 +183,14 @@ impl Dispatcher {
         self.managed_consensus_max_replicas = config.max_replicas;
         self.managed_consensus_timeout_secs = config.timeout_secs;
         self.managed_consensus_max_result_bytes = config.max_result_bytes;
+        self.managed_consensus_owner_rule = if config.require_distinct_owners {
+            scheduler::OwnerRule::Distinct
+        } else {
+            warn!(
+                "managed consensus replicas may share an owner; MANAGED_CONSENSUS_REQUIRE_DISTINCT_OWNERS=false is for local smoke and E2E runs only"
+            );
+            scheduler::OwnerRule::Shared
+        };
         self
     }
 
@@ -240,7 +250,12 @@ impl Dispatcher {
         let candidates = scheduler::eligible_for_task(&selection_task, &eligible, true);
         let required = usize::from(policy.replica_count);
         let mut rng = StdRng::from_entropy();
-        let Some(selected) = scheduler::select_replicas(candidates, required, &mut rng) else {
+        let Some(selected) = scheduler::select_replicas(
+            candidates,
+            required,
+            self.managed_consensus_owner_rule,
+            &mut rng,
+        ) else {
             return Ok(None);
         };
         self.repo
@@ -8343,6 +8358,87 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(attempts, 0);
+
+        fixture.cleanup().await.ok();
+    }
+
+    #[tokio::test]
+    async fn managed_consensus_dispatch_with_shared_owners_accepts_one_owner() {
+        let lock = dispatcher_db_lock();
+        let _guard = lock.lock().await;
+        let Some((db, fixture)) = test_db("dispatcher_consensus_shared_owners").await else {
+            return;
+        };
+        let repo = Arc::new(TaskRepository::new(db.pool.clone()));
+        let dispatcher = Dispatcher::new(
+            hivemind_database::DatabaseManager {
+                pool: db.pool.clone(),
+            },
+            30,
+            0,
+        )
+        .with_managed_consensus_config(&ManagedConsensusConfig {
+            require_distinct_owners: false,
+            ..ManagedConsensusConfig::default()
+        });
+        let unique = uuid::Uuid::new_v4().to_string();
+        let owner = format!("dispatcher-shared-owner-{unique}");
+        let provider = format!("dispatcher-shared-provider-{unique}");
+        for (name, balance) in [(&owner, 1000), (&provider, 0)] {
+            sqlx::query(
+                "INSERT INTO users (username, password_hash, balance) VALUES ($1, 'hash', $2)",
+            )
+            .bind(name)
+            .bind(balance)
+            .execute(&db.pool)
+            .await
+            .unwrap();
+        }
+        // One account operates all three Workers. The shared rule accepts that
+        // only for the local smoke and E2E setting.
+        let mut workers = Vec::new();
+        for index in 0..3 {
+            let worker_id = format!("dispatcher-shared-worker-{index}-{unique}");
+            sqlx::query(
+                "INSERT INTO worker_nodes (worker_id, username, ip, cpu_cores, memory_gb,
+                 cpu_score, gpu_score, gpu_memory_gb, storage_total_gb, storage_available_gb)
+                 VALUES ($1, $2, '127.0.0.1:1', 4, 16, 400, 0, 0, 500, 200)",
+            )
+            .bind(&worker_id)
+            .bind(&provider)
+            .execute(&db.pool)
+            .await
+            .unwrap();
+            workers.push(public_managed_dsl_worker(&worker_id, &provider));
+        }
+        let task_id = format!("dispatcher-shared-owner-task-{unique}");
+        let mut task = make_task(&task_id, TaskStatus::Pending, 0);
+        task.owner = owner.clone();
+        task.runtime = Some(MANAGED_DSL_V1_RUNTIME_VERSION.into());
+        task.task_source = Some("return input".into());
+        task.torrent_source = Some("{}".into());
+        task.deterministic = true;
+        task.max_cpt = 100;
+        task.req_cpu_score = 0;
+        task.req_memory_gb = 0;
+        task.req_storage_gb = 0;
+        let task = repo.create(&task).await.unwrap();
+        repo.set_managed_consensus_policy(
+            &task_id,
+            u32::from(CONSENSUS_PROTOCOL_VERSION),
+            3,
+            2,
+            "enforce",
+        )
+        .await
+        .unwrap();
+
+        let (_attempt, assignments) = dispatcher
+            .dispatch_managed_consensus(&task, &workers)
+            .await
+            .unwrap()
+            .expect("the shared owner rule accepts a single owner");
+        assert_eq!(assignments.len(), 3, "all three replicas share one owner");
 
         fixture.cleanup().await.ok();
     }

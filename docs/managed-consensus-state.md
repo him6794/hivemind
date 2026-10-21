@@ -18,6 +18,7 @@ MANAGED_CONSENSUS_REPLICA_COUNT=3
 MANAGED_CONSENSUS_QUORUM=2
 MANAGED_CONSENSUS_TIMEOUT_SECS=120
 MANAGED_CONSENSUS_MAX_RESULT_BYTES=262144
+MANAGED_CONSENSUS_REQUIRE_DISTINCT_OWNERS=true
 ```
 
 The default `enforce` policy assigns three distinct registered Workers and
@@ -25,6 +26,16 @@ requires two matching results. Successful completion requires a quorum
 certificate; Nodepool does not lower the quorum or use a single-Worker fallback
 when fewer Workers are available. Valid assignment-bound v1 usage may still be
 billable if the task fails or no quorum forms.
+
+Replica selection is a uniform random draw from the eligible Workers. With
+`MANAGED_CONSENSUS_REQUIRE_DISTINCT_OWNERS=true`, each owner (the provider
+account that registered the Worker, compared after trimming whitespace)
+contributes at most one replica. If fewer distinct owners are eligible, the
+task stays pending and the replica count is not lowered. Worker-reported status
+and CPU usage do not influence selection. Setting the variable to `false`
+removes the owner rule and logs a warning. Use `false` only for local smoke and
+E2E runs where one account operates several Workers. A shared deployment with
+`false` lets one operator fill every replica.
 
 `observe` dispatches all replicas and records quorum/no-quorum metadata. The task
 ends as `OBSERVED`, without user output, billing, or settlement.
@@ -69,6 +80,11 @@ IDs do not prove operator independence: a single operator can run multiple
 Workers, and a colluding quorum can return the same incorrect result. Transport,
 capacity, and timeout failures do not automatically establish Worker
 misbehaviour. Invalid identity/result envelopes are rejected and audited.
+
+The owner rule caps each provider account at one replica of a task. It does not
+bind a Worker to an operator: one party that registers several provider accounts
+can still fill a quorum. Stopping that requires registration controls outside
+the scheduler.
 
 Rollout classification uses persisted task policy identity. A managed task
 without a persisted consensus policy is held closed (awaiting policy) regardless

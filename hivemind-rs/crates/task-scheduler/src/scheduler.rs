@@ -286,14 +286,26 @@ pub fn eligible_for_task(task: &Task, workers: &[WorkerNode], allow_busy: bool) 
         .collect()
 }
 
-/// Choose `k` Workers uniformly at random, with at most one Worker per owner.
+/// Whether the replicas of one managed task may share an owner.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum OwnerRule {
+    /// At most one replica per owner. This is the managed consensus default.
+    #[default]
+    Distinct,
+    /// Owners may repeat. For local smoke and E2E runs only.
+    Shared,
+}
+
+/// Choose `k` Workers uniformly at random.
 ///
-/// Owners are compared by trimmed `username`. Returns `None` when fewer than `k`
-/// distinct owners are eligible; callers keep the task pending rather than lower
-/// the replica count. Worker-reported metrics are not consulted.
+/// Under [`OwnerRule::Distinct`] each owner contributes at most one Worker,
+/// compared by trimmed `username`. Returns `None` when fewer than `k` Workers
+/// satisfy the rule; callers keep the task pending rather than lower the replica
+/// count. Worker-reported metrics are not consulted.
 pub fn select_replicas(
     mut eligible: Vec<WorkerNode>,
     k: usize,
+    owner_rule: OwnerRule,
     rng: &mut impl rand::Rng,
 ) -> Option<Vec<WorkerNode>> {
     if k == 0 {
@@ -303,7 +315,7 @@ pub fn select_replicas(
     let mut owners = HashSet::new();
     let mut selected = Vec::with_capacity(k);
     for worker in eligible {
-        if !owners.insert(worker.username.trim().to_owned()) {
+        if owner_rule == OwnerRule::Distinct && !owners.insert(worker.username.trim().to_owned()) {
             continue;
         }
         selected.push(worker);
@@ -1368,8 +1380,13 @@ mod tests {
         ];
 
         for seed in 0..500 {
-            let selected = select_replicas(workers.clone(), 3, &mut seeded_rng(seed))
-                .unwrap_or_else(|| panic!("seed {seed} found no three distinct owners"));
+            let selected = select_replicas(
+                workers.clone(),
+                3,
+                OwnerRule::Distinct,
+                &mut seeded_rng(seed),
+            )
+            .unwrap_or_else(|| panic!("seed {seed} found no three distinct owners"));
             let owners: HashSet<&str> = selected.iter().map(|w| w.username.as_str()).collect();
             assert_eq!(selected.len(), 3);
             assert_eq!(owners.len(), 3, "seed {seed} repeated an owner");
@@ -1387,9 +1404,27 @@ mod tests {
         ];
 
         for seed in 0..50 {
-            assert!(select_replicas(workers.clone(), 3, &mut seeded_rng(seed)).is_none());
+            assert!(select_replicas(
+                workers.clone(),
+                3,
+                OwnerRule::Distinct,
+                &mut seeded_rng(seed)
+            )
+            .is_none());
         }
-        assert!(select_replicas(workers, 2, &mut seeded_rng(0)).is_some());
+        assert!(select_replicas(workers, 2, OwnerRule::Distinct, &mut seeded_rng(0)).is_some());
+    }
+
+    #[test]
+    fn shared_owner_rule_allows_one_owner_for_every_replica() {
+        let workers: Vec<WorkerNode> = (0..3)
+            .map(|index| owned_worker(&format!("w{index}"), "owner-a", 0.0, WorkerStatus::Idle))
+            .collect();
+
+        let selected = select_replicas(workers.clone(), 3, OwnerRule::Shared, &mut seeded_rng(1))
+            .expect("shared owners are allowed");
+        assert_eq!(selected.len(), 3);
+        assert!(select_replicas(workers, 3, OwnerRule::Distinct, &mut seeded_rng(1)).is_none());
     }
 
     #[test]
@@ -1404,7 +1439,14 @@ mod tests {
         ];
         let mut counts = std::collections::HashMap::<String, u32>::new();
         for seed in 0..2000 {
-            for worker in select_replicas(workers.clone(), 2, &mut seeded_rng(seed)).unwrap() {
+            for worker in select_replicas(
+                workers.clone(),
+                2,
+                OwnerRule::Distinct,
+                &mut seeded_rng(seed),
+            )
+            .unwrap()
+            {
                 *counts.entry(worker.username).or_default() += 1;
             }
         }
@@ -1434,8 +1476,9 @@ mod tests {
             selected.into_iter().map(|w| w.worker_id).collect()
         };
 
-        let first = select_replicas(workers.clone(), 3, &mut seeded_rng(7)).unwrap();
-        let second = select_replicas(workers, 3, &mut seeded_rng(7)).unwrap();
+        let first =
+            select_replicas(workers.clone(), 3, OwnerRule::Distinct, &mut seeded_rng(7)).unwrap();
+        let second = select_replicas(workers, 3, OwnerRule::Distinct, &mut seeded_rng(7)).unwrap();
         assert_eq!(worker_ids(first), worker_ids(second));
     }
 
