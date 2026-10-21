@@ -4156,6 +4156,18 @@ impl TaskRepository {
                 .complete_managed_consensus_v1(certificate, output, true, false, None)
                 .await;
         }
+        retry_on_deadlock(SETTLEMENT_DEADLOCK_ATTEMPTS, || {
+            self.complete_managed_consensus_once(certificate, output, stops_confirmed)
+        })
+        .await
+    }
+
+    async fn complete_managed_consensus_once(
+        &self,
+        certificate: &ConsensusCertificate,
+        output: &str,
+        stops_confirmed: bool,
+    ) -> Result<bool> {
         let certificate_json = serde_json::to_vec(certificate)?;
         if certificate_json.len() > hivemind_proto::MANAGED_CONSENSUS_CERTIFICATE_MAX_BYTES {
             anyhow::bail!("managed consensus certificate exceeds the byte limit");

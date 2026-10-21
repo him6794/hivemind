@@ -841,11 +841,11 @@ completion (the provider lookup moved ahead of the debit), and user transfers.
 The GPU completion already locked its owner and provider in sorted order and was
 left as it was.
 
-Retry: the certified settlement, the no-quorum finalization, the stop-pending
-finalization, the GPU completion, and the general-compute completion retry a
-transaction that fails with 40P01, at most three attempts in total. Each attempt
-starts a new transaction. The retry is insurance; the ordering removes the cycle.
-User transfers have no retry.
+Retry: the certified settlement, the legacy managed completion, the no-quorum
+finalization, the stop-pending finalization, the GPU completion, and the
+general-compute completion retry a transaction that fails with 40P01, at most three
+attempts in total. Each attempt starts a new transaction. The retry is insurance;
+the ordering removes the cycle. User transfers have no retry.
 
 GREEN: the regression test passes three times in a row at `27231242`. The
 task-scheduler suite passes (196 tests) with the database attached.
