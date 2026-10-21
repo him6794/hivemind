@@ -583,3 +583,60 @@ Bin all-target checks pass. The commit was advanced locally with an empty index
 and no push. Next isolate production OCI input-digest verification against the
 same Nodepool-owned materialized bytes; real rootless OCI/hostile-workload E2E,
 operator assets, and trusted variable settlement remain release gates.
+
+### Distinct-owner replica selection checkpoint (2026-10-21)
+
+Phase 0 of the consensus hardening plan. Commit `f62f4bfc` replaces the greedy
+ranking by self-reported status and CPU usage with a uniform draw over admitted
+Workers, at most one replica per provider account. Commit `d763a34f` adds
+`MANAGED_CONSENSUS_REQUIRE_DISTINCT_OWNERS` (default `true`). Setting it to
+`false` removes the owner rule, logs a warning, and is for local smoke and E2E
+runs only.
+
+RED→GREEN evidence: disabling the owner dedupe made
+`select_replicas_never_repeats_an_owner` fail at seed 0 with "repeated an owner".
+The config tests did not compile before the field existed. After `f62f4bfc`,
+task-scheduler passed 183 tests against `hivemind_test`. The workspace run passed
+821 tests at `f62f4bfc` and 827 at `d763a34f`, with 0 failed and 0 ignored.
+
+The owner rule is keyed on the provider account. One operator that registers
+several accounts is not covered. Closing that gap needs registration controls
+outside the scheduler.
+
+### Lazy third replica checkpoint (2026-10-21, partial)
+
+Phase 1 of the consensus cost work. Commit `a16c1feb` pins the existing 2-of-3
+certificate behavior with a test-only change: two agreeing observations certify,
+while a disagreement or a single observation does not. Commit `2255b79f`
+dispatches a quorum of two for enforce-mode hcode. It adds the third replica only
+when the replicas in flight cannot reach quorum, or when the deadline passes
+without a certificate. Escalation extends the deadline once, capped at twice the
+timeout from creation. The usage hold still covers `replica_count` replicas, and
+an undispatched replica's allowance is refunded at settlement. Observe mode and
+`production_sandboxed_dsl` still assign every replica.
+
+RED→GREEN evidence: the new DB tests did not compile before the implementation
+existed. The first behavioral run caught a defect. The timeout test showed the
+escalation refused because the old deadline had just passed, so the repository
+now checks the extended deadline. The same run exposed a fixture gap: a timed-out
+replica's stop could not confirm, so the fake Worker now marks dropped executions
+finished. GREEN: task-scheduler passed 195 tests against `hivemind_test`. The
+workspace run passed 753 tests across the binaries that reported. The
+`hivemind-client-runtime` library hung in
+`update::tests::activation_rolls_back_when_replacement_process_cannot_start`
+under full-workspace load and passed 85 of 85 when run alone. That hang predates
+this work.
+
+Unfinished in Phase 1:
+
+- T1.4 (replica count, p50/p95 completion latency, and CPT billing before and
+  after): not run. It needs a live Master, Nodepool, and at least three Workers,
+  plus a baseline build of the pre-change commit. No before-and-after numbers
+  exist yet.
+- T1.3 event logging is emitted from the same path as T1.2, so it has no separate
+  commit. The escalation test and its secret-absence assertion cover its
+  acceptance items.
+- Escalation after a Nodepool restart rebuilds the spare pool from the registered
+  Workers. No test exercises that path yet.
+- Expected replica counts depend on disagreement and timeout rates, which have
+  not been measured.
