@@ -454,6 +454,37 @@ mod tests {
     }
 
     #[test]
+    fn fewer_observations_than_replicas_form_a_certificate_only_at_quorum() {
+        // A 2-of-3 policy must certify from two agreeing observations, so the
+        // third replica can be dispatched lazily. Disagreement or a lone result
+        // must not certify.
+        let policy = QuorumPolicy::new(3, 2).unwrap();
+
+        let agreeing = vec![
+            observation("worker-a", "replica-a", b"same"),
+            observation("worker-b", "replica-b", b"same"),
+        ];
+        let certificate = evaluate_quorum(&binding(), policy, &agreeing).unwrap();
+        assert_eq!(certificate.matching_count, 2);
+        assert_eq!(certificate.replica_count, 3);
+
+        let disagreeing = vec![
+            observation("worker-a", "replica-a", b"left"),
+            observation("worker-b", "replica-b", b"right"),
+        ];
+        assert_eq!(
+            evaluate_quorum(&binding(), policy, &disagreeing),
+            Err(ConsensusError::NoQuorum)
+        );
+
+        let single = vec![observation("worker-a", "replica-a", b"same")];
+        assert_eq!(
+            evaluate_quorum(&binding(), policy, &single),
+            Err(ConsensusError::NoQuorum)
+        );
+    }
+
+    #[test]
     fn duplicate_worker_is_rejected_even_with_different_replica_ids() {
         let policy = QuorumPolicy::new(3, 2).unwrap();
         let observations = vec![
