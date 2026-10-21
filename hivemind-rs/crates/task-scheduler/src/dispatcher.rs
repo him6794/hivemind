@@ -888,6 +888,19 @@ impl Dispatcher {
                 .mark_managed_consensus_no_quorum(&task.task_id, attempt.id, reason, retry_limit)
                 .await
         } else {
+            // Replies already persisted can form a certificate even though some replicas
+            // have not confirmed their stop. Hold that certificate rather than failing it
+            // through the stop-pending path.
+            if hold_persisted_quorum_pending(
+                &self.repo,
+                task,
+                attempt,
+                self.managed_consensus_max_result_bytes,
+            )
+            .await?
+            {
+                return Ok(None);
+            }
             self.repo
                 .mark_managed_consensus_stop_pending(&task.task_id, attempt.id, reason)
                 .await
@@ -897,10 +910,22 @@ impl Dispatcher {
     async fn reconcile_managed_consensus_pending_stops(&self) -> Result<u64> {
         let mut finalized = 0u64;
         for (task, attempt) in self.repo.managed_consensus_pending_stop_attempts().await? {
-            let targets = self
+            // One attempt that cannot be reconciled must not stop the others in this pass.
+            let targets = match self
                 .repo
                 .managed_consensus_stop_targets(&task.task_id, attempt.id)
-                .await?;
+                .await
+            {
+                Ok(targets) => targets,
+                Err(error) => {
+                    warn!(
+                        task_id = %task.task_id,
+                        error = %error,
+                        "managed consensus stop targets could not be loaded; retrying"
+                    );
+                    continue;
+                }
+            };
             let mut all_stopped = true;
             for target in &targets {
                 if let Err(error) = stop_and_record_managed_consensus_replica(
@@ -921,14 +946,20 @@ impl Dispatcher {
                     );
                 }
             }
-            if all_stopped
-                && self
+            if all_stopped {
+                match self
                     .repo
                     .finalize_managed_consensus_stop_pending(&task.task_id, attempt.id)
-                    .await?
-                    .is_some()
-            {
-                finalized += 1;
+                    .await
+                {
+                    Ok(Some(_)) => finalized += 1,
+                    Ok(None) => {}
+                    Err(error) => warn!(
+                        task_id = %task.task_id,
+                        error = %error,
+                        "managed consensus stop-pending finalization failed; retrying"
+                    ),
+                }
             }
         }
         Ok(finalized)
@@ -1186,22 +1217,28 @@ impl Dispatcher {
         }
         self.reconcile_managed_consensus_pending_stops().await?;
         for (task, attempt) in self.repo.expired_managed_consensus_attempts().await? {
-            match self
+            // One attempt that fails to expire must not stop the others in this pass.
+            let outcome = self
                 .expire_managed_consensus_attempt(
                     &task,
                     &attempt,
                     "managed consensus deadline exceeded",
                     effective_retry_limit(&task, self.max_redispatch),
                 )
-                .await?
-            {
-                Some(updated) if updated.status == TaskStatus::Pending => {
+                .await;
+            match outcome {
+                Ok(Some(updated)) if updated.status == TaskStatus::Pending => {
                     redispatched += 1;
                 }
-                Some(_) => {
+                Ok(Some(_)) => {
                     failed += 1;
                 }
-                None => {}
+                Ok(None) => {}
+                Err(error) => warn!(
+                    task_id = %task.task_id,
+                    error = %error,
+                    "managed consensus expiry failed; retrying on the next pass"
+                ),
             }
         }
         let managed_gpu_timed_out = self.repo.mark_stale_managed_gpu_running().await?;
@@ -2331,18 +2368,20 @@ async fn drain_managed_consensus_workers(
     Ok(())
 }
 
-/// Settles a stopped enforce attempt whose persisted replies form a certificate.
-///
-/// Returns true when such a certificate exists. The caller must then leave the attempt
-/// active instead of finalizing it as no-quorum. A failed settlement is therefore never
-/// failed or billed through the usage-only no-quorum path, and the next expiry pass
-/// retries the same certificate.
-async fn settle_persisted_quorum(
+/// Builds the certificate that the persisted replies of an attempt form, together with the
+/// output it certifies. Returns `None` when the replies do not reach quorum. The output is
+/// `None` only when the certified result cannot be read back. Nothing is settled here.
+async fn persisted_quorum_certificate(
     repo: &TaskRepository,
     task: &Task,
     attempt: &ManagedConsensusAttempt,
     max_result_bytes: usize,
-) -> Result<bool> {
+) -> Result<
+    Option<(
+        hivemind_managed_consensus::ConsensusCertificate,
+        Option<String>,
+    )>,
+> {
     let replicas = repo
         .managed_consensus_replicas(&task.task_id, &attempt.round_id)
         .await?;
@@ -2367,23 +2406,44 @@ async fn settle_persisted_quorum(
         u16::try_from(attempt.replica_count),
         u16::try_from(attempt.quorum),
     ) else {
-        return Ok(false);
+        return Ok(None);
     };
     let Ok(policy) = QuorumPolicy::new(replica_count, quorum) else {
-        return Ok(false);
+        return Ok(None);
     };
     let binding = managed_consensus_binding(task, attempt);
     let Ok(certificate) =
         hivemind_managed_consensus::evaluate_quorum(&binding, policy, &observations)
     else {
+        return Ok(None);
+    };
+    let output = outputs.get(&certificate.result_digest).cloned();
+    Ok(Some((certificate, output)))
+}
+
+/// Settles a stopped enforce attempt whose persisted replies form a certificate.
+///
+/// Returns true when such a certificate exists. The caller must then leave the attempt
+/// active instead of finalizing it as no-quorum. A failed settlement is therefore never
+/// failed or billed through the usage-only no-quorum path, and the next expiry pass
+/// retries the same certificate.
+async fn settle_persisted_quorum(
+    repo: &TaskRepository,
+    task: &Task,
+    attempt: &ManagedConsensusAttempt,
+    max_result_bytes: usize,
+) -> Result<bool> {
+    let Some((certificate, output)) =
+        persisted_quorum_certificate(repo, task, attempt, max_result_bytes).await?
+    else {
         return Ok(false);
     };
-    let Some(output) = outputs.get(&certificate.result_digest) else {
+    let Some(output) = output else {
         warn!(task_id = %task.task_id, "certified managed consensus output is missing; retrying");
         return Ok(true);
     };
     match repo
-        .complete_managed_consensus(&certificate, output, true)
+        .complete_managed_consensus(&certificate, &output, true)
         .await
     {
         Ok(true) => {}
@@ -2395,6 +2455,48 @@ async fn settle_persisted_quorum(
             task_id = %task.task_id,
             error = %error,
             "certified managed consensus settlement failed; retrying"
+        ),
+    }
+    Ok(true)
+}
+
+/// Holds a certificate that persisted replies form in quorum stop-pending while some
+/// replicas have not confirmed their stop. The attempt then keeps the certified result
+/// instead of entering stop-pending, which finalizes as no-quorum. Returns true when such a
+/// certificate exists.
+async fn hold_persisted_quorum_pending(
+    repo: &TaskRepository,
+    task: &Task,
+    attempt: &ManagedConsensusAttempt,
+    max_result_bytes: usize,
+) -> Result<bool> {
+    let Some((certificate, output)) =
+        persisted_quorum_certificate(repo, task, attempt, max_result_bytes).await?
+    else {
+        return Ok(false);
+    };
+    let Some(output) = output else {
+        warn!(task_id = %task.task_id, "certified managed consensus output is missing; retrying");
+        return Ok(true);
+    };
+    match repo
+        .mark_managed_consensus_quorum_stop_pending(
+            &task.task_id,
+            attempt.id,
+            &certificate,
+            &output,
+        )
+        .await
+    {
+        Ok(Some(_)) => {}
+        Ok(None) => warn!(
+            task_id = %task.task_id,
+            "certified managed consensus quorum could not enter quorum stop-pending; retrying"
+        ),
+        Err(error) => warn!(
+            task_id = %task.task_id,
+            error = %error,
+            "certified managed consensus quorum stop-pending failed; retrying"
         ),
     }
     Ok(true)
@@ -2925,9 +3027,8 @@ async fn execute_managed_consensus_attempt(
         repo.complete_managed_consensus_observe(&task.task_id, attempt.id, None, stops_confirmed)
             .await?;
     } else if stops_confirmed {
-        if settle_persisted_quorum(&repo, &task, &attempt, max_result_bytes).await? {
-            return Ok(());
-        }
+        // Replies received during the drain arrive after the deadline. A certificate cannot
+        // form from them, so the no-quorum path applies here.
         repo.mark_managed_consensus_no_quorum(
             &task.task_id,
             attempt.id,
@@ -7956,6 +8057,130 @@ mod tests {
         assert_eq!(status, "COMPLETED");
         assert!(settled);
         assert!(billed > 0);
+        fixture.cleanup().await.ok();
+    }
+
+    /// A certified quorum whose replica stop is unconfirmed must enter quorum stop-pending. It
+    /// must not enter stop-pending, which would later finalize as no-quorum and bill usage.
+    /// The unconfirmed stop comes from a signing key that cannot be used.
+    #[tokio::test]
+    async fn expired_quorum_with_unconfirmed_stop_is_held_pending_not_failed() {
+        let lock = dispatcher_db_lock();
+        let _guard = lock.lock().await;
+        let Some((db, fixture)) = test_db("dispatcher_expired_quorum_unconfirmed_stop").await
+        else {
+            return;
+        };
+        let pool = db.pool.clone();
+        let repo = Arc::new(TaskRepository::new(pool.clone()));
+        let unique = uuid::Uuid::new_v4().to_string();
+        let owner = format!("unconfirmed-stop-owner-{unique}");
+        lazy_consensus_owner(&pool, &owner, 1000).await;
+        let task_id = format!("unconfirmed-stop-task-{unique}");
+        let task = lazy_consensus_task(&repo, &owner, &task_id).await;
+        let mut workers = Vec::new();
+        for index in 0..3 {
+            let provider = format!("unconfirmed-stop-provider-{index}-{unique}");
+            lazy_consensus_owner(&pool, &provider, 0).await;
+            let worker_id = format!("unconfirmed-stop-worker-{index}-{unique}");
+            sqlx::query(
+                "INSERT INTO worker_nodes (worker_id, username, ip, cpu_cores, memory_gb)
+                 VALUES ($1, $2, '10.0.0.2', 4, 16)",
+            )
+            .bind(&worker_id)
+            .bind(&provider)
+            .execute(&pool)
+            .await
+            .unwrap();
+            let mut worker = make_worker(&worker_id, 4, 16, WorkerStatus::Idle);
+            // worker_ip is VARCHAR(45), so the IP must not come from the long worker ID.
+            worker.ip = format!("10.0.0.{}", index + 10);
+            worker.username = provider;
+            workers.push(worker);
+        }
+        let (attempt, assignments) = repo
+            .create_managed_consensus_attempt(&task, &workers, 3, 2, 120, "enforce")
+            .await
+            .unwrap()
+            .expect("pending task should create a consensus attempt");
+        let output = b"unconfirmed-stop-output".to_vec();
+        let result = hivemind_proto::ManagedConsensusResult {
+            protocol_version: 1,
+            status: "completed".into(),
+            output: output.clone(),
+            usage_units: 7,
+            executed_ops: 7,
+            output_bytes: output.len() as u64,
+            runtime: "hcode".into(),
+            backend_id: hivemind_managed_consensus::MANAGED_DSL_V1_DEFAULT_BACKEND_ID.into(),
+            semantics_manifest_sha256:
+                hivemind_managed_consensus::MANAGED_DSL_V1_DEFAULT_SEMANTICS_DIGEST.into(),
+            source_sha256: hivemind_managed_consensus::digest_hex(
+                task.task_source.as_deref().unwrap().as_bytes(),
+            ),
+            input_sha256: hivemind_managed_consensus::digest_hex(
+                task.torrent_source.as_deref().unwrap().as_bytes(),
+            ),
+            result_digest: hivemind_managed_consensus::digest_hex(&output),
+            ..hivemind_proto::ManagedConsensusResult::default()
+        };
+        let result_json = result.encode_to_vec();
+        let result_digest = hivemind_proto::managed_consensus_result_digest(&result);
+        // Two replicas agree in time. The third stays assigned, so its stop is a target.
+        for assignment in &assignments[..2] {
+            assert!(repo
+                .mark_managed_consensus_replica_running(attempt.id, &assignment.replica_id)
+                .await
+                .unwrap());
+            repo.record_managed_consensus_observation(
+                &task_id,
+                attempt.id,
+                &attempt.round_id,
+                &assignment.replica_id,
+                &assignment.worker_id,
+                true,
+                &result_digest,
+                output.len() as i64,
+                &result_json,
+                7,
+                7,
+            )
+            .await
+            .unwrap();
+        }
+        let mut dispatcher = Dispatcher::new(db, 30, 2);
+        dispatcher.worker_execution_private_key_pem = "not-a-valid-ed25519-private-key".into();
+
+        let first = dispatcher
+            .expire_managed_consensus_attempt(
+                &task,
+                &attempt,
+                "managed consensus deadline exceeded",
+                0,
+            )
+            .await
+            .unwrap();
+        assert!(first.is_none());
+        let (status, consensus_state, billed, settled): (String, Option<String>, i64, bool) =
+            sqlx::query_as(
+                "SELECT status, managed_consensus_state, billed_amount, billing_settled
+                 FROM tasks WHERE task_id = $1",
+            )
+            .bind(&task_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(status, "COMPLETED");
+        assert_eq!(consensus_state.as_deref(), Some("quorum_stop_pending"));
+        assert_eq!((billed, settled), (0, false));
+        let hold_state: String = sqlx::query_scalar(
+            "SELECT state FROM managed_consensus_usage_holds WHERE attempt_id = $1",
+        )
+        .bind(attempt.id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(hold_state, "held");
         fixture.cleanup().await.ok();
     }
 

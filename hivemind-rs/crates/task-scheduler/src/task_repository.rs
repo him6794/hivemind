@@ -1950,8 +1950,11 @@ impl TaskRepository {
                         .load_managed_consensus_pending_certificate(task_id, attempt_id)
                         .await?
                     {
+                        // The enclosing finalization already retries deadlocks, so the
+                        // settlement runs once per attempt here. Nested retries would
+                        // multiply the attempts past the three-attempt limit.
                         if self
-                            .complete_managed_consensus_v1(
+                            .complete_managed_consensus_v1_once(
                                 &certificate,
                                 &output,
                                 true,
@@ -1962,6 +1965,9 @@ impl TaskRepository {
                         {
                             return self.find_by_task_id(task_id).await;
                         }
+                        // The certificate exists but its settlement did not complete. The
+                        // attempt stays pending. Falling through would settle it as no-quorum.
+                        return Ok(None);
                     }
                 }
                 try_quorum_certificate = false;
