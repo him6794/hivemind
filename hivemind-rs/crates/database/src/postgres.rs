@@ -19,6 +19,40 @@ pub async fn create_pool(config: &HivemindConfig) -> Result<PgPool> {
     Ok(pool)
 }
 
+/// SQLSTATE raised by PostgreSQL when it breaks a lock cycle.
+const DEADLOCK_DETECTED: &str = "40P01";
+
+/// Locks the named `users` rows in ascending username order.
+///
+/// A transaction that updates more than one `users.balance` row takes these locks
+/// before its first balance update. Concurrent transactions then reach a shared
+/// account in the same order, so they cannot close a lock cycle. Duplicate names
+/// are locked once.
+pub async fn lock_user_accounts(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    usernames: &[&str],
+) -> Result<()> {
+    let ordered: std::collections::BTreeSet<&str> = usernames.iter().copied().collect();
+    for username in ordered {
+        sqlx::query("SELECT username FROM users WHERE username = $1 FOR UPDATE")
+            .bind(username)
+            .fetch_optional(&mut **tx)
+            .await
+            .with_context(|| format!("failed to lock account {username}"))?;
+    }
+    Ok(())
+}
+
+/// True when the error chain contains PostgreSQL's `deadlock_detected` error.
+pub fn is_deadlock_error(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        matches!(
+            cause.downcast_ref::<sqlx::Error>(),
+            Some(sqlx::Error::Database(database)) if database.code().as_deref() == Some(DEADLOCK_DETECTED)
+        )
+    })
+}
+
 fn pool_options(config: &HivemindConfig) -> PgPoolOptions {
     PgPoolOptions::new()
         .max_connections(config.database.max_connections)

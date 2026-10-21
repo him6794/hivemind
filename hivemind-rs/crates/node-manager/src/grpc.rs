@@ -663,6 +663,10 @@ impl UserService for GrpcUserService {
             }));
         }
 
+        // Debit and credit touch two balances, so both are locked in name order first.
+        hivemind_database::postgres::lock_user_accounts(&mut tx, &[&*from_user, &*to_user])
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
         let debited = sqlx::query(
             "UPDATE users SET balance = balance - $1, updated_at = NOW()
              WHERE username = $2 AND is_active = true AND balance >= $1",

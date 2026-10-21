@@ -971,6 +971,46 @@ fn classify_managed_v1_replica_evidence(
     }
 }
 
+/// Retries for a settlement transaction that loses a deadlock. Account-lock ordering
+/// removes the cycle, so retries only cover a residual conflict.
+const SETTLEMENT_DEADLOCK_ATTEMPTS: u32 = 3;
+
+/// Runs a settlement transaction body again after a deadlock, at most `attempts` times
+/// in total. Each run must begin its own transaction, so a rolled-back run leaves no
+/// partial state and the retry starts fresh.
+async fn retry_on_deadlock<T, F, Fut>(attempts: u32, mut run: F) -> Result<T>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<T>>,
+{
+    let mut attempt = 1;
+    loop {
+        match run().await {
+            Err(error)
+                if attempt < attempts && hivemind_database::postgres::is_deadlock_error(&error) =>
+            {
+                tracing::warn!(attempt, "settlement transaction deadlocked; retrying");
+                tokio::time::sleep(std::time::Duration::from_millis(10 * u64::from(attempt))).await;
+                attempt += 1;
+            }
+            result => return result,
+        }
+    }
+}
+
+/// Users whose balances a settlement changes: the owner, who receives any refund, and
+/// each eligible provider that receives a payout.
+fn settlement_account_names<'a>(owner: &'a str, plan: &'a ManagedV1SettlementPlan) -> Vec<&'a str> {
+    std::iter::once(owner)
+        .chain(
+            plan.payouts
+                .iter()
+                .filter(|payout| payout.eligible && payout.payout_amount_cpt > 0)
+                .filter_map(|payout| payout.provider_user.as_deref()),
+        )
+        .collect()
+}
+
 async fn apply_managed_v1_settlement(
     tx: &mut Transaction<'_, Postgres>,
     task_id: &str,
@@ -986,6 +1026,8 @@ async fn apply_managed_v1_settlement(
     {
         anyhow::bail!("managed v1 usage hold does not match the settlement plan");
     }
+    let accounts = settlement_account_names(owner, plan);
+    hivemind_database::postgres::lock_user_accounts(tx, &accounts).await?;
     let key_prefix = format!("hcode:{}:{}", hold.task_id, attempt_id.simple());
     if plan.charged_amount_cpt > 0 {
         insert_managed_v1_ledger_entry(
@@ -1810,6 +1852,17 @@ impl TaskRepository {
     }
 
     pub(crate) async fn finalize_managed_consensus_stop_pending(
+        &self,
+        task_id: &str,
+        attempt_id: Uuid,
+    ) -> Result<Option<Task>> {
+        retry_on_deadlock(SETTLEMENT_DEADLOCK_ATTEMPTS, || {
+            self.finalize_managed_consensus_stop_pending_once(task_id, attempt_id)
+        })
+        .await
+    }
+
+    async fn finalize_managed_consensus_stop_pending_once(
         &self,
         task_id: &str,
         attempt_id: Uuid,
@@ -2916,6 +2969,19 @@ impl TaskRepository {
         reason: &str,
         retry_limit: i32,
     ) -> Result<Option<Task>> {
+        retry_on_deadlock(SETTLEMENT_DEADLOCK_ATTEMPTS, || {
+            self.mark_managed_consensus_no_quorum_once(task_id, attempt_id, reason, retry_limit)
+        })
+        .await
+    }
+
+    async fn mark_managed_consensus_no_quorum_once(
+        &self,
+        task_id: &str,
+        attempt_id: Uuid,
+        reason: &str,
+        retry_limit: i32,
+    ) -> Result<Option<Task>> {
         if retry_limit < 0 {
             anyhow::bail!("managed consensus retry limit must not be negative");
         }
@@ -3327,6 +3393,26 @@ impl TaskRepository {
     }
 
     async fn complete_managed_consensus_v1(
+        &self,
+        certificate: &ConsensusCertificate,
+        output: &str,
+        stops_confirmed: bool,
+        pending_only: bool,
+        expected_attempt_id: Option<Uuid>,
+    ) -> Result<bool> {
+        retry_on_deadlock(SETTLEMENT_DEADLOCK_ATTEMPTS, || {
+            self.complete_managed_consensus_v1_once(
+                certificate,
+                output,
+                stops_confirmed,
+                pending_only,
+                expected_attempt_id,
+            )
+        })
+        .await
+    }
+
+    async fn complete_managed_consensus_v1_once(
         &self,
         certificate: &ConsensusCertificate,
         output: &str,
@@ -3804,6 +3890,8 @@ impl TaskRepository {
             tx.commit().await?;
             return Ok(true);
         }
+        let accounts = settlement_account_names(&task.owner, &plan);
+        hivemind_database::postgres::lock_user_accounts(&mut tx, &accounts).await?;
         let key_prefix = format!("hcode:{}:{}", task.id.simple(), attempt.id.simple());
         if plan.charged_amount_cpt > 0 {
             insert_managed_v1_ledger_entry(
@@ -4363,6 +4451,18 @@ impl TaskRepository {
             anyhow::bail!("managed consensus settlement already exists");
         }
         if max_cpt > 0 && !billing_settled {
+            // The payer and every participant provider are updated below. Lock them in
+            // name order first so that concurrent settlements cannot form a cycle.
+            let mut account_names = vec![owner.as_str()];
+            account_names.extend(
+                certificate
+                    .participants
+                    .iter()
+                    .filter_map(|participant| replicas_by_id.get(participant.replica_id.as_str()))
+                    .map(|replica| replica.provider_user.trim())
+                    .filter(|provider| !provider.is_empty()),
+            );
+            hivemind_database::postgres::lock_user_accounts(&mut tx, &account_names).await?;
             let charged = sqlx::query(
                 "UPDATE users SET balance = balance - $1, updated_at = NOW()
                  WHERE username = $2 AND is_active = true AND balance >= $1",
@@ -6367,6 +6467,26 @@ impl TaskRepository {
         result_json: &[u8],
         expected_snapshot: Option<&Task>,
     ) -> Result<Option<Task>> {
+        retry_on_deadlock(SETTLEMENT_DEADLOCK_ATTEMPTS, || {
+            self.complete_managed_gpu_for_worker_inner_once(
+                task_id,
+                worker_id,
+                expected_manifest,
+                result_json,
+                expected_snapshot,
+            )
+        })
+        .await
+    }
+
+    async fn complete_managed_gpu_for_worker_inner_once(
+        &self,
+        task_id: &str,
+        worker_id: &str,
+        expected_manifest: &[u8],
+        result_json: &[u8],
+        expected_snapshot: Option<&Task>,
+    ) -> Result<Option<Task>> {
         if expected_manifest.is_empty()
             || expected_manifest.len() > hivemind_proto::MANAGED_GPU_MANIFEST_MAX_BYTES
         {
@@ -7600,6 +7720,31 @@ impl TaskRepository {
         general_compute_result: Option<&[u8]>,
         expected_snapshot: Option<&Task>,
     ) -> Result<Option<Task>> {
+        retry_on_deadlock(SETTLEMENT_DEADLOCK_ATTEMPTS, || {
+            self.complete_guarded_once(
+                task_id,
+                worker_id,
+                result_torrent,
+                output,
+                expected_manifest,
+                general_compute_result,
+                expected_snapshot,
+            )
+        })
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn complete_guarded_once(
+        &self,
+        task_id: &str,
+        worker_id: Option<&str>,
+        result_torrent: Option<&str>,
+        output: Option<&str>,
+        expected_manifest: Option<&[u8]>,
+        general_compute_result: Option<&[u8]>,
+        expected_snapshot: Option<&Task>,
+    ) -> Result<Option<Task>> {
         let mut tx = self.pool.begin().await?;
         let runtime: Option<String> =
             sqlx::query_scalar("SELECT runtime FROM tasks WHERE task_id = $1")
@@ -7799,6 +7944,21 @@ impl TaskRepository {
 
         let billable_cpt = billable_amount_cpt(&completed);
 
+        // Payer and provider are both updated below, so the provider is resolved and
+        // both accounts are locked in name order before the first balance change.
+        let provider_user: Option<String> = match completed.worker_id.as_deref() {
+            Some(worker_id) => {
+                sqlx::query_scalar("SELECT username FROM worker_nodes WHERE worker_id = $1")
+                    .bind(worker_id)
+                    .fetch_optional(&mut *tx)
+                    .await?
+            }
+            None => None,
+        };
+        let accounts: Vec<&str> = std::iter::once(completed.owner.as_str())
+            .chain(provider_user.as_deref())
+            .collect();
+        hivemind_database::postgres::lock_user_accounts(&mut tx, &accounts).await?;
         let charged = sqlx::query(
             "UPDATE users SET balance = balance - $1, updated_at = NOW()
              WHERE username = $2 AND balance >= $1",
@@ -7813,16 +7973,6 @@ impl TaskRepository {
         if charged {
             let platform_fee_cpt = (billable_cpt * PLATFORM_FEE_BPS) / 10_000;
             let provider_credit_cpt = (billable_cpt - platform_fee_cpt).max(0);
-            let provider_user: Option<String> = match completed.worker_id.as_deref() {
-                Some(worker_id) => {
-                    sqlx::query_scalar("SELECT username FROM worker_nodes WHERE worker_id = $1")
-                        .bind(worker_id)
-                        .fetch_optional(&mut *tx)
-                        .await?
-                }
-                None => None,
-            };
-
             insert_ledger_entry(
                 &mut tx,
                 task_id,
@@ -16191,6 +16341,198 @@ mod tests {
         assert_eq!(final_v1_payouts, 0);
 
         fixture.cleanup().await.unwrap();
+    }
+
+    /// Two settlements credit the same two provider accounts in opposite replica
+    /// order. A holder transaction pins the first account, so settlement 0 queues on
+    /// it and then settlement 1 queues behind it. Taking account locks in replica
+    /// order closes a cycle here, and one settlement fails with a deadlock.
+    #[tokio::test]
+    async fn concurrent_settlements_with_reversed_provider_order_do_not_deadlock() {
+        let (pool, fixture) = pool("task_repository_settlement_lock_order")
+            .await
+            .expect("hivemind_test database must be reachable");
+        let repo = std::sync::Arc::new(TaskRepository::new(pool.clone()));
+        let unique = Uuid::new_v4().simple().to_string();
+        let owner = format!("lock-order-owner-{unique}");
+        let providers: Vec<String> = ["a", "b", "c"]
+            .iter()
+            .map(|suffix| format!("lock-order-provider-{suffix}-{unique}"))
+            .collect();
+        sqlx::query(
+            "INSERT INTO users (username, password_hash, balance) VALUES ($1, 'hash', 1000)",
+        )
+        .bind(&owner)
+        .execute(&pool)
+        .await
+        .unwrap();
+        for provider in &providers {
+            sqlx::query(
+                "INSERT INTO users (username, password_hash, balance) VALUES ($1, 'hash', 0)",
+            )
+            .bind(provider)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+
+        // Task 0 maps replica-1 to provider a and replica-2 to provider b. Task 1 reverses them.
+        let mut settlements = Vec::new();
+        for (task_index, order) in [[0usize, 1, 2], [1, 0, 2]].into_iter().enumerate() {
+            let task_id = format!("lock-order-task-{task_index}-{unique}");
+            let output = format!("lock-order-output-{task_index}");
+            let mut task = make_task(&task_id, &owner);
+            task.runtime = Some("hcode".into());
+            task.task_source = Some("return input".into());
+            task.torrent_source = Some("{}".into());
+            task.deterministic = true;
+            task.max_cpt = 100;
+            task = repo.create(&task).await.unwrap();
+            let mut workers = Vec::new();
+            for (position, provider_index) in order.into_iter().enumerate() {
+                let worker_id = format!("lock-order-worker-{task_index}-{position}-{unique}");
+                insert_worker(&pool, &worker_id, &providers[provider_index]).await;
+                let mut worker = make_worker_node(
+                    &worker_id,
+                    &format!("10.0.{}.{}", 60 + task_index, position + 10),
+                );
+                worker.username = providers[provider_index].clone();
+                workers.push(worker);
+            }
+            let (attempt, assignments) = repo
+                .create_managed_consensus_attempt(&task, &workers, 3, 2, 120, "enforce")
+                .await
+                .unwrap()
+                .expect("pending task should create a consensus attempt");
+            let output_bytes = output.as_bytes().to_vec();
+            let result = hivemind_proto::ManagedConsensusResult {
+                protocol_version: 1,
+                status: "completed".into(),
+                output: output_bytes.clone(),
+                usage_units: 12,
+                executed_ops: 12,
+                output_bytes: output_bytes.len() as u64,
+                runtime: "hcode".into(),
+                backend_id: hivemind_managed_consensus::MANAGED_DSL_V1_DEFAULT_BACKEND_ID.into(),
+                semantics_manifest_sha256:
+                    hivemind_managed_consensus::MANAGED_DSL_V1_DEFAULT_SEMANTICS_DIGEST.into(),
+                source_sha256: hivemind_managed_consensus::digest_hex(
+                    task.task_source.as_deref().unwrap().as_bytes(),
+                ),
+                input_sha256: hivemind_managed_consensus::digest_hex(
+                    task.torrent_source.as_deref().unwrap().as_bytes(),
+                ),
+                result_digest: hivemind_managed_consensus::digest_hex(&output_bytes),
+                ..hivemind_proto::ManagedConsensusResult::default()
+            };
+            let result_json = result.encode_to_vec();
+            let result_digest = hivemind_proto::managed_consensus_result_digest(&result);
+            let binding = managed_consensus_binding(&task, &attempt);
+            let mut observations = Vec::new();
+            for assignment in assignments.iter().take(2) {
+                assert!(repo
+                    .mark_managed_consensus_replica_running(attempt.id, &assignment.replica_id)
+                    .await
+                    .unwrap());
+                repo.record_managed_consensus_observation(
+                    &task_id,
+                    attempt.id,
+                    &attempt.round_id,
+                    &assignment.replica_id,
+                    &assignment.worker_id,
+                    true,
+                    &result_digest,
+                    output_bytes.len() as i64,
+                    &result_json,
+                    12,
+                    12,
+                )
+                .await
+                .unwrap();
+                observations.push(ConsensusObservation {
+                    worker_id: assignment.worker_id.clone(),
+                    replica_id: assignment.replica_id.clone(),
+                    attempt_id: assignment.worker_attempt_id.clone(),
+                    binding: managed_consensus_binding_for_assignment(&task, assignment),
+                    success: true,
+                    output_digest: hivemind_managed_consensus::output_digest(&output_bytes),
+                    result_digest: hivemind_managed_consensus::output_digest(
+                        &hivemind_proto::canonical_managed_consensus_result(&result)
+                            .encode_to_vec(),
+                    ),
+                    output_bytes: output_bytes.len() as u64,
+                    claimed_usage_units: 12,
+                    claimed_executed_ops: 12,
+                });
+            }
+            let certificate = hivemind_managed_consensus::evaluate_quorum(
+                &binding,
+                QuorumPolicy::new(3, 2).unwrap(),
+                &observations,
+            )
+            .unwrap();
+            settlements.push((task_id, certificate, output));
+        }
+
+        // Pin provider a. Each settlement is started only after the previous one is
+        // queued, so settlement 0 is first in line for the pinned account.
+        let mut holder = pool.begin().await.unwrap();
+        sqlx::query("SELECT username FROM users WHERE username = $1 FOR UPDATE")
+            .bind(&providers[0])
+            .fetch_one(&mut *holder)
+            .await
+            .unwrap();
+        let mut handles = Vec::new();
+        let mut task_ids = Vec::new();
+        for (index, (task_id, certificate, output)) in settlements.into_iter().enumerate() {
+            task_ids.push(task_id);
+            let repo = repo.clone();
+            handles.push(tokio::spawn(async move {
+                repo.complete_managed_consensus(&certificate, &output, true)
+                    .await
+            }));
+            wait_for_account_lock_waiters(&pool, index as i64 + 1).await;
+        }
+        holder.commit().await.unwrap();
+        for handle in handles {
+            let completed = handle
+                .await
+                .unwrap()
+                .expect("settlement must not fail with a deadlock");
+            assert!(completed);
+        }
+        for task_id in &task_ids {
+            let status: String = sqlx::query_scalar("SELECT status FROM tasks WHERE task_id = $1")
+                .bind(task_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+            assert_eq!(status, "COMPLETED");
+        }
+        fixture.cleanup().await.unwrap();
+    }
+
+    async fn wait_for_account_lock_waiters(pool: &PgPool, expected: i64) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            let waiting: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM pg_stat_activity
+                 WHERE datname = current_database()
+                   AND wait_event_type = 'Lock'
+                   AND query ILIKE '%users%'",
+            )
+            .fetch_one(pool)
+            .await
+            .unwrap();
+            if waiting >= expected {
+                return;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "only {waiting} of {expected} settlements queued on account locks"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
     }
 
     async fn insert_worker(pool: &PgPool, worker_id: &str, username: &str) {
