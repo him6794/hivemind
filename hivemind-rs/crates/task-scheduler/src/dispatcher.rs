@@ -30,9 +30,10 @@ use hivemind_proto::{
 };
 use prost::Message;
 use rand::rngs::StdRng;
+use rand::seq::SliceRandom;
 use rand::SeedableRng;
 use sha2::{Digest, Sha256};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::watch;
@@ -219,7 +220,7 @@ impl Dispatcher {
         &self,
         task: &Task,
         workers: &[WorkerNode],
-    ) -> Result<Option<(ManagedConsensusAttempt, Vec<ManagedConsensusAssignment>)>> {
+    ) -> Result<Option<ManagedConsensusDispatch>> {
         let Some(policy) = self.repo.managed_consensus_policy(&task.task_id).await? else {
             anyhow::bail!("managed consensus task has no persisted policy");
         };
@@ -248,17 +249,32 @@ impl Dispatcher {
         // do not rank replicas. Every admitted Worker is a candidate and the
         // replica set is drawn uniformly, with at most one Worker per owner.
         let candidates = scheduler::eligible_for_task(&selection_task, &eligible, true);
-        let required = usize::from(policy.replica_count);
+        let initial = initial_replica_count(
+            task.runtime.as_deref(),
+            &policy.mode,
+            policy.replica_count,
+            policy.quorum,
+        );
         let mut rng = StdRng::from_entropy();
         let Some(selected) = scheduler::select_replicas(
-            candidates,
-            required,
+            candidates.clone(),
+            usize::from(initial),
             self.managed_consensus_owner_rule,
             &mut rng,
         ) else {
             return Ok(None);
         };
-        self.repo
+        let spare_workers = if initial < policy.replica_count {
+            let selected_ids: HashSet<String> = selected
+                .iter()
+                .map(|worker| worker.worker_id.clone())
+                .collect();
+            spare_consensus_workers(candidates, &selected_ids)
+        } else {
+            Vec::new()
+        };
+        let Some((attempt, assignments)) = self
+            .repo
             .create_managed_consensus_attempt(
                 task,
                 &selected,
@@ -267,8 +283,27 @@ impl Dispatcher {
                 self.managed_consensus_timeout_secs,
                 &policy.mode,
             )
-            .await
+            .await?
+        else {
+            return Ok(None);
+        };
+        info!(
+            task_id = %task.task_id,
+            attempt_id = %attempt.id,
+            replicas = assignments.len(),
+            replica_count = policy.replica_count,
+            quorum = policy.quorum,
+            spares = spare_workers.len(),
+            mode = %policy.mode,
+            "managed consensus attempt dispatched"
+        );
+        Ok(Some(ManagedConsensusDispatch {
+            attempt,
+            assignments,
+            spare_workers,
+        }))
     }
+
     pub async fn dispatch_one(
         &self,
         task: &Task,
@@ -635,11 +670,17 @@ impl Dispatcher {
                     .dispatch_managed_consensus(task, &available_workers)
                     .await
                 {
-                    Ok(Some((attempt, assignments))) => {
-                        for assignment in &assignments {
+                    Ok(Some(dispatch)) => {
+                        for assignment in &dispatch.assignments {
                             reserve_worker_for_batch(&mut available_workers, &assignment.worker_id);
                         }
                         dispatched += 1;
+                        let escalation = ManagedConsensusEscalation {
+                            dispatched: dispatch.assignments.len(),
+                            spare_workers: dispatch.spare_workers,
+                            timeout_secs: self.managed_consensus_timeout_secs,
+                            owner_rule: self.managed_consensus_owner_rule,
+                        };
                         let repo = self.repo.clone();
                         let task = task.clone();
                         let private_key = self.worker_execution_private_key_pem.clone();
@@ -649,13 +690,14 @@ impl Dispatcher {
                             if let Err(error) = execute_managed_consensus_attempt(
                                 repo,
                                 task,
-                                attempt,
-                                assignments,
+                                dispatch.attempt,
+                                dispatch.assignments,
                                 private_key,
                                 max_redispatch,
                                 max_result_bytes,
                                 Vec::new(),
                                 HashMap::new(),
+                                escalation,
                             )
                             .await
                             {
@@ -1204,6 +1246,35 @@ impl Dispatcher {
                 .repo
                 .managed_consensus_assignments_for_attempt(attempt.id)
                 .await?;
+            // A restart keeps escalation available: spares are rebuilt from the
+            // same trusted pool that dispatch uses, minus replicas already assigned.
+            let spare_workers =
+                if replicas.len() < usize::try_from(attempt.replica_count).unwrap_or(0) {
+                    let assigned: HashSet<String> = replicas
+                        .iter()
+                        .map(|replica| replica.worker_id.clone())
+                        .collect();
+                    let registered = self.registered_workers().await?;
+                    let trusted = self.repo.trusted_workers(&registered).await?;
+                    let selection_task = managed_consensus_selection_task(
+                        &task,
+                        u16::try_from(attempt.replica_count).unwrap_or(0),
+                    )?;
+                    let pool = scheduler::eligible_for_task(
+                        &selection_task,
+                        &eligible_managed_consensus_workers(&trusted),
+                        true,
+                    );
+                    spare_consensus_workers(pool, &assigned)
+                } else {
+                    Vec::new()
+                };
+            let escalation = ManagedConsensusEscalation {
+                dispatched: replicas.len(),
+                spare_workers,
+                timeout_secs: self.managed_consensus_timeout_secs,
+                owner_rule: self.managed_consensus_owner_rule,
+            };
             let repo = self.repo.clone();
             let private_key = self.worker_execution_private_key_pem.clone();
             let max_redispatch = self.max_redispatch;
@@ -1219,6 +1290,7 @@ impl Dispatcher {
                     max_result_bytes,
                     initial_observations,
                     initial_outputs,
+                    escalation,
                 )
                 .await
                 {
@@ -2330,6 +2402,141 @@ fn parse_consensus_digest(value: &str) -> Result<[u8; 32]> {
         .map_err(|_| anyhow::anyhow!("consensus digest must contain 32 bytes"))
 }
 
+/// Replicas assigned when an attempt is created, plus the Workers that may be
+/// added later. `spare_workers` is empty for attempts that dispatch every replica.
+struct ManagedConsensusDispatch {
+    attempt: ManagedConsensusAttempt,
+    assignments: Vec<ManagedConsensusAssignment>,
+    spare_workers: Vec<WorkerNode>,
+}
+
+/// Capacity to add replicas after dispatch. An empty `spare_workers` disables escalation.
+#[derive(Default)]
+struct ManagedConsensusEscalation {
+    /// Replica rows already assigned to the attempt when escalation can start.
+    dispatched: usize,
+    /// Candidate Workers. They are taken from the end, so the order chosen at
+    /// dispatch is the order tried.
+    spare_workers: Vec<WorkerNode>,
+    timeout_secs: u64,
+    owner_rule: scheduler::OwnerRule,
+}
+
+/// Replicas assigned at dispatch. Enforce-mode hcode starts at quorum and escalates
+/// for the rest. Every other managed attempt assigns its full replica set.
+fn initial_replica_count(
+    runtime: Option<&str>,
+    mode: &str,
+    replica_count: u16,
+    quorum: u16,
+) -> u16 {
+    if mode == "enforce" && runtime.map(str::trim) == Some(MANAGED_DSL_V1_RUNTIME_VERSION) {
+        quorum
+    } else {
+        replica_count
+    }
+}
+
+/// Workers that were not selected, shuffled into the order escalation tries them.
+fn spare_consensus_workers(
+    mut pool: Vec<WorkerNode>,
+    selected: &HashSet<String>,
+) -> Vec<WorkerNode> {
+    pool.retain(|worker| !selected.contains(&worker.worker_id));
+    pool.shuffle(&mut StdRng::from_entropy());
+    pool
+}
+
+/// Size of the largest group of successful observations that agree on a result.
+fn best_matching_count(observations: &[ConsensusObservation]) -> usize {
+    let mut counts: HashMap<[u8; 32], usize> = HashMap::new();
+    for observation in observations
+        .iter()
+        .filter(|observation| observation.success)
+    {
+        *counts.entry(observation.result_digest).or_default() += 1;
+    }
+    counts.values().copied().max().unwrap_or(0)
+}
+
+fn spawn_managed_consensus_replica(
+    workers: &mut tokio::task::JoinSet<(String, Result<Option<ManagedConsensusVote>>)>,
+    repo: &Arc<TaskRepository>,
+    task: &Task,
+    assignment: ManagedConsensusAssignment,
+    private_key_pem: &str,
+    options: ManagedConsensusReplicaExecutionOptions,
+) {
+    let repo = Arc::clone(repo);
+    let task = task.clone();
+    let private_key_pem = private_key_pem.to_owned();
+    workers.spawn(async move {
+        let replica_id = assignment.replica_id.clone();
+        let result =
+            execute_managed_consensus_replica(repo, task, assignment, private_key_pem, options)
+                .await;
+        (replica_id, result)
+    });
+}
+
+/// Tries spare Workers in order until one becomes a replica. A refused spare is
+/// consumed, so each candidate is tried at most once per attempt.
+async fn add_managed_consensus_spare(
+    repo: &TaskRepository,
+    task: &Task,
+    attempt: &ManagedConsensusAttempt,
+    escalation: &mut ManagedConsensusEscalation,
+    deadline: &mut chrono::DateTime<chrono::Utc>,
+    reason: &'static str,
+) -> Option<ManagedConsensusAssignment> {
+    if attempt.mode != "enforce"
+        || escalation.dispatched >= usize::try_from(attempt.replica_count).unwrap_or(0)
+    {
+        return None;
+    }
+    while let Some(worker) = escalation.spare_workers.pop() {
+        match repo
+            .add_managed_consensus_replica(
+                &task.task_id,
+                attempt.id,
+                &worker,
+                escalation.timeout_secs,
+                escalation.owner_rule,
+            )
+            .await
+        {
+            Ok(Some((assignment, extended_deadline))) => {
+                escalation.dispatched += 1;
+                *deadline = extended_deadline;
+                info!(
+                    task_id = %task.task_id,
+                    attempt_id = %attempt.id,
+                    replica_id = %assignment.replica_id,
+                    reason,
+                    dispatched = escalation.dispatched,
+                    replica_count = attempt.replica_count,
+                    "managed consensus escalation added a replica"
+                );
+                return Some(assignment);
+            }
+            Ok(None) => tracing::debug!(
+                task_id = %task.task_id,
+                attempt_id = %attempt.id,
+                worker_id = %worker.worker_id,
+                "managed consensus escalation skipped a Worker"
+            ),
+            Err(error) => warn!(
+                task_id = %task.task_id,
+                attempt_id = %attempt.id,
+                worker_id = %worker.worker_id,
+                error = %error,
+                "managed consensus escalation could not add a Worker"
+            ),
+        }
+    }
+    None
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn execute_managed_consensus_attempt(
     repo: Arc<TaskRepository>,
@@ -2341,11 +2548,13 @@ async fn execute_managed_consensus_attempt(
     max_result_bytes: usize,
     initial_observations: Vec<ConsensusObservation>,
     initial_outputs: HashMap<[u8; 32], String>,
+    mut escalation: ManagedConsensusEscalation,
 ) -> Result<()> {
     let policy = QuorumPolicy::new(attempt.replica_count as u16, attempt.quorum as u16)
         .map_err(|error| anyhow::anyhow!("invalid persisted managed consensus policy: {error}"))?;
     let binding = managed_consensus_binding(&task, &attempt);
-    let deadline = if attempt.deadline > chrono::Utc::now() {
+    let initial_dispatched = escalation.dispatched;
+    let mut deadline = if attempt.deadline > chrono::Utc::now() {
         attempt.deadline
     } else {
         chrono::Utc::now()
@@ -2357,6 +2566,7 @@ async fn execute_managed_consensus_attempt(
         .collect();
     let mut observations = initial_observations;
     let mut outputs = initial_outputs;
+    let mut mismatches = 0u32;
     if let Ok(certificate) = evaluate_quorum(&binding, policy, &observations) {
         let output = outputs
             .get(&certificate.result_digest)
@@ -2403,46 +2613,88 @@ async fn execute_managed_consensus_attempt(
         }
         return Ok(());
     }
-    let mut workers = tokio::task::JoinSet::new();
-    let execution_options = ManagedConsensusReplicaExecutionOptions {
-        max_result_bytes,
-        deadline,
-        enforce: attempt.mode == "enforce",
-        replica_count: policy.replica_count,
-    };
-    for assignment in assignments {
-        let repo = Arc::clone(&repo);
-        let task = task.clone();
-        let private_key_pem = private_key_pem.clone();
-        let execution_options = execution_options.clone();
-        workers.spawn(async move {
-            let replica_id = assignment.replica_id.clone();
-            let result = execute_managed_consensus_replica(
-                repo,
-                task,
-                assignment,
-                private_key_pem,
-                execution_options,
-            )
-            .await;
-            (replica_id, result)
-        });
-    }
-    while !workers.is_empty() {
-        let remaining = if deadline > chrono::Utc::now() {
-            deadline
-                .signed_duration_since(chrono::Utc::now())
-                .to_std()
-                .unwrap_or_default()
-        } else {
-            Duration::ZERO
+
+    let execution_options =
+        |deadline: chrono::DateTime<chrono::Utc>| ManagedConsensusReplicaExecutionOptions {
+            max_result_bytes,
+            deadline,
+            enforce: attempt.mode == "enforce",
+            replica_count: policy.replica_count,
         };
-        if remaining.is_zero() {
+    let quorum = usize::from(policy.required_quorum);
+    let mut workers = tokio::task::JoinSet::new();
+    for assignment in assignments {
+        spawn_managed_consensus_replica(
+            &mut workers,
+            &repo,
+            &task,
+            assignment,
+            &private_key_pem,
+            execution_options(deadline),
+        );
+    }
+
+    loop {
+        // Once quorum cannot be reached by the replicas already in flight, add a
+        // spare or stop. Waiting on in-flight replicas cannot help then.
+        let outstanding = workers.len();
+        if best_matching_count(&observations) + outstanding < quorum {
+            if let Some(assignment) = add_managed_consensus_spare(
+                &repo,
+                &task,
+                &attempt,
+                &mut escalation,
+                &mut deadline,
+                "quorum unreachable",
+            )
+            .await
+            {
+                pending_assignments.insert(assignment.replica_id.clone(), assignment.clone());
+                spawn_managed_consensus_replica(
+                    &mut workers,
+                    &repo,
+                    &task,
+                    assignment,
+                    &private_key_pem,
+                    execution_options(deadline),
+                );
+                continue;
+            }
             break;
         }
-        let joined = tokio::time::timeout(remaining, workers.join_next()).await;
-        let Some(joined) = joined.ok().flatten() else {
+        if outstanding == 0 {
             break;
+        }
+        let remaining = (deadline - chrono::Utc::now()).to_std().unwrap_or_default();
+        let joined = match tokio::time::timeout(remaining, workers.join_next()).await {
+            Ok(Some(joined)) => joined,
+            Ok(None) => break,
+            Err(_elapsed) => {
+                // The deadline passed with replicas still outstanding. One extension
+                // gives a spare its own window; without a spare, the attempt ends.
+                if let Some(assignment) = add_managed_consensus_spare(
+                    &repo,
+                    &task,
+                    &attempt,
+                    &mut escalation,
+                    &mut deadline,
+                    "deadline reached",
+                )
+                .await
+                {
+                    pending_assignments.insert(assignment.replica_id.clone(), assignment.clone());
+                    spawn_managed_consensus_replica(
+                        &mut workers,
+                        &repo,
+                        &task,
+                        assignment,
+                        &private_key_pem,
+                        execution_options(deadline),
+                    );
+                    continue;
+                }
+                break;
+            }
         };
         match joined {
             Ok((replica_id, Ok(Some(vote)))) => {
@@ -2451,6 +2703,20 @@ async fn execute_managed_consensus_attempt(
                     record_managed_consensus_vote(&repo, &task, &attempt, vote).await?;
                 if outcome == crate::task_repository::ManagedConsensusObservationOutcome::Recorded {
                     let result_key = vote.observation.result_digest;
+                    if vote.observation.success
+                        && observations
+                            .iter()
+                            .any(|earlier| earlier.success && earlier.result_digest != result_key)
+                    {
+                        mismatches += 1;
+                        warn!(
+                            task_id = %task.task_id,
+                            attempt_id = %attempt.id,
+                            replica_id,
+                            mismatches,
+                            "managed consensus replica diverged from an earlier result"
+                        );
+                    }
                     outputs.insert(result_key, vote.output);
                     observations.push(vote.observation);
                     if let Ok(certificate) = evaluate_quorum(&binding, policy, &observations) {
@@ -2483,6 +2749,14 @@ async fn execute_managed_consensus_attempt(
                                     "managed consensus certificate output was not retained"
                                 )
                             })?;
+                        info!(
+                            task_id = %task.task_id,
+                            attempt_id = %attempt.id,
+                            replicas = escalation.dispatched,
+                            escalations = escalation.dispatched.saturating_sub(initial_dispatched),
+                            mismatches,
+                            "managed consensus certificate formed"
+                        );
                         if attempt.mode == "observe" {
                             repo.complete_managed_consensus_observe(
                                 &task.task_id,
@@ -2528,6 +2802,7 @@ async fn execute_managed_consensus_attempt(
             }
         }
     }
+
     let mut stops_confirmed = true;
     for assignment in pending_assignments.values() {
         if let Err(error) =
@@ -2546,6 +2821,14 @@ async fn execute_managed_consensus_attempt(
     drain_managed_consensus_workers(&repo, &task, &attempt, &mut workers).await?;
     workers.abort_all();
     let reason = "managed consensus quorum was not reached";
+    warn!(
+        task_id = %task.task_id,
+        attempt_id = %attempt.id,
+        replicas = escalation.dispatched,
+        escalations = escalation.dispatched.saturating_sub(initial_dispatched),
+        mismatches,
+        "managed consensus ended without quorum"
+    );
     if attempt.mode == "observe" {
         repo.complete_managed_consensus_observe(&task.task_id, attempt.id, None, stops_confirmed)
             .await?;
@@ -6822,6 +7105,18 @@ mod tests {
     }
 
     #[test]
+    fn initial_replica_count_starts_lazy_only_for_enforce_hcode() {
+        let hcode = Some(MANAGED_DSL_V1_RUNTIME_VERSION);
+        assert_eq!(initial_replica_count(hcode, "enforce", 3, 2), 2);
+        assert_eq!(initial_replica_count(hcode, "observe", 3, 2), 3);
+        assert_eq!(
+            initial_replica_count(Some("production_sandboxed_dsl"), "enforce", 3, 2),
+            3
+        );
+        assert_eq!(initial_replica_count(None, "enforce", 3, 2), 3);
+    }
+
+    #[test]
     fn managed_consensus_candidates_require_callback_and_provider_identity() {
         let valid = ["w1", "w2", "w3"].map(|id| make_worker(id, 4, 16, WorkerStatus::Idle));
         let mut missing_callback = make_worker("w4", 16, 32, WorkerStatus::Idle);
@@ -8165,6 +8460,7 @@ mod tests {
             256 * 1024,
             Vec::new(),
             HashMap::new(),
+            ManagedConsensusEscalation::default(),
         )
         .await
         .unwrap();
@@ -8304,11 +8600,12 @@ mod tests {
         .await
         .unwrap();
 
-        let (_attempt, assignments) = dispatcher
+        let dispatch = dispatcher
             .dispatch_managed_consensus(&task, &workers)
             .await
             .unwrap()
-            .expect("three distinct owners are eligible");
+            .expect("the initial replicas come from distinct owners");
+        let assignments = dispatch.assignments;
         let owner_by_worker: HashMap<&str, &str> = workers
             .iter()
             .map(|worker| (worker.worker_id.as_str(), worker.username.as_str()))
@@ -8317,15 +8614,16 @@ mod tests {
             .iter()
             .map(|assignment| owner_by_worker[assignment.worker_id.as_str()])
             .collect();
-        assert_eq!(assignments.len(), 3);
+        assert_eq!(assignments.len(), 2, "enforce starts at quorum");
         assert_eq!(
             selected_owners.len(),
-            3,
-            "replicas must belong to three distinct owners"
+            2,
+            "initial replicas must belong to distinct owners"
         );
 
-        // With two owners available, replica_count cannot be met. The task stays
-        // pending and no attempt is created, so the replica count is not lowered.
+        // Two distinct owners satisfy the initial quorum, but one owner does not.
+        // With a single owner the task stays pending and no attempt is created, so
+        // the replica count is not lowered.
         let two_owner_task_id = format!("dispatcher-distinct-owner-two-{unique}");
         let two_owner_task = repo
             .create(&create_task(two_owner_task_id.clone()))
@@ -8340,13 +8638,13 @@ mod tests {
         )
         .await
         .unwrap();
-        let two_owner_workers: Vec<WorkerNode> = workers
+        let one_owner_workers: Vec<WorkerNode> = workers
             .iter()
-            .filter(|worker| worker.username != providers[2])
+            .filter(|worker| worker.username == providers[0])
             .cloned()
             .collect();
         assert!(dispatcher
-            .dispatch_managed_consensus(&two_owner_task, &two_owner_workers)
+            .dispatch_managed_consensus(&two_owner_task, &one_owner_workers)
             .await
             .unwrap()
             .is_none());
@@ -8433,13 +8731,545 @@ mod tests {
         .await
         .unwrap();
 
-        let (_attempt, assignments) = dispatcher
+        let dispatch = dispatcher
             .dispatch_managed_consensus(&task, &workers)
             .await
             .unwrap()
             .expect("the shared owner rule accepts a single owner");
-        assert_eq!(assignments.len(), 3, "all three replicas share one owner");
+        assert_eq!(
+            dispatch.assignments.len(),
+            2,
+            "enforce starts at quorum, and both replicas share one owner"
+        );
 
+        fixture.cleanup().await.ok();
+    }
+
+    async fn lazy_consensus_owner(pool: &sqlx::PgPool, owner: &str, balance: i64) {
+        sqlx::query("INSERT INTO users (username, password_hash, balance) VALUES ($1, 'hash', $2)")
+            .bind(owner)
+            .bind(balance)
+            .execute(pool)
+            .await
+            .unwrap();
+    }
+
+    /// Starts a fake Worker that answers with `output` after `delay`. The returned
+    /// receiver must stay alive so stop requests are answered during the test.
+    async fn lazy_consensus_worker(
+        pool: &sqlx::PgPool,
+        owner: &str,
+        output: &[u8],
+        delay: Duration,
+    ) -> (
+        WorkerNode,
+        tokio::sync::mpsc::Receiver<StopTaskExecutionRequest>,
+    ) {
+        let (addr, stops) = consensus_worker_server(output.to_vec(), delay)
+            .await
+            .unwrap();
+        let worker_id = format!("lazy-worker-{}", uuid::Uuid::new_v4());
+        sqlx::query(
+            "INSERT INTO worker_nodes (worker_id, username, ip, cpu_cores, memory_gb,
+             cpu_score, gpu_score, gpu_memory_gb, storage_total_gb, storage_available_gb)
+             VALUES ($1, $2, '127.0.0.1:1', 4, 16, 400, 0, 0, 500, 200)",
+        )
+        .bind(&worker_id)
+        .bind(owner)
+        .execute(pool)
+        .await
+        .unwrap();
+        let mut worker = public_managed_dsl_worker(&worker_id, owner);
+        worker.ip = addr.to_string();
+        (worker, stops)
+    }
+
+    async fn lazy_consensus_task(repo: &TaskRepository, owner: &str, task_id: &str) -> Task {
+        let mut task = make_task(task_id, TaskStatus::Pending, 0);
+        task.owner = owner.into();
+        task.runtime = Some(MANAGED_DSL_V1_RUNTIME_VERSION.into());
+        task.task_source = Some("return input".into());
+        task.torrent_source = Some("{}".into());
+        task.deterministic = true;
+        task.max_cpt = 100;
+        task.req_cpu_score = 0;
+        task.req_memory_gb = 0;
+        task.req_storage_gb = 0;
+        repo.create(&task).await.unwrap()
+    }
+
+    /// Creates an enforce attempt from `initial` and runs it with `spares` available
+    /// for escalation. Spares are taken from the end of the list.
+    async fn run_lazy_consensus(
+        repo: &Arc<TaskRepository>,
+        task: &Task,
+        initial: &[WorkerNode],
+        spares: Vec<WorkerNode>,
+        timeout_secs: u64,
+    ) -> uuid::Uuid {
+        let (attempt, assignments) = repo
+            .create_managed_consensus_attempt(task, initial, 3, 2, timeout_secs, "enforce")
+            .await
+            .unwrap()
+            .expect("the initial replicas are created");
+        let attempt_id = attempt.id;
+        let (private_key, _) = hivemind_config::generate_worker_execution_test_key_pair();
+        let escalation = ManagedConsensusEscalation {
+            dispatched: assignments.len(),
+            spare_workers: spares,
+            timeout_secs,
+            owner_rule: scheduler::OwnerRule::Distinct,
+        };
+        execute_managed_consensus_attempt(
+            repo.clone(),
+            task.clone(),
+            attempt,
+            assignments,
+            private_key,
+            i32::MAX,
+            256 * 1024,
+            Vec::new(),
+            HashMap::new(),
+            escalation,
+        )
+        .await
+        .unwrap();
+        attempt_id
+    }
+
+    async fn replica_providers(
+        pool: &sqlx::PgPool,
+        attempt_id: uuid::Uuid,
+    ) -> Vec<(String, String)> {
+        sqlx::query_as(
+            "SELECT replica_id, provider_user FROM managed_consensus_replicas
+             WHERE attempt_id = $1 ORDER BY replica_id",
+        )
+        .bind(attempt_id)
+        .fetch_all(pool)
+        .await
+        .unwrap()
+    }
+
+    /// Captures tracing output written on the current thread (the test runtime).
+    #[derive(Clone, Default)]
+    struct LogCapture(Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for LogCapture {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn lazy_consensus_two_agreeing_replicas_settle_without_a_third() {
+        let lock = dispatcher_db_lock();
+        let _guard = lock.lock().await;
+        let Some((db, fixture)) = test_db("dispatcher_lazy_consensus_agreement").await else {
+            return;
+        };
+        let repo = Arc::new(TaskRepository::new(db.pool.clone()));
+        let unique = uuid::Uuid::new_v4().to_string();
+        let owner = format!("lazy-owner-{unique}");
+        lazy_consensus_owner(&db.pool, &owner, 1000).await;
+        let mut workers = Vec::new();
+        let mut stops = Vec::new();
+        for label in ["a", "b", "c"] {
+            let provider = format!("lazy-provider-{label}-{unique}");
+            lazy_consensus_owner(&db.pool, &provider, 0).await;
+            let (worker, stop_rx) =
+                lazy_consensus_worker(&db.pool, &provider, b"same-result", Duration::ZERO).await;
+            workers.push(worker);
+            stops.push(stop_rx);
+        }
+        let task_id = format!("lazy-agreement-task-{unique}");
+        let task = lazy_consensus_task(&repo, &owner, &task_id).await;
+
+        let attempt_id =
+            run_lazy_consensus(&repo, &task, &workers[..2], vec![workers[2].clone()], 30).await;
+
+        let stored = repo.find_by_task_id(&task_id).await.unwrap().unwrap();
+        assert_eq!(stored.status, TaskStatus::Completed);
+        assert_eq!(stored.output.as_deref(), Some("same-result"));
+        assert_eq!(
+            replica_providers(&db.pool, attempt_id).await.len(),
+            2,
+            "two agreeing replicas must not create a third"
+        );
+        let (hold_state, refund): (String, i64) = sqlx::query_as(
+            "SELECT state, refund_cpt FROM managed_consensus_usage_holds WHERE attempt_id = $1",
+        )
+        .bind(attempt_id)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+        assert_eq!(hold_state, "settled");
+        assert!(refund > 0, "the unused third-replica allowance is refunded");
+        assert!(stored.billed_amount <= task.max_cpt);
+        let balance: i64 = sqlx::query_scalar("SELECT balance FROM users WHERE username = $1")
+            .bind(&owner)
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+        assert_eq!(balance, 1000 - stored.billed_amount);
+        drop(stops);
+        fixture.cleanup().await.ok();
+    }
+
+    #[tokio::test]
+    async fn lazy_consensus_disagreement_adds_one_replica_that_breaks_the_tie() {
+        let lock = dispatcher_db_lock();
+        let _guard = lock.lock().await;
+        let Some((db, fixture)) = test_db("dispatcher_lazy_consensus_tie_break").await else {
+            return;
+        };
+        let logs = LogCapture::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer({
+                let logs = logs.clone();
+                move || logs.clone()
+            })
+            .with_ansi(false)
+            .finish();
+        let _log_guard = tracing::subscriber::set_default(subscriber);
+
+        let repo = Arc::new(TaskRepository::new(db.pool.clone()));
+        let unique = uuid::Uuid::new_v4().to_string();
+        let owner = format!("lazy-tie-owner-{unique}");
+        lazy_consensus_owner(&db.pool, &owner, 1000).await;
+        let mut stops = Vec::new();
+        let mut providers = Vec::new();
+        let mut workers = Vec::new();
+        for (label, output) in [
+            ("a", b"same-result".as_slice()),
+            ("b", b"other-result".as_slice()),
+            ("c", b"same-result".as_slice()),
+            ("d", b"same-result".as_slice()),
+        ] {
+            let provider = format!("lazy-tie-provider-{label}-{unique}");
+            lazy_consensus_owner(&db.pool, &provider, 0).await;
+            let (worker, stop_rx) =
+                lazy_consensus_worker(&db.pool, &provider, output, Duration::ZERO).await;
+            providers.push(provider);
+            workers.push(worker);
+            stops.push(stop_rx);
+        }
+        let task_id = format!("lazy-tie-task-{unique}");
+        let task = lazy_consensus_task(&repo, &owner, &task_id).await;
+        // Spares are taken from the end, so owner d is tried before owner c.
+        let spares = vec![workers[2].clone(), workers[3].clone()];
+
+        let attempt_id = run_lazy_consensus(&repo, &task, &workers[..2], spares, 30).await;
+
+        let stored = repo.find_by_task_id(&task_id).await.unwrap().unwrap();
+        assert_eq!(stored.status, TaskStatus::Completed);
+        assert_eq!(stored.output.as_deref(), Some("same-result"));
+        let replicas = replica_providers(&db.pool, attempt_id).await;
+        assert_eq!(
+            replicas.len(),
+            3,
+            "the disagreement adds exactly one replica"
+        );
+        assert_ne!(replicas[2].1, providers[0]);
+        assert_ne!(replicas[2].1, providers[1]);
+        let captured = String::from_utf8(logs.0.lock().unwrap().clone()).unwrap();
+        assert!(
+            captured.contains("managed consensus escalation added a replica"),
+            "the escalation must be observable in the logs"
+        );
+        assert!(captured.contains(&attempt_id.to_string()));
+        assert!(
+            !captured.contains("return input"),
+            "logs must not carry task source"
+        );
+        drop(stops);
+        fixture.cleanup().await.ok();
+    }
+
+    #[tokio::test]
+    async fn lazy_consensus_third_disagreement_is_no_quorum_without_downgrade() {
+        let lock = dispatcher_db_lock();
+        let _guard = lock.lock().await;
+        let Some((db, fixture)) = test_db("dispatcher_lazy_consensus_no_quorum").await else {
+            return;
+        };
+        let repo = Arc::new(TaskRepository::new(db.pool.clone()));
+        let unique = uuid::Uuid::new_v4().to_string();
+        let owner = format!("lazy-no-quorum-owner-{unique}");
+        lazy_consensus_owner(&db.pool, &owner, 1000).await;
+        let mut stops = Vec::new();
+        let mut workers = Vec::new();
+        for (label, output) in [
+            ("a", b"left".as_slice()),
+            ("b", b"right".as_slice()),
+            ("c", b"center".as_slice()),
+            ("d", b"up".as_slice()),
+        ] {
+            let provider = format!("lazy-no-quorum-provider-{label}-{unique}");
+            lazy_consensus_owner(&db.pool, &provider, 0).await;
+            let (worker, stop_rx) =
+                lazy_consensus_worker(&db.pool, &provider, output, Duration::ZERO).await;
+            workers.push(worker);
+            stops.push(stop_rx);
+        }
+        let task_id = format!("lazy-no-quorum-task-{unique}");
+        let task = lazy_consensus_task(&repo, &owner, &task_id).await;
+
+        let attempt_id = run_lazy_consensus(
+            &repo,
+            &task,
+            &workers[..2],
+            vec![workers[2].clone(), workers[3].clone()],
+            30,
+        )
+        .await;
+
+        let stored = repo.find_by_task_id(&task_id).await.unwrap().unwrap();
+        assert_ne!(stored.status, TaskStatus::Completed);
+        assert!(stored.output.is_none());
+        assert_eq!(replica_providers(&db.pool, attempt_id).await.len(), 3);
+        let attempt_state: String =
+            sqlx::query_scalar("SELECT state FROM managed_consensus_attempts WHERE id = $1")
+                .bind(attempt_id)
+                .fetch_one(&db.pool)
+                .await
+                .unwrap();
+        assert_eq!(attempt_state, "no_quorum");
+        drop(stops);
+        fixture.cleanup().await.ok();
+    }
+
+    #[tokio::test]
+    async fn lazy_consensus_timeout_escalates_once_to_a_distinct_owner() {
+        let lock = dispatcher_db_lock();
+        let _guard = lock.lock().await;
+        let Some((db, fixture)) = test_db("dispatcher_lazy_consensus_timeout").await else {
+            return;
+        };
+        let repo = Arc::new(TaskRepository::new(db.pool.clone()));
+        let unique = uuid::Uuid::new_v4().to_string();
+        let owner = format!("lazy-timeout-owner-{unique}");
+        lazy_consensus_owner(&db.pool, &owner, 1000).await;
+        let owner_a = format!("lazy-timeout-provider-a-{unique}");
+        let owner_b = format!("lazy-timeout-provider-b-{unique}");
+        let owner_c = format!("lazy-timeout-provider-c-{unique}");
+        for provider in [&owner_a, &owner_b, &owner_c] {
+            lazy_consensus_owner(&db.pool, provider, 0).await;
+        }
+        let mut stops = Vec::new();
+        let (worker_a, stop_a) =
+            lazy_consensus_worker(&db.pool, &owner_a, b"same-result", Duration::ZERO).await;
+        // The second replica answers after the 2s attempt timeout, so it times out.
+        let (worker_b, stop_b) =
+            lazy_consensus_worker(&db.pool, &owner_b, b"same-result", Duration::from_secs(10))
+                .await;
+        let (worker_c, stop_c) =
+            lazy_consensus_worker(&db.pool, &owner_c, b"same-result", Duration::ZERO).await;
+        let (worker_a_again, stop_a_again) =
+            lazy_consensus_worker(&db.pool, &owner_a, b"same-result", Duration::ZERO).await;
+        stops.extend([stop_a, stop_b, stop_c, stop_a_again]);
+
+        let task_id = format!("lazy-timeout-task-{unique}");
+        let task = lazy_consensus_task(&repo, &owner, &task_id).await;
+        // Spares are taken from the end: the owner-a spare is tried first and must be refused.
+        let attempt_id = run_lazy_consensus(
+            &repo,
+            &task,
+            &[worker_a, worker_b],
+            vec![worker_c, worker_a_again],
+            2,
+        )
+        .await;
+
+        let stored = repo.find_by_task_id(&task_id).await.unwrap().unwrap();
+        assert_eq!(stored.status, TaskStatus::Completed);
+        assert_eq!(stored.output.as_deref(), Some("same-result"));
+        let replicas = replica_providers(&db.pool, attempt_id).await;
+        assert_eq!(replicas.len(), 3);
+        assert_eq!(
+            replicas[2].1, owner_c,
+            "the third replica uses a distinct owner"
+        );
+        let window_secs: f64 = sqlx::query_scalar(
+            "SELECT EXTRACT(EPOCH FROM (deadline - created_at))::FLOAT8
+             FROM managed_consensus_attempts WHERE id = $1",
+        )
+        .bind(attempt_id)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+        assert!(
+            (3.5..=4.5).contains(&window_secs),
+            "one extension caps the attempt at twice the 2s timeout, got {window_secs}s"
+        );
+        drop(stops);
+        fixture.cleanup().await.ok();
+    }
+
+    #[tokio::test]
+    async fn lazy_consensus_without_a_free_owner_does_not_downgrade() {
+        let lock = dispatcher_db_lock();
+        let _guard = lock.lock().await;
+        let Some((db, fixture)) = test_db("dispatcher_lazy_consensus_no_owner").await else {
+            return;
+        };
+        let repo = Arc::new(TaskRepository::new(db.pool.clone()));
+        let unique = uuid::Uuid::new_v4().to_string();
+        let owner = format!("lazy-no-owner-owner-{unique}");
+        lazy_consensus_owner(&db.pool, &owner, 1000).await;
+        let owner_a = format!("lazy-no-owner-provider-a-{unique}");
+        let owner_b = format!("lazy-no-owner-provider-b-{unique}");
+        for provider in [&owner_a, &owner_b] {
+            lazy_consensus_owner(&db.pool, provider, 0).await;
+        }
+        let mut stops = Vec::new();
+        let (worker_a, stop_a) =
+            lazy_consensus_worker(&db.pool, &owner_a, b"same-result", Duration::ZERO).await;
+        let (worker_b, stop_b) =
+            lazy_consensus_worker(&db.pool, &owner_b, b"other-result", Duration::ZERO).await;
+        // The only spare shares owner A with a replica that already exists.
+        let (spare_a, stop_spare) =
+            lazy_consensus_worker(&db.pool, &owner_a, b"same-result", Duration::ZERO).await;
+        stops.extend([stop_a, stop_b, stop_spare]);
+
+        let task_id = format!("lazy-no-owner-task-{unique}");
+        let task = lazy_consensus_task(&repo, &owner, &task_id).await;
+        let attempt_id =
+            run_lazy_consensus(&repo, &task, &[worker_a, worker_b], vec![spare_a], 30).await;
+
+        let stored = repo.find_by_task_id(&task_id).await.unwrap().unwrap();
+        assert_ne!(stored.status, TaskStatus::Completed);
+        assert!(stored.output.is_none());
+        assert_eq!(
+            replica_providers(&db.pool, attempt_id).await.len(),
+            2,
+            "a refused spare must not create a replica"
+        );
+        drop(stops);
+        fixture.cleanup().await.ok();
+    }
+
+    #[tokio::test]
+    async fn managed_consensus_dispatch_starts_with_quorum_replicas_and_keeps_spares() {
+        let lock = dispatcher_db_lock();
+        let _guard = lock.lock().await;
+        let Some((db, fixture)) = test_db("dispatcher_lazy_consensus_dispatch").await else {
+            return;
+        };
+        let repo = Arc::new(TaskRepository::new(db.pool.clone()));
+        let dispatcher = Dispatcher::new(
+            hivemind_database::DatabaseManager {
+                pool: db.pool.clone(),
+            },
+            30,
+            0,
+        )
+        .with_managed_consensus_config(&ManagedConsensusConfig {
+            timeout_secs: 30,
+            ..ManagedConsensusConfig::default()
+        });
+        let unique = uuid::Uuid::new_v4().to_string();
+        let owner = format!("lazy-dispatch-owner-{unique}");
+        lazy_consensus_owner(&db.pool, &owner, 1000).await;
+        let mut stops = Vec::new();
+        let mut workers = Vec::new();
+        for label in ["a", "b", "c", "d"] {
+            let provider = format!("lazy-dispatch-provider-{label}-{unique}");
+            lazy_consensus_owner(&db.pool, &provider, 0).await;
+            let (worker, stop_rx) =
+                lazy_consensus_worker(&db.pool, &provider, b"same-result", Duration::ZERO).await;
+            workers.push(worker);
+            stops.push(stop_rx);
+        }
+        let task_id = format!("lazy-dispatch-task-{unique}");
+        let task = lazy_consensus_task(&repo, &owner, &task_id).await;
+        repo.set_managed_consensus_policy(
+            &task_id,
+            u32::from(CONSENSUS_PROTOCOL_VERSION),
+            3,
+            2,
+            "enforce",
+        )
+        .await
+        .unwrap();
+
+        let dispatch = dispatcher
+            .dispatch_managed_consensus(&task, &workers)
+            .await
+            .unwrap()
+            .expect("four distinct owners are eligible");
+        assert_eq!(dispatch.assignments.len(), 2, "enforce starts at quorum");
+        assert_eq!(dispatch.spare_workers.len(), 2);
+        let hold_replicas: i32 = sqlx::query_scalar(
+            "SELECT replica_count FROM managed_consensus_usage_holds WHERE attempt_id = $1",
+        )
+        .bind(dispatch.attempt.id)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+        assert_eq!(hold_replicas, 3, "the hold still covers the worst case");
+        drop(stops);
+        fixture.cleanup().await.ok();
+    }
+
+    #[tokio::test]
+    async fn managed_consensus_observe_dispatch_still_assigns_every_replica() {
+        let lock = dispatcher_db_lock();
+        let _guard = lock.lock().await;
+        let Some((db, fixture)) = test_db("dispatcher_observe_consensus_full_set").await else {
+            return;
+        };
+        let repo = Arc::new(TaskRepository::new(db.pool.clone()));
+        let dispatcher = Dispatcher::new(
+            hivemind_database::DatabaseManager {
+                pool: db.pool.clone(),
+            },
+            30,
+            0,
+        )
+        .with_managed_consensus_config(&ManagedConsensusConfig::default());
+        let unique = uuid::Uuid::new_v4().to_string();
+        let owner = format!("observe-dispatch-owner-{unique}");
+        lazy_consensus_owner(&db.pool, &owner, 1000).await;
+        let mut stops = Vec::new();
+        let mut workers = Vec::new();
+        for label in ["a", "b", "c", "d"] {
+            let provider = format!("observe-dispatch-provider-{label}-{unique}");
+            lazy_consensus_owner(&db.pool, &provider, 0).await;
+            let (worker, stop_rx) =
+                lazy_consensus_worker(&db.pool, &provider, b"same-result", Duration::ZERO).await;
+            workers.push(worker);
+            stops.push(stop_rx);
+        }
+        let task_id = format!("observe-dispatch-task-{unique}");
+        let task = lazy_consensus_task(&repo, &owner, &task_id).await;
+        repo.set_managed_consensus_policy(
+            &task_id,
+            u32::from(CONSENSUS_PROTOCOL_VERSION),
+            3,
+            2,
+            "observe",
+        )
+        .await
+        .unwrap();
+
+        let dispatch = dispatcher
+            .dispatch_managed_consensus(&task, &workers)
+            .await
+            .unwrap()
+            .expect("observe dispatches all replicas");
+        assert_eq!(
+            dispatch.assignments.len(),
+            3,
+            "observe dispatches every replica"
+        );
+        assert!(dispatch.spare_workers.is_empty());
+        drop(stops);
         fixture.cleanup().await.ok();
     }
 
@@ -8754,6 +9584,17 @@ mod tests {
         stopped: HashSet<String>,
     }
 
+    /// Marks a fake execution finished when its handler future is dropped. Tonic
+    /// drops the handler when the client's timeout cancels the RPC, and a stop
+    /// request for that replica must still confirm that nothing is running.
+    struct FinishOnDrop(watch::Sender<bool>);
+
+    impl Drop for FinishOnDrop {
+        fn drop(&mut self) {
+            let _ = self.0.send(true);
+        }
+    }
+
     struct ConsensusWorkerService {
         output: Vec<u8>,
         delay: Duration,
@@ -8778,7 +9619,7 @@ mod tests {
                 state
                     .running
                     .insert(request.attempt_id.clone(), (cancellation_tx, finished_rx));
-                (cancellation_rx, finished_tx)
+                (cancellation_rx, FinishOnDrop(finished_tx))
             };
             let cancelled = tokio::select! {
                 _ = tokio::time::sleep(self.delay) => false,
@@ -8787,7 +9628,7 @@ mod tests {
             if cancelled {
                 let mut state = self.state.lock().unwrap();
                 state.running.remove(&request.attempt_id);
-                let _ = finished_tx.send(true);
+                let _ = finished_tx.0.send(true);
                 return Err(Status::cancelled("fixture attempt stopped"));
             }
             let output = self.output.clone();
@@ -8834,7 +9675,7 @@ mod tests {
             };
             let mut state = self.state.lock().unwrap();
             state.running.remove(&request.attempt_id);
-            let _ = finished_tx.send(true);
+            let _ = finished_tx.0.send(true);
             Ok(Response::new(response))
         }
 

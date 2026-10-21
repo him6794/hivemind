@@ -183,7 +183,8 @@ without starting containers.
 In a second PowerShell session, set `HIVEMIND_SITE_URL`, `HIVEMIND_MASTER_UI_URL`,
 and `HIVEMIND_WORKER_UI_URL` to the printed URLs. Generated ports are not inherited
 by that shell. The root Compose stack contains one Worker; task execution and
-settlement tests under the default enforce policy require three eligible Workers.
+settlement tests under the default enforce policy need two eligible Workers, and
+a third when the first two disagree or time out.
 
 Run the browser tests:
 
@@ -313,9 +314,9 @@ agree on a wrong result.
   `WORKER_NODEPOOL_TOKEN` is expected for UI-driven registration.
 - **Managed tasks do not produce a successful result**: check admission,
   readiness, runtime identity, per-replica budgets, and the round deadline
-  (`MANAGED_CONSENSUS_TIMEOUT_SECS`). The default needs three eligible Workers
-  from three distinct owners and two matching results; one root Compose Worker
-  is insufficient. A single account can run the pool only with
+  (`MANAGED_CONSENSUS_TIMEOUT_SECS`). The default needs two eligible Workers from
+  distinct owners and two matching results, plus a third Worker when the first two
+  disagree or time out. One root Compose Worker is insufficient. A single account can run the pool only with
   `MANAGED_CONSENSUS_REQUIRE_DISTINCT_OWNERS=false`, which is for local smoke and
   E2E runs. New v1
   automatic paid retries are disabled. Outstanding replicas must be stopped or

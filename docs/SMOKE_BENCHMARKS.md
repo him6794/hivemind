@@ -10,9 +10,11 @@ dispatch, execute, and complete active `hcode` tasks. It does not
 validate public marketplace pricing, fiat conversion, or untrusted provider
 operation.
 
-V1 enforced consensus needs at least three eligible Workers by default. The
-script fails before submission when a scenario has fewer registered Workers than
-its target, rather than silently measuring a one-Worker path.
+V1 enforced consensus starts with two eligible Workers and adds a third only
+after disagreement or timeout. The consensus scenario keeps a worker target of
+three so escalation can be exercised. The script fails before submission when a
+scenario has fewer registered Workers than its target, rather than silently
+measuring a one-Worker path.
 
 Under the default `MANAGED_CONSENSUS_REQUIRE_DISTINCT_OWNERS=true`, the eligible
 Workers must belong to distinct owners. A task stays pending when fewer distinct

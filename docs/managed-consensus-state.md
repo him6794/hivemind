@@ -21,8 +21,9 @@ MANAGED_CONSENSUS_MAX_RESULT_BYTES=262144
 MANAGED_CONSENSUS_REQUIRE_DISTINCT_OWNERS=true
 ```
 
-The default `enforce` policy assigns three distinct registered Workers and
-requires two matching results. Successful completion requires a quorum
+The default `enforce` policy dispatches two replicas to distinct registered
+Workers and requires two matching results. A third replica is added only when
+needed (see [Replica dispatch and escalation](#replica-dispatch-and-escalation)). Successful completion requires a quorum
 certificate; Nodepool does not lower the quorum or use a single-Worker fallback
 when fewer Workers are available. Valid assignment-bound v1 usage may still be
 billable if the task fails or no quorum forms.
@@ -42,6 +43,36 @@ ends as `OBSERVED`, without user output, billing, or settlement.
 
 Only deterministic, side-effect-free managed DSL tasks are eligible. The
 `host_count` field is a pricing/input field, separate from the replica count.
+
+## Replica dispatch and escalation
+
+Enforce-mode `hcode` attempts start with `MANAGED_CONSENSUS_QUORUM` replicas
+(two by default), not `MANAGED_CONSENSUS_REPLICA_COUNT`. Nodepool adds the next
+replica only when the replicas in flight cannot reach quorum, or when the attempt
+deadline passes with quorum still missing:
+
+- A disagreement, a refused or failed replica, or a timeout can trigger
+  escalation. The added Worker comes from the same eligible pool. It must satisfy
+  the owner rule and have a free execution slot, and Nodepool checks both again
+  when it inserts the replica.
+- Each escalation extends the attempt deadline by one
+  `MANAGED_CONSENSUS_TIMEOUT_SECS`, capped at twice that timeout from creation.
+  Replicas dispatched before an extension keep the RPC budget they were given.
+- Escalation stops at `MANAGED_CONSENSUS_REPLICA_COUNT`. When no eligible Worker
+  can be added, the attempt ends with no quorum. Nodepool does not lower the
+  quorum to finish.
+- After a Nodepool restart, recovery rebuilds the spare pool from the trusted
+  registered Workers, so escalation resumes from the persisted replica set.
+
+The acceptance rule is unchanged. A certificate still requires
+`MANAGED_CONSENSUS_QUORUM` matching results from distinct replicas, and each
+replica reports through its own assignment-bound execution token. Lazy dispatch
+changes how many replicas run, not which results are accepted.
+
+The usage hold still reserves the worst case for `MANAGED_CONSENSUS_REPLICA_COUNT`
+replicas. A replica that was never dispatched has no evidence and no payout, so
+its allowance returns to the owner as a refund at settlement. Observe mode and
+other managed runtimes assign every replica at dispatch.
 
 ## Acceptance and settlement
 

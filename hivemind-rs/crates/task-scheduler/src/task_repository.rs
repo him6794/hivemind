@@ -671,6 +671,63 @@ fn reject_managed_v1_evidence(
     *valid = false;
 }
 
+/// Locks a Worker's queue row and refuses when every execution slot is in use.
+/// Active reservations and legacy assignments both count against capacity.
+async fn ensure_consensus_worker_slot(
+    tx: &mut Transaction<'_, Postgres>,
+    worker_id: &str,
+) -> Result<()> {
+    let capacity: Option<i32> = sqlx::query_scalar(
+        "SELECT queue_capacity FROM worker_nodes WHERE worker_id = $1 FOR UPDATE",
+    )
+    .bind(worker_id)
+    .fetch_optional(&mut **tx)
+    .await?;
+    let capacity = capacity
+        .ok_or_else(|| anyhow::anyhow!("consensus Worker {worker_id} is not registered"))?
+        .max(1) as i64;
+    let active_reservations: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*)
+         FROM managed_consensus_worker_reservations r
+         JOIN managed_consensus_attempts a ON a.id = r.attempt_id
+         JOIN tasks t ON t.managed_consensus_attempt_id = a.id
+         WHERE r.worker_id = $1 AND r.state = 'active'
+           AND a.state IN (
+                'dispatching', 'running', 'stop_pending', 'cancel_pending',
+                'quorum_stop_pending', 'shadow_stop_pending'
+           )
+           AND t.status IN ('ASSIGNED', 'RUNNING', 'FAILED', 'CANCELLED', 'COMPLETED', 'OBSERVED')",
+    )
+    .bind(worker_id)
+    .fetch_one(&mut **tx)
+    .await?;
+    let active_legacy_assignments: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM tasks
+         WHERE worker_id = $1 AND managed_consensus_attempt_id IS NULL
+           AND status IN ('ASSIGNED', 'RUNNING')",
+    )
+    .bind(worker_id)
+    .fetch_one(&mut **tx)
+    .await?;
+    if active_reservations + active_legacy_assignments >= capacity {
+        anyhow::bail!("consensus Worker {worker_id} has no available execution slot");
+    }
+    Ok(())
+}
+
+/// Deadline after one replica escalation: the current deadline plus one attempt
+/// timeout, capped at twice the timeout measured from creation. `None` means the
+/// cap leaves no window, so a further replica could not run.
+fn escalated_attempt_deadline(
+    created_at: DateTime<Utc>,
+    deadline: DateTime<Utc>,
+    timeout: chrono::Duration,
+) -> Option<DateTime<Utc>> {
+    let cap = created_at + timeout + timeout;
+    let extended = std::cmp::min(deadline + timeout, cap);
+    (extended > deadline).then_some(extended)
+}
+
 fn plan_managed_v1_settlement(
     max_cpt: i64,
     replica_count: i32,
@@ -681,7 +738,12 @@ fn plan_managed_v1_settlement(
     if max_cpt <= 0 {
         anyhow::bail!("managed v1 settlement allowance must be positive");
     }
-    if replica_count <= 0 || evidence.len() != usize::try_from(replica_count).unwrap_or(0) {
+    // A replica that was never dispatched has no row and no evidence. Its share of
+    // the hold is returned through refund_cpt.
+    if replica_count <= 0
+        || evidence.is_empty()
+        || evidence.len() > usize::try_from(replica_count).unwrap_or(0)
+    {
         anyhow::bail!("managed v1 settlement replica count is inconsistent");
     }
     if terminal_outcome.trim().is_empty() {
@@ -1138,7 +1200,7 @@ async fn settle_managed_v1_hold_without_certificate(
     .bind(attempt_id)
     .fetch_all(&mut **tx)
     .await?;
-    if replicas.len() != usize::try_from(attempt.replica_count).unwrap_or(0) {
+    if replicas.is_empty() || replicas.len() > usize::try_from(attempt.replica_count).unwrap_or(0) {
         anyhow::bail!("managed v1 attempt does not contain the assigned replica set");
     }
     let evidence: Vec<_> = replicas
@@ -1817,7 +1879,12 @@ impl TaskRepository {
             .bind(attempt_id)
             .fetch_one(&mut *tx)
             .await?;
-            if replica_count != expected_replica_count || unconfirmed_count != 0 {
+            // Lazily added replicas leave fewer rows than the attempt's replica_count.
+            // Only excess rows, or rows still awaiting a stop, block finalization.
+            if replica_count == 0
+                || replica_count > expected_replica_count
+                || unconfirmed_count != 0
+            {
                 tx.commit().await?;
                 return Ok(None);
             }
@@ -2038,9 +2105,20 @@ impl TaskRepository {
         }
         let policy = QuorumPolicy::new(replica_count, quorum)
             .map_err(|error| anyhow::anyhow!("invalid managed consensus policy: {error}"))?;
-        if workers.len() != usize::from(policy.replica_count) {
+        // Enforce-mode hcode dispatches a quorum up front and adds replicas on demand.
+        // Every other managed attempt dispatches its full replica set.
+        let lazy_v1 = mode == "enforce"
+            && task.runtime.as_deref().map(str::trim)
+                == Some(general_compute_runtime::MANAGED_DSL_V1_RUNTIME_VERSION);
+        let minimum = if lazy_v1 {
+            usize::from(policy.required_quorum)
+        } else {
+            usize::from(policy.replica_count)
+        };
+        if workers.len() < minimum || workers.len() > usize::from(policy.replica_count) {
             anyhow::bail!(
-                "managed consensus requires {} distinct Workers, received {}",
+                "managed consensus requires {} to {} distinct Workers, received {}",
+                minimum,
                 policy.replica_count,
                 workers.len()
             );
@@ -2186,41 +2264,7 @@ impl TaskRepository {
             .collect();
         lock_worker_ids.sort_unstable();
         for worker_id in lock_worker_ids {
-            let capacity: Option<i32> = sqlx::query_scalar(
-                "SELECT queue_capacity FROM worker_nodes WHERE worker_id = $1 FOR UPDATE",
-            )
-            .bind(worker_id)
-            .fetch_optional(&mut *tx)
-            .await?;
-            let capacity = capacity
-                .ok_or_else(|| anyhow::anyhow!("consensus Worker {worker_id} is not registered"))?
-                .max(1) as i64;
-            let active_reservations: i64 = sqlx::query_scalar(
-                "SELECT COUNT(*)
-                 FROM managed_consensus_worker_reservations r
-                 JOIN managed_consensus_attempts a ON a.id = r.attempt_id
-                 JOIN tasks t ON t.managed_consensus_attempt_id = a.id
-                 WHERE r.worker_id = $1 AND r.state = 'active'
-                   AND a.state IN (
-                        'dispatching', 'running', 'stop_pending', 'cancel_pending',
-                        'quorum_stop_pending', 'shadow_stop_pending'
-                   )
-                   AND t.status IN ('ASSIGNED', 'RUNNING', 'FAILED', 'CANCELLED', 'COMPLETED', 'OBSERVED')",
-            )
-            .bind(worker_id)
-            .fetch_one(&mut *tx)
-            .await?;
-            let active_legacy_assignments: i64 = sqlx::query_scalar(
-                "SELECT COUNT(*) FROM tasks
-                 WHERE worker_id = $1 AND managed_consensus_attempt_id IS NULL
-                   AND status IN ('ASSIGNED', 'RUNNING')",
-            )
-            .bind(worker_id)
-            .fetch_one(&mut *tx)
-            .await?;
-            if active_reservations + active_legacy_assignments >= capacity {
-                anyhow::bail!("consensus Worker {worker_id} has no available execution slot");
-            }
+            ensure_consensus_worker_slot(&mut tx, worker_id).await?;
         }
         let attempt = sqlx::query_as::<_, ManagedConsensusAttempt>(
             "INSERT INTO managed_consensus_attempts
@@ -2344,6 +2388,174 @@ impl TaskRepository {
         .await?;
         tx.commit().await?;
         Ok(Some((attempt, assignments)))
+    }
+
+    /// Adds the next replica to an active enforce-mode hcode attempt. Lazy
+    /// dispatch calls this only after the dispatched replicas cannot reach quorum
+    /// or the deadline passes.
+    ///
+    /// Returns `None` without side effects when the task or attempt is no longer
+    /// active, the replica budget is spent, the Worker is already assigned, the
+    /// owner rule refuses the owner, or the escalated deadline has no window left.
+    /// A Worker without a free slot is an error, so the caller tries the next one.
+    pub(crate) async fn add_managed_consensus_replica(
+        &self,
+        task_id: &str,
+        attempt_id: Uuid,
+        worker: &WorkerNode,
+        timeout_secs: u64,
+        owner_rule: crate::scheduler::OwnerRule,
+    ) -> Result<Option<(ManagedConsensusAssignment, DateTime<Utc>)>> {
+        if worker.worker_id.trim().is_empty()
+            || worker.username.trim().is_empty()
+            || worker.ip.trim().is_empty()
+        {
+            return Ok(None);
+        }
+        let timeout = chrono::Duration::seconds(
+            i64::try_from(timeout_secs)
+                .map_err(|_| anyhow::anyhow!("managed consensus timeout is too large"))?,
+        );
+        let owner = worker.username.trim();
+        let mut tx = self.pool.begin().await?;
+        let task: Option<(String, Option<String>, Option<Uuid>)> = sqlx::query_as(
+            "SELECT status, runtime, managed_consensus_attempt_id
+             FROM tasks WHERE task_id = $1 FOR UPDATE",
+        )
+        .bind(task_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        let Some((status, runtime, current_attempt_id)) = task else {
+            tx.commit().await?;
+            return Ok(None);
+        };
+        if !matches!(status.as_str(), "ASSIGNED" | "RUNNING")
+            || runtime.as_deref().map(str::trim)
+                != Some(general_compute_runtime::MANAGED_DSL_V1_RUNTIME_VERSION)
+            || current_attempt_id != Some(attempt_id)
+        {
+            tx.commit().await?;
+            return Ok(None);
+        }
+        type AttemptRow = (
+            String,
+            String,
+            String,
+            String,
+            i32,
+            String,
+            String,
+            DateTime<Utc>,
+            DateTime<Utc>,
+        );
+        let attempt: Option<AttemptRow> = sqlx::query_as(
+            "SELECT task_id, execution_id, round_id, request_digest, replica_count, mode,
+                    state, deadline, created_at
+             FROM managed_consensus_attempts WHERE id = $1 FOR UPDATE",
+        )
+        .bind(attempt_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        let Some((
+            attempt_task_id,
+            execution_id,
+            round_id,
+            request_digest,
+            replica_count,
+            mode,
+            state,
+            deadline,
+            created_at,
+        )) = attempt
+        else {
+            tx.commit().await?;
+            return Ok(None);
+        };
+        if attempt_task_id != task_id
+            || mode != "enforce"
+            || !matches!(state.as_str(), "dispatching" | "running")
+        {
+            tx.commit().await?;
+            return Ok(None);
+        }
+        let (assigned, worker_assigned, owner_assigned): (i64, bool, bool) = sqlx::query_as(
+            "SELECT COUNT(*)::BIGINT,
+                    COALESCE(BOOL_OR(worker_id = $2), FALSE),
+                    COALESCE(BOOL_OR(TRIM(provider_user) = $3), FALSE)
+             FROM managed_consensus_replicas WHERE attempt_id = $1",
+        )
+        .bind(attempt_id)
+        .bind(&worker.worker_id)
+        .bind(owner)
+        .fetch_one(&mut *tx)
+        .await?;
+        if assigned >= i64::from(replica_count)
+            || worker_assigned
+            || (owner_rule == crate::scheduler::OwnerRule::Distinct && owner_assigned)
+        {
+            tx.commit().await?;
+            return Ok(None);
+        }
+        // The timeout that triggers escalation fires at the attempt deadline, so the
+        // old deadline may already have passed. The extension is what gives the new
+        // replica its window, so that is the value to test.
+        let Some(new_deadline) = escalated_attempt_deadline(created_at, deadline, timeout)
+            .filter(|extended| *extended > Utc::now())
+        else {
+            tx.commit().await?;
+            return Ok(None);
+        };
+
+        ensure_consensus_worker_slot(&mut tx, &worker.worker_id).await?;
+        sqlx::query(
+            "INSERT INTO managed_consensus_worker_reservations (attempt_id, worker_id)
+             VALUES ($1, $2)",
+        )
+        .bind(attempt_id)
+        .bind(&worker.worker_id)
+        .execute(&mut *tx)
+        .await?;
+        let replica_id = format!("replica-{}", assigned + 1);
+        let worker_attempt_id = format!("{round_id}:{replica_id}");
+        sqlx::query(
+            "INSERT INTO managed_consensus_replicas
+                (task_id, attempt_id, replica_id, worker_id, worker_ip, provider_user, execution_id,
+                 worker_attempt_id, request_digest, state)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'assigned')",
+        )
+        .bind(task_id)
+        .bind(attempt_id)
+        .bind(&replica_id)
+        .bind(&worker.worker_id)
+        .bind(&worker.ip)
+        .bind(&worker.username)
+        .bind(&execution_id)
+        .bind(&worker_attempt_id)
+        .bind(&request_digest)
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query(
+            "UPDATE managed_consensus_attempts SET deadline = $2, updated_at = NOW()
+             WHERE id = $1",
+        )
+        .bind(attempt_id)
+        .bind(new_deadline)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(Some((
+            ManagedConsensusAssignment {
+                replica_id,
+                worker_id: worker.worker_id.clone(),
+                worker_ip: worker.ip.clone(),
+                attempt_id,
+                execution_id,
+                round_id,
+                worker_attempt_id,
+                request_digest,
+            },
+            new_deadline,
+        )))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -3312,7 +3524,10 @@ impl TaskRepository {
         .bind(attempt.id)
         .fetch_all(&mut *tx)
         .await?;
-        if replicas.len() != usize::try_from(attempt.replica_count).unwrap_or(0)
+        // A certificate needs at least a quorum of dispatched replicas. Replicas that
+        // were never dispatched have no row, so fewer rows are not a fault.
+        if replicas.len() > usize::try_from(attempt.replica_count).unwrap_or(0)
+            || replicas.len() < usize::try_from(attempt.quorum).unwrap_or(usize::MAX)
             || replicas.len() > hivemind_managed_consensus::MAX_CERTIFICATE_OBSERVATIONS
         {
             anyhow::bail!("managed v1 attempt does not contain the assigned replica set");
@@ -9726,6 +9941,77 @@ mod tests {
         let usage = 25 * 3;
         let fee = managed_v1_fee(usage).unwrap();
         assert_eq!((usage, fee, usage + fee), (75, 7, 82));
+    }
+
+    #[test]
+    fn escalated_attempt_deadline_extends_once_and_stops_at_twice_the_timeout() {
+        let created = DateTime::parse_from_rfc3339("2026-10-21T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let timeout = chrono::Duration::seconds(120);
+
+        // The first escalation adds one timeout, which reaches twice the timeout.
+        assert_eq!(
+            escalated_attempt_deadline(created, created + timeout, timeout),
+            Some(created + timeout + timeout)
+        );
+        // The cap also applies when the deadline is only partly through its window.
+        assert_eq!(
+            escalated_attempt_deadline(
+                created,
+                created + timeout + chrono::Duration::seconds(60),
+                timeout
+            ),
+            Some(created + timeout + timeout)
+        );
+        // Once the cap is reached, a further escalation has no window to extend into.
+        assert_eq!(
+            escalated_attempt_deadline(created, created + timeout + timeout, timeout),
+            None
+        );
+    }
+
+    #[test]
+    fn managed_v1_settlement_plan_accepts_only_dispatched_replicas() {
+        let evidence = |replica_id: &str| ManagedV1ReplicaEvidence {
+            replica_id: replica_id.into(),
+            worker_id: format!("worker-{replica_id}"),
+            provider_user: Some(format!("owner-{replica_id}")),
+            usage_units: 0,
+            result_digest: None,
+            result_status: None,
+            valid: true,
+            rejection_reason: None,
+        };
+
+        // Two replicas were dispatched out of a worst-case three. The plan keeps the
+        // full hold and refunds all of it, since neither replica used usage.
+        let plan = plan_managed_v1_settlement(
+            30,
+            3,
+            "quorum_reached",
+            None,
+            &[evidence("replica-1"), evidence("replica-2")],
+        )
+        .unwrap();
+        assert_eq!(plan.payouts.len(), 2);
+        assert_eq!(plan.charged_amount_cpt, 0);
+        assert_eq!(plan.refund_cpt, plan.held_total_cpt);
+
+        assert!(plan_managed_v1_settlement(30, 3, "no_quorum", None, &[]).is_err());
+        assert!(plan_managed_v1_settlement(
+            30,
+            3,
+            "no_quorum",
+            None,
+            &[
+                evidence("replica-1"),
+                evidence("replica-2"),
+                evidence("replica-3"),
+                evidence("replica-4"),
+            ],
+        )
+        .is_err());
     }
 
     #[test]

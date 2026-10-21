@@ -44,3 +44,4 @@ windows-sys = { version = "0.61", features = [
 tokio-stream.workspace = true
 serde.workspace = true
 jsonwebtoken.workspace = true
+tracing-subscriber.workspace = true

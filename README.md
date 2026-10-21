@@ -168,8 +168,9 @@ cd frontend; npm run test:e2e
 ```
 
 The harness can allocate ephemeral host ports. The root stack contains one
-Worker; default enforced task execution and settlement require three eligible
-Workers in a separate test.
+Worker; default enforced task execution and settlement need two eligible Workers
+from distinct owners, and a third when the first two disagree or time out, in a
+separate test.
 
 After verification, return to the repository root and run `docker compose down`.
 Raw Compose requires supplied secrets and a matching Worker execution key pair;
