@@ -929,15 +929,127 @@ Not part of this change. Recorded so the decisions are not lost.
   and is not billed. A task without a certificate still settles accepted usage
   through the usage-only path, so a task that times out or disagrees can end FAILED
   and be billed. Decide whether a FAILED task should be billed at all.
-- Burst slot waits: lazy and full dispatch both wait on Worker slots, and stuck
-  attempts hold reservations until their deadline. Needs per-Worker occupancy
-  instrumentation before any change.
+- Burst slot waits: lazy and full dispatch both wait on Worker slots. Held replicas
+  keep their reservations until their stop is confirmed, which in the timeout case
+  is the deadline. The T1.4 rerun checkpoint located the waits. Any change needs a
+  decision on when a held replica frees its slot.
 - Timeout escalation latency: after a timeout the third replica waits for the full
   deadline. Earlier escalation is a design change and is not applied.
 - Selection: uniform random over the hard filters stays. No weighting.
 
 ### Status of the open items above
 
-- Settlement lock order: fixed in `27231242`.
+- Settlement lock order: fixed in `27231242`. The legacy managed completion
+  retries on 40P01 as well, in `ace74498`.
 - Billing for failed tasks: unchanged; see the v2 memo.
-- Burst slot waits: not changed. The rerun below measures them.
+- Burst slot waits: located by the rerun checkpoint below; not changed.
+
+### T1.4 rerun checkpoint (2026-10-21, release)
+
+Commit `ace74498`, which contains the settlement lock order, the certified-quorum
+guard, the `initial_replicas` switch, and the legacy deadlock retry. Both variants
+run the same release binary (`hivemind-bin.exe`, SHA-256 `51E1B553…05A9`). They
+differ only in `MANAGED_CONSENSUS_INITIAL_REPLICAS`: `reloff` leaves it unset
+(eager, all replicas dispatched) and `relon` sets it to 2 (lazy). The replicas per
+normal task confirm the switch: 3.00 for `reloff`, 2.00 for `relon`.
+
+Setup matches the T1.4 checkpoint above: one host, one Nodepool, one Master, three
+Workers behind fault proxies, 20 tasks per scenario run, three repetitions with the
+variants interleaved, and a 60-task burst on the normal path. Each variant and
+repetition starts a fresh stack. The first campaign used debug builds, so absolute
+latencies are not comparable with it. Compare `relon` with `reloff` only.
+
+Main campaign, pooled over 3 × 20 tasks per cell:
+
+| build | scenario | completed % | exec/task | billed CPT/task | median s | p95 s | escalated % |
+|---|---|---|---|---|---|---|---|
+| relon | normal | 100.0 | 2.00 | 242.0 | 0.83 | 1.04 | 0.0 |
+| relon | wrong | 100.0 | 2.67 | 322.7 | 4.61 | 5.02 | 66.7 |
+| relon | timeout | 98.3 | 2.58 | 240.0 | 30.09 | 34.98 | 58.3 |
+| reloff | normal | 100.0 | 2.95 | 350.9 | 4.65 | 5.37 | 0.0 |
+| reloff | wrong | 100.0 | 3.00 | 361.0 | 4.89 | 4.98 | 0.0 |
+| reloff | timeout | 100.0 | 3.00 | 242.0 | 9.61 | 19.55 | 0.0 |
+
+Burst, normal path, 2 × 60 tasks per variant:
+
+| build | completed % | exec/task | median s | p95 s | slot-wait warnings | deadlock lines |
+|---|---|---|---|---|---|---|
+| relon | 100.0 | 2.00 | 4.28 | 4.47 | 0 | 0 |
+| reloff | 100.0 | 2.99 | 4.85 | 5.12 | 0 | 0 |
+
+Findings:
+
+1. Replicas and charge. On the normal path, lazy dispatch runs 2 replicas instead
+   of 3 and bills 242 CPT per task instead of 351 (−31%). With a wrong result the
+   charge drops from 361 to 323 CPT (−11%). With a timeout it is nearly unchanged
+   (240 against 242 CPT).
+
+2. Normal-path latency. In the main campaign the medians differ: 0.83 s for `relon`
+   against 4.65 s for `reloff`. The per-run ranges do not overlap (0.47–0.99 s and
+   1.52–5.32 s). The burst shows a much smaller gap (4.28 s against 4.85 s). The
+   cause is not established.
+
+3. Timeout latency. `relon` has median 30.1 s and p95 35.0 s; `reloff` has median
+   9.6 s and p95 19.6 s. These match the shape of the first campaign's timeout
+   results for head and base. Escalation waits for the deadline before the spare is
+   dispatched. Not changed in this round.
+
+4. One FAILED task in `relon` timeout (1 of 60; `managed consensus deadline
+   exceeded`, state `no_quorum`, 121 CPT billed). Trace for
+   `smoke-20261021-212316-w3-t20-2`, as offsets from the first dispatch:
+   - replica-1 on bench-w2 replies normally.
+   - replica-2 on bench-w1 (timeout mode) holds its reply. At +30.005 s the Nodepool
+     marks it failed (`Timeout expired`) and escalates by adding replica-3.
+   - The stop for replica-3 reaches bench-w3 at +30.011 s. Its `ExecuteTask` reaches
+     bench-w3 at +30.029 s and replies at +30.031 s. The Nodepool does not count the
+     reply, and the attempt ends `no_quorum` at its 60 s deadline.
+   - Other timeout tasks in the same runs take the same escalation and form a
+     certificate with `escalations=1`. The reason for the early stop is not
+     identified.
+
+5. Slot waits in timeout runs. Warnings appear only in the timeout scenario:
+   `relon` has 10 lines (9 in rep 1, 1 in rep 3) and `reloff` has 48 (16 in each
+   rep). The normal and wrong scenarios and the burst have none. A temporary build
+   that dumps the occupants at each refusal was used for diagnosis. It was not
+   committed, and its patch is kept outside the repository. The dump shows:
+   - Every refusal is on `bench-w1`, the timeout Worker. Its capacity is 12, the
+     CPU count the Worker reports, and all 12 slots are held by attempts in state
+     `running`.
+   - Reservations are released only when an attempt is finalized after all stops
+     are confirmed. In the lazy runs the occupants had a median age of 5–15 s and a
+     maximum of about 30 s, which is the deadline stop. In the eager runs the
+     maximum was about 5 s.
+   - Peak concurrency from the reservation table: the eager runs reach 12 on all
+     three Workers. The lazy runs reach 12 on `bench-w1` and 10 on `bench-w2` and
+     `bench-w3`. The logs record refusals only on `bench-w1`. Why `bench-w2` and
+     `bench-w3` never log a refusal is not established. Dispatch order is a
+     candidate.
+   - Interpretation: a held replica keeps its reservation until its stop is
+     confirmed, so a 20-task burst fills a 12-slot Worker. Changing this means
+     deciding whether a held replica's slot can be freed before its stop is
+     confirmed. That is a design decision and was not made here.
+
+6. Submission limit (bench side). The first attempt at burst rep 102 was rejected
+   entirely with HTTP 429. The Master limits each owner to 60 task submissions per
+   minute per process (`HIVEMIND_TASK_SUBMIT_LIMIT_PER_MINUTE`, default 60). Rep 101
+   used the full allowance on the same stack, so rep 102 must start on a fresh
+   stack. The rejected runs are kept in `results\invalid-429` and are not part of
+   the figures above. The rerun on fresh stacks is the one reported.
+
+7. No run has deadlock lines or proxy stop failures.
+
+Limitations: one host, release builds, three repetitions per cell, so small samples.
+The held replica is simulated by a proxy, so the Worker itself finishes quickly.
+Per-run medians vary widely (for example, `reloff` normal from 1.5 to 5.3 s).
+
+Open items after this checkpoint:
+
+- Ordering of the escalated replica's stop (finding 4).
+- When a held replica frees its slot (finding 5). This is a design decision.
+- Timeout escalation latency (finding 3).
+- Billing for a FAILED task: the timeout task in finding 4 was billed 121 CPT.
+- Late receipts after a confirmed stop: a stop-pending attempt with a persisted late
+  quorum still finalizes as `no_quorum` with usage billing (test
+  `managed_v1_stop_pending_keeps_hold_until_confirmed_then_pays_valid_usage`).
+  Policy decision pending.
+- Default flip of `initial_replicas` remains deferred (v2 memo).
