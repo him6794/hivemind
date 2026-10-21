@@ -870,6 +870,16 @@ impl Dispatcher {
                 Ok(None)
             }
         } else if all_stopped {
+            if settle_persisted_quorum(
+                &self.repo,
+                task,
+                attempt,
+                self.managed_consensus_max_result_bytes,
+            )
+            .await?
+            {
+                return Ok(None);
+            }
             self.repo
                 .mark_managed_consensus_no_quorum(&task.task_id, attempt.id, reason, retry_limit)
                 .await
@@ -2317,6 +2327,75 @@ async fn drain_managed_consensus_workers(
     Ok(())
 }
 
+/// Settles a stopped enforce attempt whose persisted replies form a certificate.
+///
+/// Returns true when such a certificate exists. The caller must then leave the attempt
+/// active instead of finalizing it as no-quorum. A failed settlement is therefore never
+/// failed or billed through the usage-only no-quorum path, and the next expiry pass
+/// retries the same certificate.
+async fn settle_persisted_quorum(
+    repo: &TaskRepository,
+    task: &Task,
+    attempt: &ManagedConsensusAttempt,
+    max_result_bytes: usize,
+) -> Result<bool> {
+    let replicas = repo
+        .managed_consensus_replicas(&task.task_id, &attempt.round_id)
+        .await?;
+    let mut observations = Vec::new();
+    let mut outputs = HashMap::new();
+    for replica in &replicas {
+        match persisted_managed_consensus_observation(task, attempt, replica, max_result_bytes) {
+            Ok(Some((observation, output))) => {
+                outputs.insert(observation.result_digest, output);
+                observations.push(observation);
+            }
+            Ok(None) => {}
+            Err(error) => warn!(
+                task_id = %task.task_id,
+                replica_id = %replica.replica_id,
+                error = %error,
+                "ignoring malformed persisted managed consensus observation"
+            ),
+        }
+    }
+    let (Ok(replica_count), Ok(quorum)) = (
+        u16::try_from(attempt.replica_count),
+        u16::try_from(attempt.quorum),
+    ) else {
+        return Ok(false);
+    };
+    let Ok(policy) = QuorumPolicy::new(replica_count, quorum) else {
+        return Ok(false);
+    };
+    let binding = managed_consensus_binding(task, attempt);
+    let Ok(certificate) =
+        hivemind_managed_consensus::evaluate_quorum(&binding, policy, &observations)
+    else {
+        return Ok(false);
+    };
+    let Some(output) = outputs.get(&certificate.result_digest) else {
+        warn!(task_id = %task.task_id, "certified managed consensus output is missing; retrying");
+        return Ok(true);
+    };
+    match repo
+        .complete_managed_consensus(&certificate, output, true)
+        .await
+    {
+        Ok(true) => {}
+        Ok(false) => warn!(
+            task_id = %task.task_id,
+            "certified managed consensus quorum was not settled; retrying"
+        ),
+        Err(error) => warn!(
+            task_id = %task.task_id,
+            error = %error,
+            "certified managed consensus settlement failed; retrying"
+        ),
+    }
+    Ok(true)
+}
+
 fn persisted_managed_consensus_observation(
     task: &Task,
     attempt: &ManagedConsensusAttempt,
@@ -2342,7 +2421,9 @@ fn persisted_managed_consensus_observation(
         .result_digest
         .as_deref()
         .ok_or_else(|| anyhow::anyhow!("reported consensus replica has no result digest"))?;
-    if digest_hex(result_json) != result_digest
+    // The stored digest is the canonical digest of the decoded result. The stored bytes
+    // are the full result, including the usage claim that canonicalization drops.
+    if hivemind_proto::managed_consensus_result_digest(&result) != result_digest
         || result.encode_to_vec() != result_json
         || result.status != "completed"
         || result.output_bytes != result.output.len() as u64
@@ -2833,6 +2914,9 @@ async fn execute_managed_consensus_attempt(
         repo.complete_managed_consensus_observe(&task.task_id, attempt.id, None, stops_confirmed)
             .await?;
     } else if stops_confirmed {
+        if settle_persisted_quorum(&repo, &task, &attempt, max_result_bytes).await? {
+            return Ok(());
+        }
         repo.mark_managed_consensus_no_quorum(
             &task.task_id,
             attempt.id,
@@ -7681,6 +7765,180 @@ mod tests {
             schema.starts_with("hm_test_"),
             "dispatcher DB tests must use an isolated schema, got {schema}"
         );
+        fixture.cleanup().await.ok();
+    }
+
+    /// A certified quorum whose settlement fails must not be finalized as no-quorum. The
+    /// fault is injected at the certificate insert, which only the certified path
+    /// performs. The usage-only no-quorum path would succeed, so reaching it fails the
+    /// test.
+    #[tokio::test]
+    async fn expired_quorum_with_failed_settlement_stays_active_and_unbilled() {
+        let lock = dispatcher_db_lock();
+        let _guard = lock.lock().await;
+        let Some((db, fixture)) = test_db("dispatcher_expired_quorum_settlement").await else {
+            return;
+        };
+        let pool = db.pool.clone();
+        let repo = Arc::new(TaskRepository::new(pool.clone()));
+        let unique = uuid::Uuid::new_v4().to_string();
+        let owner = format!("expired-quorum-owner-{unique}");
+        lazy_consensus_owner(&pool, &owner, 1000).await;
+        let task_id = format!("expired-quorum-task-{unique}");
+        let task = lazy_consensus_task(&repo, &owner, &task_id).await;
+        let mut workers = Vec::new();
+        for index in 0..2 {
+            let provider = format!("expired-quorum-provider-{index}-{unique}");
+            lazy_consensus_owner(&pool, &provider, 0).await;
+            let worker_id = format!("expired-quorum-worker-{index}-{unique}");
+            sqlx::query(
+                "INSERT INTO worker_nodes (worker_id, username, ip, cpu_cores, memory_gb)
+                 VALUES ($1, $2, '10.0.0.2', 4, 16)",
+            )
+            .bind(&worker_id)
+            .bind(&provider)
+            .execute(&pool)
+            .await
+            .unwrap();
+            let mut worker = make_worker(&worker_id, 4, 16, WorkerStatus::Idle);
+            // worker_ip is VARCHAR(45), so the IP must not come from the long worker ID.
+            worker.ip = format!("10.0.0.{}", index + 10);
+            worker.username = provider;
+            workers.push(worker);
+        }
+        let (attempt, assignments) = repo
+            .create_managed_consensus_attempt(&task, &workers, 2, 2, 120, "enforce")
+            .await
+            .unwrap()
+            .expect("pending task should create a consensus attempt");
+        let output = b"expired-quorum-output".to_vec();
+        let result = hivemind_proto::ManagedConsensusResult {
+            protocol_version: 1,
+            status: "completed".into(),
+            output: output.clone(),
+            usage_units: 7,
+            executed_ops: 7,
+            output_bytes: output.len() as u64,
+            runtime: "hcode".into(),
+            backend_id: hivemind_managed_consensus::MANAGED_DSL_V1_DEFAULT_BACKEND_ID.into(),
+            semantics_manifest_sha256:
+                hivemind_managed_consensus::MANAGED_DSL_V1_DEFAULT_SEMANTICS_DIGEST.into(),
+            source_sha256: hivemind_managed_consensus::digest_hex(
+                task.task_source.as_deref().unwrap().as_bytes(),
+            ),
+            input_sha256: hivemind_managed_consensus::digest_hex(
+                task.torrent_source.as_deref().unwrap().as_bytes(),
+            ),
+            result_digest: hivemind_managed_consensus::digest_hex(&output),
+            ..hivemind_proto::ManagedConsensusResult::default()
+        };
+        let result_json = result.encode_to_vec();
+        let result_digest = hivemind_proto::managed_consensus_result_digest(&result);
+        for assignment in &assignments {
+            assert!(repo
+                .mark_managed_consensus_replica_running(attempt.id, &assignment.replica_id)
+                .await
+                .unwrap());
+            repo.record_managed_consensus_observation(
+                &task_id,
+                attempt.id,
+                &attempt.round_id,
+                &assignment.replica_id,
+                &assignment.worker_id,
+                true,
+                &result_digest,
+                output.len() as i64,
+                &result_json,
+                7,
+                7,
+            )
+            .await
+            .unwrap();
+        }
+        let held_balance: i64 = sqlx::query_scalar("SELECT balance FROM users WHERE username = $1")
+            .bind(&owner)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+
+        sqlx::query(
+            "CREATE OR REPLACE FUNCTION injected_certificate_failure() RETURNS trigger
+             LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'injected certificate settlement failure'; END $$",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "CREATE TRIGGER injected_certificate_failure BEFORE INSERT ON managed_consensus_certificates
+             FOR EACH ROW EXECUTE FUNCTION injected_certificate_failure()",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let dispatcher = Dispatcher::new(db, 30, 2);
+        let first = dispatcher
+            .expire_managed_consensus_attempt(
+                &task,
+                &attempt,
+                "managed consensus deadline exceeded",
+                0,
+            )
+            .await
+            .unwrap();
+        assert!(first.is_none(), "a certified quorum must not be finalized");
+        let (status, consensus_state, billed, settled): (String, Option<String>, i64, bool) =
+            sqlx::query_as(
+                "SELECT status, managed_consensus_state, billed_amount, billing_settled
+                 FROM tasks WHERE task_id = $1",
+            )
+            .bind(&task_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_ne!(status, "FAILED");
+        assert_ne!(consensus_state.as_deref(), Some("no_quorum"));
+        assert_eq!((billed, settled), (0, false));
+        let hold_state: String = sqlx::query_scalar(
+            "SELECT state FROM managed_consensus_usage_holds WHERE attempt_id = $1",
+        )
+        .bind(attempt.id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(hold_state, "held");
+        let balance_after_fault: i64 =
+            sqlx::query_scalar("SELECT balance FROM users WHERE username = $1")
+                .bind(&owner)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(balance_after_fault, held_balance);
+
+        // Clear the fault. The next expiry pass settles the same certificate once.
+        sqlx::query("DROP TRIGGER injected_certificate_failure ON managed_consensus_certificates")
+            .execute(&pool)
+            .await
+            .unwrap();
+        dispatcher
+            .expire_managed_consensus_attempt(
+                &task,
+                &attempt,
+                "managed consensus deadline exceeded",
+                0,
+            )
+            .await
+            .unwrap();
+        let (status, billed, settled): (String, i64, bool) = sqlx::query_as(
+            "SELECT status, billed_amount, billing_settled FROM tasks WHERE task_id = $1",
+        )
+        .bind(&task_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(status, "COMPLETED");
+        assert!(settled);
+        assert!(billed > 0);
         fixture.cleanup().await.ok();
     }
 
