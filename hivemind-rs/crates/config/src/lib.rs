@@ -96,6 +96,12 @@ pub struct ManagedConsensusConfig {
     /// deadline passes without a certificate.
     #[serde(default)]
     pub initial_replicas: Option<u16>,
+    /// Seconds after dispatch before a lazily dispatched attempt adds its spare replica as a
+    /// hedge. The deadline does not move, so the spare answers inside the window the attempt
+    /// already has. Unset keeps the spare for the quorum-unreachable and deadline cases, as
+    /// before. Must be at least 1 and below `timeout_secs`.
+    #[serde(default)]
+    pub hedge_after_secs: Option<u64>,
     #[serde(default = "default_consensus_quorum")]
     pub quorum: u16,
     #[serde(default = "default_consensus_max_replicas")]
@@ -156,6 +162,7 @@ impl Default for ManagedConsensusConfig {
             rollout_mode: ManagedConsensusRolloutMode::default(),
             replica_count: default_consensus_replica_count(),
             initial_replicas: None,
+            hedge_after_secs: None,
             quorum: default_consensus_quorum(),
             max_replicas: default_consensus_max_replicas(),
             timeout_secs: default_consensus_timeout_secs(),
@@ -184,6 +191,14 @@ impl ManagedConsensusConfig {
                 return Err(format!(
                     "managed consensus initial replicas must be between quorum {} and replica count {}, got {}",
                     self.quorum, self.replica_count, initial
+                ));
+            }
+        }
+        if let Some(hedge_after) = self.hedge_after_secs {
+            if hedge_after == 0 || hedge_after >= self.timeout_secs {
+                return Err(format!(
+                    "managed consensus hedge must be at least 1 second and below the timeout {}, got {}",
+                    self.timeout_secs, hedge_after
                 ));
             }
         }
@@ -797,6 +812,10 @@ impl HivemindConfig {
         if let Ok(value) = std::env::var("MANAGED_CONSENSUS_INITIAL_REPLICAS") {
             self.managed_consensus.initial_replicas =
                 Some(parse_env("MANAGED_CONSENSUS_INITIAL_REPLICAS", &value)?);
+        }
+        if let Ok(value) = std::env::var("MANAGED_CONSENSUS_HEDGE_AFTER_SECS") {
+            self.managed_consensus.hedge_after_secs =
+                Some(parse_env("MANAGED_CONSENSUS_HEDGE_AFTER_SECS", &value)?);
         }
         if let Ok(value) = std::env::var("MANAGED_CONSENSUS_QUORUM") {
             self.managed_consensus.quorum = parse_env("MANAGED_CONSENSUS_QUORUM", &value)?;
@@ -1442,6 +1461,46 @@ mod tests {
             None => std::env::remove_var("MANAGED_CONSENSUS_INITIAL_REPLICAS"),
         }
         assert_eq!(loaded.managed_consensus.initial_replicas, Some(2));
+    }
+
+    #[test]
+    fn managed_consensus_hedge_is_off_unless_configured() {
+        assert_eq!(ManagedConsensusConfig::default().hedge_after_secs, None);
+        let legacy: ManagedConsensusConfig =
+            serde_json::from_str(r#"{"replica_count":3,"quorum":2}"#).unwrap();
+        assert_eq!(legacy.hedge_after_secs, None);
+        let hedged: ManagedConsensusConfig =
+            serde_json::from_str(r#"{"hedge_after_secs":3}"#).unwrap();
+        assert_eq!(hedged.hedge_after_secs, Some(3));
+    }
+
+    #[test]
+    fn managed_consensus_hedge_must_fall_inside_the_timeout() {
+        let with_hedge = |hedge_after_secs| ManagedConsensusConfig {
+            hedge_after_secs,
+            ..ManagedConsensusConfig::default()
+        };
+        assert!(with_hedge(None).validate().is_ok());
+        assert!(with_hedge(Some(1)).validate().is_ok());
+        for invalid in [0, ManagedConsensusConfig::default().timeout_secs] {
+            let error = with_hedge(Some(invalid)).validate().unwrap_err();
+            assert!(error.contains("hedge"));
+        }
+    }
+
+    #[test]
+    fn managed_consensus_hedge_loads_from_environment() {
+        let _environment_lock = lock_environment();
+        let old = std::env::var_os("MANAGED_CONSENSUS_HEDGE_AFTER_SECS");
+        std::env::set_var("MANAGED_CONSENSUS_HEDGE_AFTER_SECS", "3");
+
+        let loaded = HivemindConfig::load_from_env();
+
+        match old {
+            Some(value) => std::env::set_var("MANAGED_CONSENSUS_HEDGE_AFTER_SECS", value),
+            None => std::env::remove_var("MANAGED_CONSENSUS_HEDGE_AFTER_SECS"),
+        }
+        assert_eq!(loaded.managed_consensus.hedge_after_secs, Some(3));
     }
 
     #[test]

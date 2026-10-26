@@ -2569,6 +2569,7 @@ impl TaskRepository {
         worker: &WorkerNode,
         timeout_secs: u64,
         owner_rule: crate::scheduler::OwnerRule,
+        extend_deadline: bool,
     ) -> Result<Option<(ManagedConsensusAssignment, DateTime<Utc>)>> {
         if worker.worker_id.trim().is_empty()
             || worker.username.trim().is_empty()
@@ -2660,12 +2661,23 @@ impl TaskRepository {
             tx.commit().await?;
             return Ok(None);
         }
-        // The timeout that triggers escalation fires at the attempt deadline, so the
-        // old deadline may already have passed. The extension is what gives the new
-        // replica its window, so that is the value to test.
-        let Some(new_deadline) = escalated_attempt_deadline(created_at, deadline, timeout)
-            .filter(|extended| *extended > Utc::now())
-        else {
+        // An escalation extends the deadline. Its timeout fires at the attempt deadline, so
+        // the old deadline may already have passed, and the extension gives the new replica
+        // its window. A hedge fires earlier and keeps the deadline, so its spare must answer
+        // inside the window the attempt already has.
+        let new_deadline = if extend_deadline {
+            match escalated_attempt_deadline(created_at, deadline, timeout)
+                .filter(|extended| *extended > Utc::now())
+            {
+                Some(extended) => extended,
+                None => {
+                    tx.commit().await?;
+                    return Ok(None);
+                }
+            }
+        } else if deadline > Utc::now() {
+            deadline
+        } else {
             tx.commit().await?;
             return Ok(None);
         };
@@ -15577,6 +15589,7 @@ mod tests {
                 &workers[2],
                 120,
                 crate::scheduler::OwnerRule::Distinct,
+                true,
             )
             .await
             .unwrap()
@@ -15601,6 +15614,87 @@ mod tests {
             .unwrap()
             .expect("an escalated lazy attempt with its three rows should settle");
         assert_eq!(updated.status, TaskStatus::Failed);
+        fixture.cleanup().await.ok();
+    }
+
+    async fn attempt_deadline(repo: &TaskRepository, attempt_id: Uuid) -> DateTime<Utc> {
+        sqlx::query_scalar("SELECT deadline FROM managed_consensus_attempts WHERE id = $1")
+            .bind(attempt_id)
+            .fetch_one(&repo.pool)
+            .await
+            .unwrap()
+    }
+
+    /// A hedge spare keeps the attempt deadline, while an escalation extends it.
+    #[tokio::test]
+    async fn hedge_keeps_the_attempt_deadline_and_escalation_extends_it() {
+        let (p, fixture) = match pool("task_repository_hedge_deadline").await {
+            Some(parts) => parts,
+            None => return,
+        };
+        let repo = TaskRepository::new(p);
+
+        let (hedge_task, hedge_workers) = persisted_count_fixture(&repo, "hedge-keep").await;
+        let (hedge_attempt, _assignments) = repo
+            .create_managed_consensus_attempt(
+                &hedge_task,
+                &hedge_workers[..2],
+                3,
+                2,
+                120,
+                "enforce",
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        let before = attempt_deadline(&repo, hedge_attempt.id).await;
+        let hedge = repo
+            .add_managed_consensus_replica(
+                &hedge_task.task_id,
+                hedge_attempt.id,
+                &hedge_workers[2],
+                120,
+                crate::scheduler::OwnerRule::Distinct,
+                false,
+            )
+            .await
+            .unwrap()
+            .expect("a hedge spare should join while the window is open");
+        assert_eq!(hedge.1, before, "a hedge returns the unchanged deadline");
+        assert_eq!(attempt_deadline(&repo, hedge_attempt.id).await, before);
+
+        let (escalation_task, escalation_workers) =
+            persisted_count_fixture(&repo, "escalate-extend").await;
+        let (escalation_attempt, _assignments) = repo
+            .create_managed_consensus_attempt(
+                &escalation_task,
+                &escalation_workers[..2],
+                3,
+                2,
+                120,
+                "enforce",
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        let before = attempt_deadline(&repo, escalation_attempt.id).await;
+        let escalation = repo
+            .add_managed_consensus_replica(
+                &escalation_task.task_id,
+                escalation_attempt.id,
+                &escalation_workers[2],
+                120,
+                crate::scheduler::OwnerRule::Distinct,
+                true,
+            )
+            .await
+            .unwrap()
+            .expect("an escalation should join while its extension has room");
+        assert!(escalation.1 > before, "an escalation extends the deadline");
+        assert_eq!(
+            attempt_deadline(&repo, escalation_attempt.id).await,
+            escalation.1
+        );
         fixture.cleanup().await.ok();
     }
 

@@ -88,6 +88,7 @@ pub struct Dispatcher {
     managed_consensus_rollout_mode: ManagedConsensusRolloutMode,
     managed_consensus_replica_count: u16,
     managed_consensus_initial_replicas: Option<u16>,
+    managed_consensus_hedge_after_secs: Option<u64>,
     managed_consensus_quorum: u16,
     managed_consensus_max_replicas: u16,
     managed_consensus_timeout_secs: u64,
@@ -165,6 +166,7 @@ impl Dispatcher {
             managed_consensus_rollout_mode: ManagedConsensusRolloutMode::Enforce,
             managed_consensus_replica_count: 3,
             managed_consensus_initial_replicas: None,
+            managed_consensus_hedge_after_secs: None,
             managed_consensus_quorum: 2,
             managed_consensus_max_replicas: 7,
             managed_consensus_timeout_secs: 120,
@@ -183,6 +185,7 @@ impl Dispatcher {
         self.managed_consensus_rollout_mode = config.rollout_mode;
         self.managed_consensus_replica_count = config.replica_count;
         self.managed_consensus_initial_replicas = config.initial_replicas;
+        self.managed_consensus_hedge_after_secs = config.hedge_after_secs;
         self.managed_consensus_quorum = config.quorum;
         self.managed_consensus_max_replicas = config.max_replicas;
         self.managed_consensus_timeout_secs = config.timeout_secs;
@@ -684,6 +687,7 @@ impl Dispatcher {
                             spare_workers: dispatch.spare_workers,
                             timeout_secs: self.managed_consensus_timeout_secs,
                             owner_rule: self.managed_consensus_owner_rule,
+                            hedge_after_secs: self.managed_consensus_hedge_after_secs,
                         };
                         let repo = self.repo.clone();
                         let task = task.clone();
@@ -1342,6 +1346,7 @@ impl Dispatcher {
                 spare_workers,
                 timeout_secs: self.managed_consensus_timeout_secs,
                 owner_rule: self.managed_consensus_owner_rule,
+                hedge_after_secs: self.managed_consensus_hedge_after_secs,
             };
             let repo = self.repo.clone();
             let private_key = self.worker_execution_private_key_pem.clone();
@@ -2624,6 +2629,9 @@ struct ManagedConsensusEscalation {
     spare_workers: Vec<WorkerNode>,
     timeout_secs: u64,
     owner_rule: scheduler::OwnerRule,
+    /// Seconds after dispatch before the spare is added as a hedge. `None` keeps the spare
+    /// for the deadline and the quorum-unreachable cases.
+    hedge_after_secs: Option<u64>,
 }
 
 /// Replicas assigned at dispatch. Enforce-mode hcode starts at `initial_replicas` and
@@ -2688,6 +2696,18 @@ fn spawn_managed_consensus_replica(
     });
 }
 
+/// When the hedge spare should be added: `hedge_after_secs` after dispatch, but only while the
+/// attempt is still lazily dispatched and a spare Worker is free. `None` means no hedge.
+fn hedge_due_at(
+    dispatched_at: tokio::time::Instant,
+    hedge_after_secs: Option<u64>,
+    lazily_dispatched: bool,
+    spare_free: bool,
+) -> Option<tokio::time::Instant> {
+    let after = std::time::Duration::from_secs(hedge_after_secs?);
+    (lazily_dispatched && spare_free).then(|| dispatched_at + after)
+}
+
 /// Tries spare Workers in order until one becomes a replica. A refused spare is
 /// consumed, so each candidate is tried at most once per attempt.
 async fn add_managed_consensus_spare(
@@ -2697,6 +2717,7 @@ async fn add_managed_consensus_spare(
     escalation: &mut ManagedConsensusEscalation,
     deadline: &mut chrono::DateTime<chrono::Utc>,
     reason: &'static str,
+    extend_deadline: bool,
 ) -> Option<ManagedConsensusAssignment> {
     if attempt.mode != "enforce"
         || escalation.dispatched >= usize::try_from(attempt.replica_count).unwrap_or(0)
@@ -2711,6 +2732,7 @@ async fn add_managed_consensus_spare(
                 &worker,
                 escalation.timeout_secs,
                 escalation.owner_rule,
+                extend_deadline,
             )
             .await
         {
@@ -2843,6 +2865,12 @@ async fn execute_managed_consensus_attempt(
         );
     }
 
+    let mut hedge_at = hedge_due_at(
+        tokio::time::Instant::now(),
+        escalation.hedge_after_secs,
+        escalation.dispatched < usize::from(policy.replica_count),
+        !escalation.spare_workers.is_empty(),
+    );
     loop {
         // A lazily dispatched attempt adds a spare or stops once quorum cannot be
         // reached by the replicas in flight. A fully dispatched attempt keeps waiting
@@ -2857,6 +2885,7 @@ async fn execute_managed_consensus_attempt(
                 &mut escalation,
                 &mut deadline,
                 "quorum unreachable",
+                true,
             )
             .await
             {
@@ -2877,10 +2906,45 @@ async fn execute_managed_consensus_attempt(
             break;
         }
         let remaining = (deadline - chrono::Utc::now()).to_std().unwrap_or_default();
-        let joined = match tokio::time::timeout(remaining, workers.join_next()).await {
+        // A pending hedge wakes the loop before the deadline, when it is due.
+        let hedge_wait = match hedge_at {
+            Some(at) => at.saturating_duration_since(tokio::time::Instant::now()),
+            None => remaining,
+        };
+        let joined = match tokio::time::timeout(remaining.min(hedge_wait), workers.join_next())
+            .await
+        {
             Ok(Some(joined)) => joined,
             Ok(None) => break,
             Err(_elapsed) => {
+                if hedge_wait < remaining && chrono::Utc::now() < deadline {
+                    // The hedge is due and the deadline is still open. The spare keeps the
+                    // deadline, so it answers inside the window the attempt already has.
+                    hedge_at = None;
+                    if let Some(assignment) = add_managed_consensus_spare(
+                        &repo,
+                        &task,
+                        &attempt,
+                        &mut escalation,
+                        &mut deadline,
+                        "hedge",
+                        false,
+                    )
+                    .await
+                    {
+                        pending_assignments
+                            .insert(assignment.replica_id.clone(), assignment.clone());
+                        spawn_managed_consensus_replica(
+                            &mut workers,
+                            &repo,
+                            &task,
+                            assignment,
+                            &private_key_pem,
+                            execution_options(deadline),
+                        );
+                    }
+                    continue;
+                }
                 // The deadline passed with replicas still outstanding. One extension
                 // gives a spare its own window; without a spare, the attempt ends.
                 if let Some(assignment) = add_managed_consensus_spare(
@@ -2890,6 +2954,7 @@ async fn execute_managed_consensus_attempt(
                     &mut escalation,
                     &mut deadline,
                     "deadline reached",
+                    true,
                 )
                 .await
                 {
@@ -8330,6 +8395,19 @@ mod tests {
         fixture.cleanup().await.ok();
     }
 
+    #[test]
+    fn hedge_is_scheduled_only_for_a_lazy_attempt_with_a_free_spare() {
+        let dispatched = tokio::time::Instant::now();
+        let after = std::time::Duration::from_secs(3);
+        assert_eq!(hedge_due_at(dispatched, None, true, true), None);
+        assert_eq!(hedge_due_at(dispatched, Some(3), false, true), None);
+        assert_eq!(hedge_due_at(dispatched, Some(3), true, false), None);
+        assert_eq!(
+            hedge_due_at(dispatched, Some(3), true, true),
+            Some(dispatched + after)
+        );
+    }
+
     #[tokio::test]
     async fn test_dispatch_one_no_workers() {
         let (db, fixture) = match test_db("dispatcher_no_workers").await {
@@ -9469,6 +9547,7 @@ mod tests {
             spare_workers: spares,
             timeout_secs,
             owner_rule: scheduler::OwnerRule::Distinct,
+            hedge_after_secs: None,
         };
         execute_managed_consensus_attempt(
             repo.clone(),
