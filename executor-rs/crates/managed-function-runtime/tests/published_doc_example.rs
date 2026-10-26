@@ -43,7 +43,9 @@ const TUTORIAL_INPUT: &str = r#"{"values": [10, 20, 30]}"#;
 
 #[test]
 fn tutorial_example_runs_with_the_hcode_replica_budget() {
-    let tutorial = include_str!("../../../../docs/hcode-tutorial.zh-TW.md");
+    // Rust normalizes CRLF inside string literals, so compare against LF text. A Windows
+    // checkout with core.autocrlf=true stores the Markdown with CRLF.
+    let tutorial = include_str!("../../../../docs/hcode-tutorial.zh-TW.md").replace("\r\n", "\n");
     assert!(tutorial.contains(TUTORIAL_SOURCE));
     assert!(tutorial.contains(TUTORIAL_INPUT));
     assert!(tutorial.contains("25 usage units"));
@@ -87,7 +89,7 @@ fn published_doc_example_still_produces_the_documented_result() {
 
 #[test]
 fn readme_task_submission_publishes_an_executable_managed_function() {
-    let readme = include_str!("../../../../README.md");
+    let readme = include_str!("../../../../README.md").replace("\r\n", "\n");
     assert!(
         readme.contains(README_TASK_SOURCE_JSON),
         "README task_source must exactly match the executable managed-function DSL example"
