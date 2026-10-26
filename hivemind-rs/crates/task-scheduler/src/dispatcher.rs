@@ -82,6 +82,11 @@ fn validated_execution_observation(response: &ExecuteTaskResponse) -> Option<Str
 /// Wakes the dispatch loop before its next tick. A newly pending task and a finished attempt
 /// (which releases its Worker slots) are both reasons to dispatch now, so the task does not
 /// wait for the next tick. Notifications coalesce, and the tick remains as a fallback.
+///
+/// This assumes one dispatch loop per process, which is how the nodepool starts. A
+/// notification reaches one waiting loop. If several loops ever share a process, a
+/// task may wait for the next tick of the loop that did not get the wakeup. It is not
+/// lost, because every loop still dispatches on its own tick.
 pub(crate) static DISPATCH_WAKEUP: std::sync::LazyLock<tokio::sync::Notify> =
     std::sync::LazyLock::new(tokio::sync::Notify::new);
 
@@ -1408,7 +1413,11 @@ impl Dispatcher {
             loop {
                 tokio::select! {
                     _ = tick.tick() => {}
-                    _ = DISPATCH_WAKEUP.notified() => {}
+                    _ = DISPATCH_WAKEUP.notified() => {
+                        // Coalesce wakeups that arrive together, such as several attempts ending at
+                        // once, so that a burst costs one pass instead of one pass per attempt.
+                        tokio::time::sleep(Duration::from_millis(20)).await;
+                    }
                     _ = rx.changed() => { if *rx.borrow() { info!("Dispatch loop shutting down"); break; } continue; }
                 }
                 if let Err(e) = self
