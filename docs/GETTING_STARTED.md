@@ -289,8 +289,9 @@ The same rule governs billing for managed tasks. With
 `hcode` tasks to distinct Workers and requires a
 strict-majority quorum certificate for completion. Settlement uses only validated, assignment-bound
 per-replica usage evidence, including valid divergent replica results, within the
-task-wide `max_cpt` cap; missing or invalid receipts are not billable. `observe`
-remains non-settling. A certificate proves agreement, not semantic correctness
+task-wide `max_cpt` cap; missing or invalid receipts are not billable. A task that
+ends without a certificate is not charged under the current billing identity
+(`hcode-billing-v3-failed-no-charge`). `observe` remains non-settling. A certificate proves agreement, not semantic correctness
 or actual usage, and a colluding or commonly faulty Worker majority can still
 agree on a wrong result.
 

@@ -551,7 +551,7 @@ CPT 是內部 quota／budget unit，不是貨幣。本 repository 有 account／
 
 ### 8.2 Task-wide cap 如何分配
 
-新 hcode billing identity 是 `hcode-billing-v2-total-budget`；execution cost model 是 `hcode-execution-cpt-v1`，basis 為 `accepted-replica-executed-ops`。
+新 hcode billing identity 是 `hcode-billing-v3-failed-no-charge`；execution cost model 是 `hcode-execution-cpt-v2`，basis 為 `accepted-replica-executed-ops`。v2 的用量計算與 v1 相同，差別只在沒有 certificate 的 task 不計費。
 
 令 task cap 為 `C`、replica count 為 `R`。Nodepool 求最大的正整數 `a`，使：
 
@@ -590,6 +590,8 @@ Enforce attempt creation 在 transaction 中建立 hold 並調整 payer balance�
 
 Historical `hcode-billing-v1` holds 有自己的相容處理。改名前已結算／釋放的 `managed-function-v1-billing-v1`／`managed-function-v1-billing-v2-total-budget` 紀錄保留原始身分；僅仍為 held 的 metadata 會在協調升級後改名。已入帳歷史資料不因新 contract 自動 recalculation／refund。
 
+`hcode-billing-v2-total-budget` 是 v3 之前建立的 hold 身分，無 certificate 的 task 仍依其原規則結算 accepted usage。`hcode-billing-v3-failed-no-charge` 是目前身分：task 沒有 certificate 時整筆 hold 全額 refund，不支付任何 Worker。
+
 ### 8.3 Consensus 的成功條件
 
 預設 policy：
@@ -625,10 +627,11 @@ Runtime／policy 缺失或不匹配也應 hold／fail closed，而不是以修�
 
 - Quorum certificate 選出可發布的成功 output。
 - Valid assignment-bound usage evidence 決定可計費 work。
-- Failed／budget-exhausted partial work、divergent replicas 與 no-quorum rounds 仍可能有符合條件的 billable usage。
+- 有 certificate 的 task 中，failed／budget-exhausted partial work 與 divergent replicas 仍可能有符合條件的 billable usage。
+- 沒有 certificate 的 task（failed 或 no-quorum）在 `hcode-billing-v3-failed-no-charge` 下不計費；較早建立的 holds 依其建立時的規則結算。
 - Missing、invalid、stale／wrong-attempt receipts 不可計費。
 - Receipt-only usage claim、generic completion 或自行宣告 success 不能取代 Nodepool 的驗證。
-- Usage-only terminal settlement 不可捏造 certificate，也不可把 task 標成成功完成。
+- 舊版 usage-only terminal settlement（v1／v2 holds）不可捏造 certificate，也不可把 task 標成成功完成。
 
 
 ### 8.6 Stop／cancel／timeout 與 durability

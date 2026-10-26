@@ -107,10 +107,12 @@ and digest
   `integer_arithmetic_overflow`; division by zero remains a separate runtime
   failure.
 - A budget-exhausted result is failed for consensus, but valid work recorded
-  before exhaustion remains billable. Nodepool aggregates valid accepted usage
-  across replicas, adds the platform fee, and never charges more than the
-  task's `max_cpt`, including for a valid divergent result outside the winning
-  certificate participants.
+  before exhaustion is billable when the task settles with a winning
+  certificate. Nodepool aggregates valid accepted usage across replicas, adds
+  the platform fee, and never charges more than the task's `max_cpt`, including
+  for a valid divergent result outside the winning certificate participants. A
+  task without a certificate is not charged under the current billing identity
+  (see the certificate rules below).
 - Nodepool holds the worst-case charges for the deterministic per-replica
   budgets before enforce-mode dispatch, settles actual accepted usage plus its
   calculated fee, and refunds unused held CPT. Observe mode records shadow
@@ -355,9 +357,13 @@ usage budget to each replica from the fee-exclusive cap, leaving any indivisible
 remainder with the owner. A valid divergent replica need not be a certificate
 participant to have its verified work included in the capped task settlement.
 
-No certificate is fabricated merely to justify payment. Accepted terminal
-evidence may settle an enforce-mode hold without a winning certificate, but
-usage-only settlement never marks the task completed. If policy is missing,
+No certificate is fabricated merely to justify payment. A task that ends
+without a winning certificate never becomes `COMPLETED`. Under the current
+billing identity, `hcode-billing-v3-failed-no-charge`, such a task is not
+charged: the full hold is refunded and no Worker is paid. Holds created under
+the earlier identities, `hcode-billing-v1` and `hcode-billing-v2-total-budget`,
+keep the usage-only settlement they were created with, in which accepted
+terminal evidence settles without a certificate. If policy is missing,
 disabled, malformed, or cannot safely execute, the route fails closed. There is
 no single-Worker, receipt-only, evidence-free settlement, or unsafe fallback
 path.

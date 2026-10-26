@@ -941,7 +941,8 @@ Not part of this change. Recorded so the decisions are not lost.
 
 - Settlement lock order: fixed in `27231242`. The legacy managed completion
   retries on 40P01 as well, in `ace74498`.
-- Billing for failed tasks: unchanged; see the v2 memo.
+- Billing for failed tasks: changed on 2026-10-26 to A2 under
+  `hcode-billing-v3-failed-no-charge` (see the decisions below).
 - Burst slot waits: located by the rerun checkpoint below; not changed.
 
 ### T1.4 rerun checkpoint (2026-10-21, release)
@@ -1066,19 +1067,25 @@ recorded so that a change can be made deliberately.
   out a toleration window (300 s by default) before evicting pods from a NotReady
   node.
 - **Replies after a stop.** Keep the fence. A reply recorded while the attempt is
-  `stop_pending` is kept as usage evidence and settles at finalization, but it
-  cannot complete the task. A reply that reaches a finalized attempt is rejected:
+  `stop_pending` is kept as usage evidence. It cannot complete the task, and under
+  the current identity it is charged only if the task settles with a certificate.
+  A reply that reaches a finalized attempt is rejected:
   no vote and no billing (`managed_consensus_no_quorum_fences_late_observations`).
   BOINC (arXiv 1903.01699) checks a copy that arrives after a canonical result
   against it to decide credit, without changing the result. Our rule has the same
   shape. An earlier draft of this entry said valid usage is billed without this
   distinction; it was too broad.
-- **Billing for FAILED tasks without a certificate.** Keep for this round, as
-  instructed. v2 target: the requester pays nothing, because no certified result
-  was delivered. Forum reports say BOINC pays by default only for results it can
+- **Billing for FAILED tasks without a certificate.** Changed on 2026-10-26, as
+  approved by the project owner: A2. The requester pays nothing, and providers are
+  not paid for receipts on a task without a certificate. New holds use
+  `hcode-billing-v3-failed-no-charge` with `hcode-execution-cpt-v2`; earlier holds
+  keep their rule. A stop-pending attempt that finalizes as `no_quorum` after a late
+  quorum follows the same rule (test
+  `managed_v1_stop_pending_keeps_hold_until_confirmed_then_refunds_without_certificate`).
+  Forum reports say BOINC pays by default only for results it can
   check. AWS Lambda bills executions that error; that is from a third-party guide,
-  and the official pricing text was not read. Who funds valid provider receipts on
-  a failed task is an economic decision, so it stays in v2.
+  and the official pricing text was not read. A1 (platform-funded pay for valid
+  receipts) stays available if provider attrition appears.
 - **Timeout escalation latency.** Keep for this round, as instructed. v2 target: a
   percentile-triggered spare, opt-in first. The spare starts once the outstanding
   replica exceeds the p95 of observed reply times. The deadline stays the hard
@@ -1090,8 +1097,10 @@ recorded so that a change can be made deliberately.
   still about three times slower (median 30.1 s against 9.6 s), and they hold
   slots until the deadline. The 31% normal-path saving stays available as opt-in.
   Revisit after the v2 hedge.
-- **Cost-model identifier bump.** Not now. There is no buyer, and a bump needs new
-  runtime, cost-model, and manifest identifiers plus a drain.
+- **Cost-model identifier bump.** Done for the FAILED-task rule only:
+  `hcode-execution-cpt-v2` is used by new holds. The runtime and manifest
+  identifiers did not change, because the parser, limits, and receipt meaning are
+  the same. No drain was needed, since the identity is recorded on each hold.
 - **Relaxed replica-count checks in settlement.** Keep for now. Prerequisite for
   flipping the default: persist `initial_replicas` on the attempt and make the
   checks strict.

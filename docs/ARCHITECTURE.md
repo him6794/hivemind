@@ -320,8 +320,9 @@ Identity enrollment credential 與 Headscale auth key 用途不同，不可互�
    managed DSL backend/semantics binding。
 2. 持久化 quorum certificate 與相符的副本記錄，再標記成功完成並發布輸出。
 3. `hcode` enforce settlement 使用經驗證且與 assignment 綁定的 replica
-   usage evidence，包含有效但 failed/divergent 的工作，並受 task-wide `max_cpt` 上限
-   約束；缺失或無效的 receipt 不計費。`observe` 不結算。Frozen `managed-function-v0`
+   usage evidence，並受 task-wide `max_cpt` 上限約束。有 certificate 的 task 會計入有效但
+   failed/divergent 的工作；沒有 certificate 的 task 在目前的 billing identity 下不計費。
+   缺失或無效的 receipt 不計費。`observe` 不結算。Frozen `managed-function-v0`
    才保留歷史 Nodepool-owned fixed-reservation billing contract。
 4. 已授權的使用者透過 Master API 取得 result、logs 與 lifecycle evidence；
    官網與 Website API 不提供任務操作介面。Secrets 與內部 enrollment material 不會回傳。
@@ -422,7 +423,9 @@ Worker into a settlement authority; only Nodepool can verify a quorum certificat
 - 缺少共識 policy、副本不足、結果不一致、certificate 無效或副本記錄不完整時，
   不發布成功輸出；單一 Worker 或 observe 記錄也不能授權成功完成。
 - Nodepool 驗證 enforce v1 的 attempt-bound receipt 後，才可納入結算。
-  有效用量在無 quorum 時仍可能計費；無效或缺失的 receipt 不計費。
+  有 certificate 的 task 依有效用量計費；無 quorum 的 task 在目前的
+  `hcode-billing-v3-failed-no-charge` 下不計費，較早建立的 holds 依其原規則結算。
+  無效或缺失的 receipt 不計費。
 - password、raw JWT、Headscale key 與 private key 不得寫入一般 log 或未受保護的
   durable state；task source/input 需由專用任務記錄保存，不應混入一般診斷 log。
   任務輸出沒有通用機密遮蔽機制，請勿將秘密放入 task。

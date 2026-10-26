@@ -182,8 +182,10 @@ see the runbook for configuration and cleanup details.
 Nodepool assigns each deterministic CPU `hcode` task to three
 distinct registered Workers by default. Two must return matching canonical results. Nodepool
 persists a quorum certificate before publishing a successful task result and
-does not fall back to single-Worker completion. Valid attempt-bound hcode usage
-can still be billable for a failed or no-quorum task.
+does not fall back to single-Worker completion. A failed or no-quorum task
+without a certificate is not charged under the current billing identity
+(`hcode-billing-v3-failed-no-charge`). Holds created under earlier identities keep
+their original rule.
 
 Consensus records agreement, not independently verified correctness. A colluding
 or commonly compromised Worker majority can agree on an incorrect result. Only
@@ -193,8 +195,8 @@ For new hcode tasks, `max_cpt` is the total charge cap, including the 10% platfo
 fee and all replicas. Nodepool derives equal integer execution budgets from the
 fee-exclusive cap. With a 100 CPT cap and three replicas, each receives 30 CPT
 of execution budget. The hold is 99 CPT (90 usage + 9 fee); the remaining 1 CPT
-stays with the owner. Settlement aggregates valid replica usage plus the fee,
-never exceeds `max_cpt`, and refunds unused held CPT.
+stays with the owner. Settlement of a certified task aggregates valid replica
+usage plus the fee, never exceeds `max_cpt`, and refunds unused held CPT.
 
 Automatic paid retries are disabled pending a funded platform treasury; retry
 work is not charged to task owners. Historical per-replica billing remains as

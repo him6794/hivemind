@@ -25,8 +25,10 @@ The default `enforce` policy dispatches two replicas to distinct registered
 Workers and requires two matching results. A third replica is added only when
 needed (see [Replica dispatch and escalation](#replica-dispatch-and-escalation)). Successful completion requires a quorum
 certificate; Nodepool does not lower the quorum or use a single-Worker fallback
-when fewer Workers are available. Valid assignment-bound v1 usage may still be
-billable if the task fails or no quorum forms.
+when fewer Workers are available. A task that fails or never reaches a quorum
+certificate is not charged under the current billing identity
+(`hcode-billing-v3-failed-no-charge`). Holds created under the earlier identities
+still bill the valid, assignment-bound usage they recorded in that case.
 
 Replica selection is a uniform random draw from the eligible Workers. With
 `MANAGED_CONSENSUS_REQUIRE_DISTINCT_OWNERS=true`, each owner (the provider
@@ -108,8 +110,8 @@ request after a quorum, timeout, or cancellation. If a stop cannot be
 confirmed, Nodepool retains the Worker-slot reservation in a durable
 `stop_pending`/`cancel_pending` state and retries the stop rather than
 redispatching the Worker immediately. A reply recorded while the attempt is
-`stop_pending` is kept as usage evidence and settles at finalization, but it
-cannot complete the task. A reply that reaches an already finalized attempt is
+`stop_pending` is kept as usage evidence. It cannot complete the task, and it is
+charged only if the task settles with a certificate. A reply that reaches an already finalized attempt is
 rejected, so it neither votes nor bills.
 
 After a quorum, Nodepool stops the outstanding replicas, then waits up to
@@ -118,10 +120,11 @@ their receipts, and only then records the certificate. A receipt that arrives af
 that window is not billed. A shorter window lowers completion latency and the time a
 Worker slot stays reserved, at the cost of late receipts.
 
-For `hcode` in enforce mode, settlement uses validated,
-assignment-bound per-replica usage evidence—including valid divergent results—
-within the task-wide `max_cpt` cap. Missing or invalid receipts are not billable;
-`observe` remains non-settling and creates no usage hold. A consensus certificate
+For `hcode` in enforce mode, a task that settles with a certificate is charged for
+validated, assignment-bound per-replica usage evidence—including valid divergent
+results—within the task-wide `max_cpt` cap. A task without a certificate is not
+charged under the current billing identity. Missing or invalid receipts are not
+billable; `observe` remains non-settling and creates no usage hold. A consensus certificate
 is agreement evidence, not an independent correctness proof or usage attestation.
 Historical `managed-function-v0` billing remains governed by its frozen
 Nodepool-owned fixed-reservation contract.

@@ -4,6 +4,15 @@ Version: `10d3c92e67034cfda345fb889029069dd40e0b4a` · 2026-10-05
 
 See the [project manual](HIVEMIND_MANUAL.zh-TW.md) for configuration and the source index.
 
+## First public version scope
+
+The first public version covers managed `hcode` CPU execution, quorum consensus,
+and Nodepool settlement. It excludes general-compute routes (OCI, HCS, GPU, and
+ONNX), Linux, macOS, and Android client packages, and the signed update channel.
+Lazy dispatch (`MANAGED_CONSENSUS_INITIAL_REPLICAS`) and hedging
+(`MANAGED_CONSENSUS_HEDGE_AFTER_SECS`) are off by default. The drain window
+(`MANAGED_CONSENSUS_DRAIN_SECS`) defaults to 5 seconds.
+
 ## Enrollment and admission
 
 Hivemind supports authenticated enrollment, Worker identity binding,
@@ -33,8 +42,11 @@ independence. The trust model is defined in [AGENT.md](../AGENT.md).
 - New v1 `max_cpt` is the fee-inclusive **task-wide** cap across all configured
   replicas. Nodepool derives equal integer execution budgets and validates
   attempt-bound usage before settlement.
-- Valid partial, failed, or divergent replica work can be billable even without
-  a successful task result. Missing or invalid receipts are not billable;
+- Under the current billing identity (`hcode-billing-v3-failed-no-charge`), a task
+  that ends without a quorum certificate is not charged, whether it failed,
+  timed out, or had divergent replicas. A task with a certificate is charged for
+  valid replica work within `max_cpt`. Holds created under earlier identities keep
+  the rule they were created with. Missing or invalid receipts are not billable;
   observe mode does not settle.
 - Automatic paid retries are disabled pending a funded platform treasury.
   The task-wide cap does not retroactively change historical billing.

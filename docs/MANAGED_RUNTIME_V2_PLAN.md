@@ -1,9 +1,10 @@
 # Managed runtime v2 plan (proposal)
 
-Status: proposal. Nothing in this document is implemented. The decisions that led
-here are recorded in `MANAGED_RUNTIME_EVOLUTION_PLAN.md` (2026-10-26). This file
-lists each open item, the gate it sits behind, the options, a recommendation, the
-decisions it needs, and the work it implies.
+Status: items B and C are implemented. Item A is implemented as A2 (2026-10-26).
+Items D and E remain open. The decisions that led here are recorded in
+`MANAGED_RUNTIME_EVOLUTION_PLAN.md`. This file lists each item, the gate it sits
+behind, the options, a recommendation, the decisions it needs, and the work it
+implies.
 
 ## Gates
 
@@ -17,25 +18,28 @@ decisions it needs, and the work it implies.
 
 ## A. Billing for FAILED tasks without a certificate
 
-Gate: 1 and 2. Decision needed.
+Gate: 1 and 2. Decided 2026-10-26: A2, approved by the project owner for the first
+public version. The owner's approval also covers Gate 2 for this item.
 
-- Current: usage-only settlement charges the requester for accepted evidence, and
-  the task ends FAILED. Observed in T1.4: one timeout task charged 121 CPT.
+- Previous rule: usage-only settlement charged the requester for accepted evidence,
+  and the task ended FAILED. Observed in T1.4: one timeout task charged 121 CPT.
 - Options:
   - A0. Keep the current rule.
   - A1. Requester pays 0. Providers with valid receipts are paid from a
     platform-funded pool.
   - A2. Requester pays 0. Providers are paid 0. Only certified work is paid, as
     BOINC does by default according to forum reports.
-- Recommendation: A2. It needs no platform subsidy, and providers still have a
-  reason to answer in time. Move to A1 only if provider attrition appears.
-- Work, if approved: a new identity set. In v2 attempts, the no-certificate path in
-  `settle_managed_v1_hold_without_certificate` refunds the full hold. v1 attempts
-  keep the current branch. Tests: a RED test for the v2 refund. The v1 billing
-  tests stay unchanged; `managed_consensus_no_quorum_fences_late_observations`
-  still expects 66 CPT for v1. Migration: drain in-flight v1 attempts, or record
-  the identity on each attempt.
-- Effort: large.
+- Decision: A2. It needs no platform subsidy, and providers still have a reason
+  to answer in time. Move to A1 only if provider attrition appears.
+- Implemented: new holds record `billing_version = hcode-billing-v3-failed-no-charge`
+  and `cost_model_version = hcode-execution-cpt-v2`. When the task has no
+  certificate, `settle_managed_v1_hold_without_certificate` marks every replica
+  invalid, so the charge is 0 and the full hold is refunded. Holds created under
+  `hcode-billing-v1` and `hcode-billing-v2-total-budget` keep the usage-only rule.
+  The identity is recorded on each hold, so no drain of in-flight attempts is
+  needed. Tests: `failed_task_without_certificate_is_not_charged` (v3) and
+  `managed_consensus_no_quorum_fences_late_observations` (v1, still 66 CPT).
+- Effort: large. Done.
 
 ## B. Timeout escalation latency: opt-in hedge
 
@@ -108,20 +112,24 @@ Gate: 1 and 2. Do not start before B and C.
 
 ## E. Cost-model v2 identities
 
-Gate: 1 and 2. Not started. A and D depend on it.
+Gate: 1 and 2. Partly done with A: `hcode-execution-cpt-v2` and
+`hcode-billing-v3-failed-no-charge` exist and new holds use them. The runtime and
+manifest identities are unchanged, and the client-visible runtime name is still
+`hcode`. D still needs the default fee change, which is a separate decision.
 
-- Work: new runtime, cost-model, and manifest identities; compatibility tests; a
-  drain or per-attempt identity; a decision on the client-visible runtime name.
+- Remaining work: a decision on whether the runtime or manifest identity also needs
+  to change, and compatibility tests for the v2 cost vector.
 
 ## Recommended order
 
-1. C. Hardening with no change for valid attempts.
-2. B. Opt-in hedge, with a release benchmark.
-3. A and D together, only when Gate 2 opens. Design A2 first.
+1. C. Done (`568213a8`).
+2. B. Done (`9a1f3d32`), opt-in with a release benchmark.
+3. A. Done as A2, decided 2026-10-26. D stays open until its fee decision is made.
 
-## Decisions needed
+## Decisions
 
-1. A: A0, A1, or A2. Whether to start E now.
-2. B: the default threshold, and whether the hedge extends the deadline.
-3. C: approve the additive migration.
-4. Whether to implement C and B now. Both preserve the default behavior.
+1. A: A2 (decided 2026-10-26).
+2. B: no default threshold, so the hedge is off unless an operator sets
+   `MANAGED_CONSENSUS_HEDGE_AFTER_SECS`. The hedge does not extend the deadline.
+3. C: additive migration approved and applied.
+4. D and E: still open.
