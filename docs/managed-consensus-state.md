@@ -65,6 +65,12 @@ the attempt deadline passes with quorum still missing:
   quorum to finish.
 - After a Nodepool restart, recovery rebuilds the spare pool from the trusted
   registered Workers, so escalation resumes from the persisted replica set.
+- `MANAGED_CONSENSUS_HEDGE_AFTER_SECS` is an opt-in hedge. Set it to a value from 1
+  up to, but not including, `MANAGED_CONSENSUS_TIMEOUT_SECS`. A lazily dispatched
+  attempt then adds its spare that many seconds after dispatch, while a spare is
+  free and the deadline is still open. The hedge keeps the attempt deadline, so the
+  spare must answer inside the window the attempt already has. Unset keeps the spare
+  for the deadline and quorum-unreachable cases.
 
 The acceptance rule is unchanged. A certificate still requires
 `MANAGED_CONSENSUS_QUORUM` matching results from distinct replicas, and each
@@ -76,6 +82,10 @@ replicas. With lazy dispatch, a replica that was never dispatched has no evidenc
 and no payout, so its allowance returns to the owner as a refund at settlement.
 Observe mode and other managed runtimes assign every replica at dispatch, and so
 does enforce mode unless `MANAGED_CONSENSUS_INITIAL_REPLICAS` is set.
+
+An attempt records its initial replica count and each replica added after creation.
+Settlement requires the replica rows to match that count exactly. Attempts created
+before the count was recorded keep the relaxed bound.
 
 ## Acceptance and settlement
 

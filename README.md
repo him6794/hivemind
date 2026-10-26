@@ -251,6 +251,7 @@ login handles VPN enrollment and Nodepool discovery through the overlay.
 | `MANAGED_CONSENSUS_REPLICA_COUNT` | `3` | Distinct Worker replicas per managed task |
 | `MANAGED_CONSENSUS_QUORUM` | `2` | Matching replicas required; must be a strict majority |
 | `MANAGED_CONSENSUS_INITIAL_REPLICAS` | unset | Replicas an enforce-mode hcode attempt dispatches up front. Unset dispatches all `MANAGED_CONSENSUS_REPLICA_COUNT`; set to `MANAGED_CONSENSUS_QUORUM` to add the rest only on disagreement or timeout |
+| `MANAGED_CONSENSUS_HEDGE_AFTER_SECS` | unset | With lazy dispatch, seconds after dispatch before the spare replica is added, with the attempt deadline unchanged. Unset adds the spare at the deadline only |
 | `MANAGED_CONSENSUS_TIMEOUT_SECS` | `120` | Deadline for one consensus round |
 | `MANAGED_CONSENSUS_MAX_RESULT_BYTES` | `262144` | Nodepool/Worker cap for one consensus result |
 | `MANAGED_CONSENSUS_REQUIRE_DISTINCT_OWNERS` | `true` | Replicas of one managed task must come from distinct owners; `false` is for local smoke and E2E runs where one account operates several Workers |

@@ -39,8 +39,12 @@ Gate: 1 and 2. Decision needed.
 
 ## B. Timeout escalation latency: opt-in hedge
 
-Gate: none, because it is opt-in and the default is unchanged. Decision needed on
-the threshold and the deadline rule.
+Gate: none, because it is opt-in and the default is unchanged.
+
+Status: implemented in `9a1f3d32` with the proposed deadline rule (the hedge keeps
+the deadline). The threshold has no default; the operator sets
+`MANAGED_CONSENSUS_HEDGE_AFTER_SECS`. The release benchmark is recorded in
+`MANAGED_RUNTIME_EVOLUTION_PLAN.md`.
 
 - Current: the lazy spare is added only at the deadline. Measured timeout median is
   30.1 s with lazy dispatch and 9.6 s with eager. Held replicas keep their Worker
@@ -71,8 +75,9 @@ the threshold and the deadline rule.
 
 ## C. Persist the initial replica count and make settlement checks strict
 
-Gate: none, because valid attempts behave the same. Decision needed: approve an
-additive schema migration.
+Gate: none, because valid attempts behave the same.
+
+Status: implemented in `568213a8`, with the additive migration approved.
 
 - Current: settlement accepts relaxed replica counts. A lazy attempt that loses or
   gains a replica row is not detected.
