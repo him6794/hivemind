@@ -435,6 +435,11 @@ const MANAGED_CONSENSUS_V1_LEGACY_BILLING_VERSION: &str = "hcode-billing-v1";
 const MANAGED_CONSENSUS_V1_BILLING_VERSION: &str = "hcode-billing-v2-total-budget";
 const MANAGED_CONSENSUS_V1_COST_MODEL_VERSION: &str =
     general_compute_runtime::MANAGED_DSL_V1_COST_MODEL_VERSION;
+/// Settlement rule from v2 on: a task that ends without a certificate is not charged. New
+/// holds use this identity. Holds created earlier keep their v1 rule.
+const MANAGED_CONSENSUS_V2_BILLING_VERSION: &str = "hcode-billing-v3-failed-no-charge";
+const MANAGED_CONSENSUS_V2_COST_MODEL_VERSION: &str =
+    general_compute_runtime::MANAGED_DSL_V2_COST_MODEL_VERSION;
 pub const MANAGED_CONSENSUS_POLICY_PENDING_MESSAGE: &str = "awaiting managed consensus policy";
 const MANAGED_CONSENSUS_SETTLEMENT_BASIS: &str = "nodepool-reservation";
 const MANAGED_CONSENSUS_V1_SETTLEMENT_BASIS: &str = "accepted-replica-executed-ops";
@@ -603,9 +608,16 @@ pub fn managed_v1_total_budget_hold(
 fn validate_managed_v1_held_allowance(allowance: ManagedV1HeldAllowance<'_>) -> Result<i64> {
     if allowance.replica_allowance_cpt <= 0
         || !(2..=7).contains(&allowance.replica_count)
-        || (allowance.billing_version != MANAGED_CONSENSUS_V1_LEGACY_BILLING_VERSION
-            && allowance.billing_version != MANAGED_CONSENSUS_V1_BILLING_VERSION)
-        || allowance.cost_model_version != MANAGED_CONSENSUS_V1_COST_MODEL_VERSION
+        || !matches!(
+            allowance.billing_version,
+            MANAGED_CONSENSUS_V1_LEGACY_BILLING_VERSION
+                | MANAGED_CONSENSUS_V1_BILLING_VERSION
+                | MANAGED_CONSENSUS_V2_BILLING_VERSION
+        )
+        || !matches!(
+            allowance.cost_model_version,
+            MANAGED_CONSENSUS_V1_COST_MODEL_VERSION | MANAGED_CONSENSUS_V2_COST_MODEL_VERSION
+        )
         || allowance.settlement_basis != MANAGED_CONSENSUS_V1_SETTLEMENT_BASIS
     {
         anyhow::bail!("managed v1 held allowance metadata is invalid");
@@ -636,7 +648,9 @@ fn validate_managed_v1_hold_budget_values(
         if replica_allowance_cpt != task_max_cpt {
             anyhow::bail!("legacy managed v1 allowance is not bound to the task cap");
         }
-    } else if billing_version == MANAGED_CONSENSUS_V1_BILLING_VERSION {
+    } else if billing_version == MANAGED_CONSENSUS_V1_BILLING_VERSION
+        || billing_version == MANAGED_CONSENSUS_V2_BILLING_VERSION
+    {
         let total = billed_amount
             .checked_add(held_total_cpt)
             .ok_or_else(|| anyhow::anyhow!("managed v1 task-total hold calculation overflowed"))?;
@@ -734,6 +748,7 @@ fn plan_managed_v1_settlement(
     terminal_outcome: &str,
     certificate_digest: Option<&str>,
     evidence: &[ManagedV1ReplicaEvidence],
+    cost_model_version: &str,
 ) -> Result<ManagedV1SettlementPlan> {
     if max_cpt <= 0 {
         anyhow::bail!("managed v1 settlement allowance must be positive");
@@ -790,7 +805,7 @@ fn plan_managed_v1_settlement(
         .checked_sub(charged_amount_cpt)
         .ok_or_else(|| anyhow::anyhow!("managed v1 settlement charge exceeds the hold"))?;
     let hash_payload = serde_json::json!({
-        "version": MANAGED_CONSENSUS_V1_COST_MODEL_VERSION,
+        "version": cost_model_version,
         "reserved_usage_cpt": reserved_usage_cpt,
         "reserved_fee_cpt": reserved_fee_cpt,
         "held_total_cpt": held_total_cpt,
@@ -1270,18 +1285,27 @@ async fn settle_managed_v1_hold_without_certificate(
         }
         None => {}
     }
-    let evidence: Vec<_> = replicas
+    let mut evidence: Vec<_> = replicas
         .iter()
         .map(|replica| {
             classify_managed_v1_replica_evidence(task_id, &task, &attempt, replica, hold.max_cpt)
         })
         .collect();
+    if hold.billing_version == MANAGED_CONSENSUS_V2_BILLING_VERSION {
+        // From v2 on, a task that ends without a certificate is not charged, so no
+        // replica work is billable. The usage is still recorded in the payout rows.
+        for item in &mut evidence {
+            item.valid = false;
+            item.rejection_reason = Some("task ended without a certificate".to_owned());
+        }
+    }
     let plan = plan_managed_v1_settlement(
         hold.max_cpt,
         attempt.replica_count,
         terminal_outcome,
         None,
         &evidence,
+        &hold.cost_model_version,
     )?;
     apply_managed_v1_settlement(tx, task_id, &task.owner, &hold, attempt.id, &plan, None).await?;
     let billed_amount = task
@@ -2478,8 +2502,8 @@ impl TaskRepository {
             .bind(reserved_usage_cpt)
             .bind(reserved_fee_cpt)
             .bind(held_total_cpt)
-            .bind(MANAGED_CONSENSUS_V1_BILLING_VERSION)
-            .bind(MANAGED_CONSENSUS_V1_COST_MODEL_VERSION)
+            .bind(MANAGED_CONSENSUS_V2_BILLING_VERSION)
+            .bind(MANAGED_CONSENSUS_V2_COST_MODEL_VERSION)
             .bind(MANAGED_CONSENSUS_V1_SETTLEMENT_BASIS)
             .execute(&mut *tx)
             .await?;
@@ -3944,6 +3968,7 @@ impl TaskRepository {
             "quorum_reached",
             Some(&certificate_digest),
             &evidence,
+            &hold.cost_model_version,
         )?;
         if hold.reserved_usage_cpt != plan.reserved_usage_cpt
             || hold.reserved_fee_cpt != plan.reserved_fee_cpt
@@ -10321,13 +10346,22 @@ mod tests {
             "quorum_reached",
             None,
             &[evidence("replica-1"), evidence("replica-2")],
+            MANAGED_CONSENSUS_V1_COST_MODEL_VERSION,
         )
         .unwrap();
         assert_eq!(plan.payouts.len(), 2);
         assert_eq!(plan.charged_amount_cpt, 0);
         assert_eq!(plan.refund_cpt, plan.held_total_cpt);
 
-        assert!(plan_managed_v1_settlement(30, 3, "no_quorum", None, &[]).is_err());
+        assert!(plan_managed_v1_settlement(
+            30,
+            3,
+            "no_quorum",
+            None,
+            &[],
+            MANAGED_CONSENSUS_V1_COST_MODEL_VERSION,
+        )
+        .is_err());
         assert!(plan_managed_v1_settlement(
             30,
             3,
@@ -10339,6 +10373,7 @@ mod tests {
                 evidence("replica-3"),
                 evidence("replica-4"),
             ],
+            MANAGED_CONSENSUS_V1_COST_MODEL_VERSION,
         )
         .is_err());
     }
@@ -15703,6 +15738,116 @@ mod tests {
         fixture.cleanup().await.ok();
     }
 
+    /// A task that ends without a certificate is FAILED and is not charged. The hold is refunded
+    /// in full and no provider is paid, even though one replica returned valid usage.
+    #[tokio::test]
+    async fn failed_task_without_certificate_is_not_charged() {
+        let (p, fixture) = match pool("task_repository_failed_no_charge").await {
+            Some(parts) => parts,
+            None => return,
+        };
+        let repo = TaskRepository::new(p);
+        let (task, workers) = persisted_count_fixture(&repo, "failed-no-charge").await;
+        let (attempt, assignments) = repo
+            .create_managed_consensus_attempt(&task, &workers, 3, 2, 120, "enforce")
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(repo
+            .mark_managed_consensus_replica_running(attempt.id, &assignments[0].replica_id)
+            .await
+            .unwrap());
+        let output = b"one-valid-vote".to_vec();
+        let result = hivemind_proto::ManagedConsensusResult {
+            protocol_version: 1,
+            status: "completed".into(),
+            output: output.clone(),
+            usage_units: 30,
+            executed_ops: 30,
+            output_bytes: output.len() as u64,
+            runtime: "hcode".into(),
+            backend_id: hivemind_managed_consensus::MANAGED_DSL_V1_DEFAULT_BACKEND_ID.into(),
+            semantics_manifest_sha256:
+                hivemind_managed_consensus::MANAGED_DSL_V1_DEFAULT_SEMANTICS_DIGEST.into(),
+            source_sha256: hivemind_managed_consensus::digest_hex(
+                task.task_source.as_deref().unwrap().as_bytes(),
+            ),
+            input_sha256: hivemind_managed_consensus::digest_hex(
+                task.torrent_source.as_deref().unwrap().as_bytes(),
+            ),
+            result_digest: hivemind_managed_consensus::digest_hex(&output),
+            ..hivemind_proto::ManagedConsensusResult::default()
+        };
+        let result_json = result.encode_to_vec();
+        let result_digest = hivemind_proto::managed_consensus_result_digest(&result);
+        repo.record_managed_consensus_observation(
+            &task.task_id,
+            attempt.id,
+            &attempt.round_id,
+            &assignments[0].replica_id,
+            &assignments[0].worker_id,
+            true,
+            &result_digest,
+            output.len() as i64,
+            &result_json,
+            30,
+            30,
+        )
+        .await
+        .unwrap();
+        let updated = repo
+            .mark_managed_consensus_no_quorum(
+                &task.task_id,
+                attempt.id,
+                "test no quorum",
+                task.max_retries,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(updated.status, TaskStatus::Failed);
+        let billed: i64 = sqlx::query_scalar("SELECT billed_amount FROM tasks WHERE task_id = $1")
+            .bind(&task.task_id)
+            .fetch_one(&repo.pool)
+            .await
+            .unwrap();
+        assert_eq!(billed, 0, "a task without a certificate is not charged");
+        let owner_balance: i64 =
+            sqlx::query_scalar("SELECT balance FROM users WHERE username = $1")
+                .bind(&task.owner)
+                .fetch_one(&repo.pool)
+                .await
+                .unwrap();
+        assert_eq!(owner_balance, 1000, "the hold is refunded in full");
+        for worker in &workers {
+            let provider_balance: i64 =
+                sqlx::query_scalar("SELECT balance FROM users WHERE username = $1")
+                    .bind(&worker.username)
+                    .fetch_one(&repo.pool)
+                    .await
+                    .unwrap();
+            assert_eq!(
+                provider_balance, 0,
+                "no provider is paid for a task without a certificate"
+            );
+        }
+        let (state, charged, refund, held_total, billing): (String, i64, i64, i64, String) =
+            sqlx::query_as(
+                "SELECT state, charged_amount_cpt, refund_cpt, held_total_cpt, billing_version
+                 FROM managed_consensus_usage_holds WHERE attempt_id = $1",
+            )
+            .bind(attempt.id)
+            .fetch_one(&repo.pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            (state.as_str(), charged, refund),
+            ("settled", 0, held_total)
+        );
+        assert_eq!(billing, "hcode-billing-v3-failed-no-charge");
+        fixture.cleanup().await.ok();
+    }
+
     /// An expiry mark applies only to the deadline its claim read. An escalation that
     /// extends the deadline after the claim must leave the attempt running.
     #[tokio::test]
@@ -16379,7 +16524,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn managed_v1_stop_pending_keeps_hold_until_confirmed_then_pays_valid_usage() {
+    async fn managed_v1_stop_pending_keeps_hold_until_confirmed_then_refunds_without_certificate() {
         let (pool, fixture) = match pool("task_repository_managed_v1_stop_pending").await {
             Some(parts) => parts,
             None => return,
@@ -16565,7 +16710,9 @@ mod tests {
         .fetch_one(&repo.pool)
         .await
         .unwrap();
-        assert_eq!(settled_hold, ("settled".into(), 24, 26, 73));
+        // v3: the task never gets a certificate, so the valid replies stay evidence only.
+        // Nothing is charged, the whole hold is refunded, and no Worker is paid.
+        assert_eq!(settled_hold, ("settled".into(), 0, 0, 99));
         let (status, billed, balance): (String, i64, i64) = sqlx::query_as(
             "SELECT t.status, t.billed_amount, u.balance FROM tasks t
              JOIN users u ON u.username = t.owner WHERE t.task_id = $1",
@@ -16574,14 +16721,14 @@ mod tests {
         .fetch_one(&repo.pool)
         .await
         .unwrap();
-        assert_eq!((status.as_str(), billed, balance), ("FAILED", 26, 974));
+        assert_eq!((status.as_str(), billed, balance), ("FAILED", 0, 1000));
         let provider_balance: i64 =
             sqlx::query_scalar("SELECT balance FROM users WHERE username = $1")
                 .bind(&provider_users[0])
                 .fetch_one(&repo.pool)
                 .await
                 .unwrap();
-        assert_eq!(provider_balance, 12);
+        assert_eq!(provider_balance, 0);
         let late_provider_index = worker_ids
             .iter()
             .position(|worker_id| worker_id == &assignments[1].worker_id)
@@ -16592,7 +16739,7 @@ mod tests {
                 .fetch_one(&repo.pool)
                 .await
                 .unwrap();
-        assert_eq!(late_provider_balance, 12);
+        assert_eq!(late_provider_balance, 0);
         fixture.cleanup().await.ok();
     }
 
