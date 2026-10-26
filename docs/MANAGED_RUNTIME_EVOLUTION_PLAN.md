@@ -1053,3 +1053,46 @@ Open items after this checkpoint:
   `managed_v1_stop_pending_keeps_hold_until_confirmed_then_pays_valid_usage`).
   Policy decision pending.
 - Default flip of `initial_replicas` remains deferred (v2 memo).
+
+### Decisions on the open items (2026-10-26)
+
+Each item is decided against the documented contract where one exists, and against
+outside practice otherwise. Changing a decision is a product call; the reasons are
+recorded so that a change can be made deliberately.
+
+- **Slot release while a stop is unconfirmed.** Keep. The reservation stays until
+  the stop is confirmed, as `managed-consensus-state.md` requires. Releasing it
+  early can overlap a replica the Worker is still running. Kubernetes also waits
+  out a toleration window (300 s by default) before evicting pods from a NotReady
+  node.
+- **Replies after a confirmed stop.** Keep the fence. Such a reply cannot vote, and
+  its valid usage is billed. BOINC (arXiv 1903.01699) checks a copy that arrives
+  after a canonical result against it to decide credit, without changing the
+  result. Our rule has the same shape.
+- **Billing for FAILED tasks without a certificate.** Keep for this round, as
+  instructed. v2 target: the requester pays nothing, because no certified result
+  was delivered. Forum reports say BOINC pays by default only for results it can
+  check. AWS Lambda bills executions that error; that is from a third-party guide,
+  and the official pricing text was not read. Who funds valid provider receipts on
+  a failed task is an economic decision, so it stays in v2.
+- **Timeout escalation latency.** Keep for this round, as instructed. v2 target: a
+  percentile-triggered spare, opt-in first. The spare starts once the outstanding
+  replica exceeds the p95 of observed reply times. The deadline stays the hard
+  limit, and the rest are cancelled once a quorum forms. Tail at Scale uses this
+  shape (secondary sources). Spark speculation uses 1.5 times the median with a
+  0.75 quantile gate. A hedge adds a replica, about 121 CPT per task (half of the
+  242 CPT two-replica normal task), so the budget needs a decision.
+- **Lazy dispatch as the default.** Keep eager as the default. Lazy timeouts are
+  still about three times slower (median 30.1 s against 9.6 s), and they hold
+  slots until the deadline. The 31% normal-path saving stays available as opt-in.
+  Revisit after the v2 hedge.
+- **Cost-model identifier bump.** Not now. There is no buyer, and a bump needs new
+  runtime, cost-model, and manifest identifiers plus a drain.
+- **Relaxed replica-count checks in settlement.** Keep for now. Prerequisite for
+  flipping the default: persist `initial_replicas` on the attempt and make the
+  checks strict.
+- **Retry path test gap.** Closed for the helper. `retry_on_deadlock` has unit tests
+  in `d3693444`. The end-to-end deadlock path still relies on the lock-order test.
+- **Expiry race after an escalation.** Fixed in `d3693444`. Regression evidence is
+  recorded below once the run completes.
+- **Codex review.** Not run. Codex is not logged in, and logging in needs the user.
