@@ -839,10 +839,16 @@ impl Dispatcher {
         reason: &str,
         retry_limit: i32,
     ) -> Result<Option<Task>> {
-        let targets = self
+        // The claim reads the persisted deadline and the stop targets under one row lock.
+        // An escalation that extended the deadline first leaves the attempt running, and
+        // no replica is stopped for it.
+        let Some((targets, claimed_deadline)) = self
             .repo
-            .managed_consensus_stop_targets(&task.task_id, attempt.id)
-            .await?;
+            .claim_managed_consensus_expiry(&task.task_id, attempt.id)
+            .await?
+        else {
+            return Ok(None);
+        };
         let mut all_stopped = true;
         for target in &targets {
             if let Err(error) = stop_and_record_managed_consensus_replica(
@@ -885,7 +891,13 @@ impl Dispatcher {
                 return Ok(None);
             }
             self.repo
-                .mark_managed_consensus_no_quorum(&task.task_id, attempt.id, reason, retry_limit)
+                .mark_managed_consensus_expired_no_quorum(
+                    &task.task_id,
+                    attempt.id,
+                    claimed_deadline,
+                    reason,
+                    retry_limit,
+                )
                 .await
         } else {
             // Replies already persisted can form a certificate even though some replicas
@@ -902,7 +914,12 @@ impl Dispatcher {
                 return Ok(None);
             }
             self.repo
-                .mark_managed_consensus_stop_pending(&task.task_id, attempt.id, reason)
+                .mark_managed_consensus_expired_stop_pending(
+                    &task.task_id,
+                    attempt.id,
+                    claimed_deadline,
+                    reason,
+                )
                 .await
         }
     }
@@ -7994,6 +8011,17 @@ mod tests {
         .await
         .unwrap();
 
+        // Expiry runs only once the persisted timeout has passed. The replicas above
+        // were marked running while the deadline was still in the future.
+        sqlx::query(
+            "UPDATE managed_consensus_attempts
+             SET deadline = NOW() - INTERVAL '1 second'
+             WHERE id = $1",
+        )
+        .bind(attempt.id)
+        .execute(&pool)
+        .await
+        .unwrap();
         let dispatcher = Dispatcher::new(db, 30, 2);
         let first = dispatcher
             .expire_managed_consensus_attempt(
@@ -8148,6 +8176,17 @@ mod tests {
             .await
             .unwrap();
         }
+        // Expiry runs only once the persisted timeout has passed. The replicas above
+        // were marked running while the deadline was still in the future.
+        sqlx::query(
+            "UPDATE managed_consensus_attempts
+             SET deadline = NOW() - INTERVAL '1 second'
+             WHERE id = $1",
+        )
+        .bind(attempt.id)
+        .execute(&pool)
+        .await
+        .unwrap();
         let mut dispatcher = Dispatcher::new(db, 30, 2);
         dispatcher.worker_execution_private_key_pem = "not-a-valid-ed25519-private-key".into();
 
@@ -8181,6 +8220,113 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(hold_state, "held");
+        fixture.cleanup().await.ok();
+    }
+
+    /// An escalation extends the persisted deadline under the attempt row lock. An
+    /// expiry that read the deadline before the extension must not stop the replicas
+    /// or end the attempt, because the escalated replica is still inside its window.
+    #[tokio::test]
+    async fn expiry_leaves_attempt_whose_persisted_deadline_was_extended() {
+        let lock = dispatcher_db_lock();
+        let _guard = lock.lock().await;
+        let Some((db, fixture)) = test_db("dispatcher_expiry_extended_deadline").await else {
+            return;
+        };
+        let pool = db.pool.clone();
+        let repo = Arc::new(TaskRepository::new(pool.clone()));
+        let unique = uuid::Uuid::new_v4().to_string();
+        let owner = format!("extended-deadline-owner-{unique}");
+        lazy_consensus_owner(&pool, &owner, 1000).await;
+        let task_id = format!("extended-deadline-task-{unique}");
+        let task = lazy_consensus_task(&repo, &owner, &task_id).await;
+        let mut workers = Vec::new();
+        for index in 0..3 {
+            let provider = format!("extended-deadline-provider-{index}-{unique}");
+            lazy_consensus_owner(&pool, &provider, 0).await;
+            let worker_id = format!("extended-deadline-worker-{index}-{unique}");
+            sqlx::query(
+                "INSERT INTO worker_nodes (worker_id, username, ip, cpu_cores, memory_gb)
+                 VALUES ($1, $2, '10.0.0.3', 4, 16)",
+            )
+            .bind(&worker_id)
+            .bind(&provider)
+            .execute(&pool)
+            .await
+            .unwrap();
+            let mut worker = make_worker(&worker_id, 4, 16, WorkerStatus::Idle);
+            // worker_ip is VARCHAR(45), so the IP must not come from the long worker ID.
+            worker.ip = format!("10.0.0.{}", index + 20);
+            worker.username = provider;
+            workers.push(worker);
+        }
+        let (attempt, _assignments) = repo
+            .create_managed_consensus_attempt(&task, &workers, 3, 2, 120, "enforce")
+            .await
+            .unwrap()
+            .expect("pending task should create a consensus attempt");
+        // The timeout loop read the attempt while its deadline had passed.
+        let mut stale = attempt.clone();
+        stale.deadline = chrono::Utc::now() - chrono::Duration::seconds(1);
+        // An escalation has since extended the persisted deadline.
+        sqlx::query(
+            "UPDATE managed_consensus_attempts
+             SET deadline = NOW() + INTERVAL '60 seconds'
+             WHERE id = $1",
+        )
+        .bind(attempt.id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let attempt_state_before: String =
+            sqlx::query_scalar("SELECT state FROM managed_consensus_attempts WHERE id = $1")
+                .bind(attempt.id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        let replicas_before: Vec<(String, String)> = sqlx::query_as(
+            "SELECT replica_id, state FROM managed_consensus_replicas
+             WHERE attempt_id = $1 ORDER BY replica_id",
+        )
+        .bind(attempt.id)
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        let mut dispatcher = Dispatcher::new(db, 30, 2);
+        dispatcher.worker_execution_private_key_pem = "not-a-valid-ed25519-private-key".into();
+
+        let outcome = dispatcher
+            .expire_managed_consensus_attempt(
+                &task,
+                &stale,
+                "managed consensus deadline exceeded",
+                0,
+            )
+            .await
+            .unwrap();
+        assert!(outcome.is_none(), "an extended attempt must not be expired");
+        let attempt_state: String =
+            sqlx::query_scalar("SELECT state FROM managed_consensus_attempts WHERE id = $1")
+                .bind(attempt.id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(attempt_state, attempt_state_before);
+        let replicas_after: Vec<(String, String)> = sqlx::query_as(
+            "SELECT replica_id, state FROM managed_consensus_replicas
+             WHERE attempt_id = $1 ORDER BY replica_id",
+        )
+        .bind(attempt.id)
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(replicas_after, replicas_before, "no replica may be stopped");
+        let status: String = sqlx::query_scalar("SELECT status FROM tasks WHERE task_id = $1")
+            .bind(&task_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_ne!(status, "FAILED");
         fixture.cleanup().await.ok();
     }
 

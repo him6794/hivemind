@@ -1458,6 +1458,19 @@ impl TaskRepository {
         task_id: &str,
         expected_attempt_id: Uuid,
     ) -> Result<Vec<ManagedConsensusStopTarget>> {
+        Self::managed_consensus_stop_targets_with(&self.pool, task_id, expected_attempt_id).await
+    }
+
+    /// Reads the stop targets through any executor, so the expiry claim can read them
+    /// inside its locked transaction.
+    async fn managed_consensus_stop_targets_with<'e, E>(
+        executor: E,
+        task_id: &str,
+        expected_attempt_id: Uuid,
+    ) -> Result<Vec<ManagedConsensusStopTarget>>
+    where
+        E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+    {
         let rows: Vec<ManagedConsensusStopTargetRow> = sqlx::query_as(
             "SELECT r.worker_id, r.worker_ip, r.execution_id, r.worker_attempt_id,
                     r.request_digest, a.round_id, r.replica_id, t.id
@@ -1479,7 +1492,7 @@ impl TaskRepository {
         )
         .bind(task_id)
         .bind(expected_attempt_id)
-        .fetch_all(&self.pool)
+        .fetch_all(executor)
         .await?;
         rows.into_iter()
             .map(
@@ -1512,6 +1525,36 @@ impl TaskRepository {
                 },
             )
             .collect()
+    }
+
+    /// Claims an attempt for timeout expiry. The attempt row is locked while its
+    /// persisted deadline is checked and its stop targets are read. Escalation extends
+    /// the deadline under the same row lock, so an extension that committed first makes
+    /// the claim return `None`. An extension that waits sees the claimed deadline in its
+    /// own guard and leaves the attempt running.
+    pub(crate) async fn claim_managed_consensus_expiry(
+        &self,
+        task_id: &str,
+        attempt_id: Uuid,
+    ) -> Result<Option<(Vec<ManagedConsensusStopTarget>, DateTime<Utc>)>> {
+        let mut tx = self.pool.begin().await?;
+        let deadline: Option<DateTime<Utc>> = sqlx::query_scalar(
+            "SELECT deadline FROM managed_consensus_attempts
+             WHERE id = $1 AND task_id = $2
+             FOR UPDATE",
+        )
+        .bind(attempt_id)
+        .bind(task_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        let Some(deadline) = deadline.filter(|deadline| *deadline <= Utc::now()) else {
+            tx.commit().await?;
+            return Ok(None);
+        };
+        let targets =
+            Self::managed_consensus_stop_targets_with(&mut *tx, task_id, attempt_id).await?;
+        tx.commit().await?;
+        Ok(Some((targets, deadline)))
     }
 
     pub(crate) async fn managed_consensus_pending_stop_attempts(
@@ -1548,6 +1591,35 @@ impl TaskRepository {
         attempt_id: Uuid,
         reason: &str,
     ) -> Result<Option<Task>> {
+        self.mark_managed_consensus_stop_pending_guarded(task_id, attempt_id, reason, None)
+            .await
+    }
+
+    /// Expiry counterpart of `mark_managed_consensus_stop_pending`. It applies the same
+    /// claimed-deadline guard as `mark_managed_consensus_expired_no_quorum`.
+    pub(crate) async fn mark_managed_consensus_expired_stop_pending(
+        &self,
+        task_id: &str,
+        attempt_id: Uuid,
+        claimed_deadline: DateTime<Utc>,
+        reason: &str,
+    ) -> Result<Option<Task>> {
+        self.mark_managed_consensus_stop_pending_guarded(
+            task_id,
+            attempt_id,
+            reason,
+            Some(claimed_deadline),
+        )
+        .await
+    }
+
+    async fn mark_managed_consensus_stop_pending_guarded(
+        &self,
+        task_id: &str,
+        attempt_id: Uuid,
+        reason: &str,
+        claimed_deadline: Option<DateTime<Utc>>,
+    ) -> Result<Option<Task>> {
         let mut tx = self.pool.begin().await?;
         let current: Option<(String, Option<Uuid>)> = sqlx::query_as(
             "SELECT status, managed_consensus_attempt_id
@@ -1569,11 +1641,13 @@ impl TaskRepository {
         let attempt = sqlx::query(
             "UPDATE managed_consensus_attempts
              SET state = 'stop_pending', failure_reason = $2, updated_at = NOW()
-             WHERE id = $1 AND task_id = $3 AND state IN ('dispatching', 'running')",
+             WHERE id = $1 AND task_id = $3 AND state IN ('dispatching', 'running')
+               AND ($4::timestamptz IS NULL OR deadline = $4)",
         )
         .bind(attempt_id)
         .bind(reason)
         .bind(task_id)
+        .bind(claimed_deadline)
         .execute(&mut *tx)
         .await?;
         if attempt.rows_affected() != 1 {
@@ -2976,7 +3050,36 @@ impl TaskRepository {
         retry_limit: i32,
     ) -> Result<Option<Task>> {
         retry_on_deadlock(SETTLEMENT_DEADLOCK_ATTEMPTS, || {
-            self.mark_managed_consensus_no_quorum_once(task_id, attempt_id, reason, retry_limit)
+            self.mark_managed_consensus_no_quorum_once(
+                task_id,
+                attempt_id,
+                None,
+                reason,
+                retry_limit,
+            )
+        })
+        .await
+    }
+
+    /// Ends an attempt whose deadline an expiry claimed. The attempt is marked only
+    /// while its persisted deadline still equals the claimed value, so an escalation
+    /// that extended the deadline after the claim keeps the attempt running.
+    pub(crate) async fn mark_managed_consensus_expired_no_quorum(
+        &self,
+        task_id: &str,
+        attempt_id: Uuid,
+        claimed_deadline: DateTime<Utc>,
+        reason: &str,
+        retry_limit: i32,
+    ) -> Result<Option<Task>> {
+        retry_on_deadlock(SETTLEMENT_DEADLOCK_ATTEMPTS, || {
+            self.mark_managed_consensus_no_quorum_once(
+                task_id,
+                attempt_id,
+                Some(claimed_deadline),
+                reason,
+                retry_limit,
+            )
         })
         .await
     }
@@ -2985,6 +3088,7 @@ impl TaskRepository {
         &self,
         task_id: &str,
         attempt_id: Uuid,
+        claimed_deadline: Option<DateTime<Utc>>,
         reason: &str,
         retry_limit: i32,
     ) -> Result<Option<Task>> {
@@ -3019,11 +3123,13 @@ impl TaskRepository {
         let attempt = sqlx::query(
             "UPDATE managed_consensus_attempts
              SET state = 'no_quorum', failure_reason = $2, updated_at = NOW(), completed_at = NOW()
-             WHERE id = $1 AND task_id = $3 AND state IN ('dispatching', 'running')",
+             WHERE id = $1 AND task_id = $3 AND state IN ('dispatching', 'running')
+               AND ($4::timestamptz IS NULL OR deadline = $4)",
         )
         .bind(attempt_id)
         .bind(reason)
         .bind(task_id)
+        .bind(claimed_deadline)
         .execute(&mut *tx)
         .await?;
         if attempt.rows_affected() != 1 {
@@ -15213,6 +15319,222 @@ mod tests {
             assert!(!observed.billing_settled);
             assert_eq!(observed.billed_amount, 0);
         }
+        fixture.cleanup().await.ok();
+    }
+
+    /// A database error with SQLSTATE 40P01, as PostgreSQL reports a deadlock.
+    #[derive(Debug)]
+    struct DeadlockDatabaseError;
+
+    impl std::fmt::Display for DeadlockDatabaseError {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("deadlock detected")
+        }
+    }
+
+    impl std::error::Error for DeadlockDatabaseError {}
+
+    impl sqlx::error::DatabaseError for DeadlockDatabaseError {
+        fn message(&self) -> &str {
+            "deadlock detected"
+        }
+
+        fn code(&self) -> Option<std::borrow::Cow<'_, str>> {
+            Some(std::borrow::Cow::Borrowed("40P01"))
+        }
+
+        fn kind(&self) -> sqlx::error::ErrorKind {
+            sqlx::error::ErrorKind::Other
+        }
+
+        fn as_error(&self) -> &(dyn std::error::Error + Send + Sync + 'static) {
+            self
+        }
+
+        fn as_error_mut(&mut self) -> &mut (dyn std::error::Error + Send + Sync + 'static) {
+            self
+        }
+
+        fn into_error(self: Box<Self>) -> Box<dyn std::error::Error + Send + Sync + 'static> {
+            self
+        }
+    }
+
+    fn deadlock_error() -> anyhow::Error {
+        anyhow::Error::from(sqlx::Error::Database(Box::new(DeadlockDatabaseError)))
+    }
+
+    /// The retry helper reruns a settlement after a deadlock and returns the first success.
+    /// These tests need no database.
+    #[tokio::test]
+    async fn retry_on_deadlock_returns_the_first_success() {
+        let mut calls = 0u32;
+        let result = retry_on_deadlock(3, || {
+            calls += 1;
+            let attempt = calls;
+            async move {
+                if attempt < 2 {
+                    Err(deadlock_error())
+                } else {
+                    Ok(attempt)
+                }
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(result, 2);
+        assert_eq!(calls, 2);
+    }
+
+    #[tokio::test]
+    async fn retry_on_deadlock_stops_after_the_attempt_bound() {
+        let mut calls = 0u32;
+        let result: Result<()> = retry_on_deadlock(3, || {
+            calls += 1;
+            async { Err(deadlock_error()) }
+        })
+        .await;
+        let error = result.unwrap_err();
+        assert!(hivemind_database::postgres::is_deadlock_error(&error));
+        assert_eq!(calls, 3);
+    }
+
+    #[tokio::test]
+    async fn retry_on_deadlock_does_not_retry_other_errors() {
+        let mut calls = 0u32;
+        let result: Result<()> = retry_on_deadlock(3, || {
+            calls += 1;
+            async { Err(anyhow::anyhow!("not a deadlock")) }
+        })
+        .await;
+        assert!(result.is_err());
+        assert_eq!(calls, 1);
+    }
+
+    /// An expiry mark applies only to the deadline its claim read. An escalation that
+    /// extends the deadline after the claim must leave the attempt running.
+    #[tokio::test]
+    async fn expired_no_quorum_mark_follows_the_claimed_deadline() {
+        let (p, fixture) = match pool("task_repository_expired_mark_deadline_guard").await {
+            Some(parts) => parts,
+            None => return,
+        };
+        let repo = TaskRepository::new(p);
+        let unique = uuid::Uuid::new_v4().to_string();
+        let owner = format!("expired-mark-owner-{unique}");
+        let task_id = format!("expired-mark-task-{unique}");
+        sqlx::query(
+            "INSERT INTO users (username, password_hash, balance) VALUES ($1, 'hash', 1000)",
+        )
+        .bind(&owner)
+        .execute(&repo.pool)
+        .await
+        .unwrap();
+        let worker_ids = [
+            format!("expired-mark-worker-a-{unique}"),
+            format!("expired-mark-worker-b-{unique}"),
+            format!("expired-mark-worker-c-{unique}"),
+        ];
+        let provider_users = [
+            format!("expired-mark-provider-{unique}-0"),
+            format!("expired-mark-provider-{unique}-1"),
+            format!("expired-mark-provider-{unique}-2"),
+        ];
+        for (worker_id, provider_user) in worker_ids.iter().zip(provider_users.iter()) {
+            sqlx::query(
+                "INSERT INTO users (username, password_hash, balance) VALUES ($1, 'hash', 0)",
+            )
+            .bind(provider_user)
+            .execute(&repo.pool)
+            .await
+            .unwrap();
+            insert_worker(&repo.pool, worker_id, provider_user).await;
+        }
+        let mut task = make_task(&task_id, &owner);
+        task.runtime = Some("hcode".into());
+        task.task_source = Some("return input".into());
+        task.torrent_source = Some("{}".into());
+        task.deterministic = true;
+        task.max_cpt = 100;
+        repo.create(&task).await.unwrap();
+        let workers: Vec<_> = worker_ids
+            .iter()
+            .enumerate()
+            .map(|(index, worker_id)| {
+                let mut worker = make_worker_node(worker_id, &format!("10.0.2.{}", index + 10));
+                worker.username = provider_users[index].clone();
+                worker
+            })
+            .collect();
+        let (attempt, _assignments) = repo
+            .create_managed_consensus_attempt(&task, &workers, 3, 2, 120, "enforce")
+            .await
+            .unwrap()
+            .unwrap();
+        sqlx::query(
+            "UPDATE managed_consensus_attempts
+             SET deadline = NOW() - INTERVAL '1 second'
+             WHERE id = $1",
+        )
+        .bind(attempt.id)
+        .execute(&repo.pool)
+        .await
+        .unwrap();
+        let (_targets, claimed_deadline) = repo
+            .claim_managed_consensus_expiry(&task_id, attempt.id)
+            .await
+            .unwrap()
+            .expect("an attempt past its deadline should be claimed");
+        // An escalation extends the deadline after the claim.
+        sqlx::query(
+            "UPDATE managed_consensus_attempts
+             SET deadline = NOW() + INTERVAL '60 seconds'
+             WHERE id = $1",
+        )
+        .bind(attempt.id)
+        .execute(&repo.pool)
+        .await
+        .unwrap();
+        let refused = repo
+            .mark_managed_consensus_expired_no_quorum(
+                &task_id,
+                attempt.id,
+                claimed_deadline,
+                "test expiry",
+                task.max_retries,
+            )
+            .await
+            .unwrap();
+        assert!(refused.is_none(), "an extended attempt must not be marked");
+        let state: String =
+            sqlx::query_scalar("SELECT state FROM managed_consensus_attempts WHERE id = $1")
+                .bind(attempt.id)
+                .fetch_one(&repo.pool)
+                .await
+                .unwrap();
+        assert!(
+            matches!(state.as_str(), "dispatching" | "running"),
+            "state was {state}"
+        );
+        // With the claimed deadline still in place, the same mark ends the attempt.
+        sqlx::query("UPDATE managed_consensus_attempts SET deadline = $2 WHERE id = $1")
+            .bind(attempt.id)
+            .bind(claimed_deadline)
+            .execute(&repo.pool)
+            .await
+            .unwrap();
+        let updated = repo
+            .mark_managed_consensus_expired_no_quorum(
+                &task_id,
+                attempt.id,
+                claimed_deadline,
+                "test expiry",
+                task.max_retries,
+            )
+            .await
+            .unwrap()
+            .expect("an unmoved deadline should end the attempt");
+        assert_eq!(updated.status, TaskStatus::Failed);
         fixture.cleanup().await.ok();
     }
 
