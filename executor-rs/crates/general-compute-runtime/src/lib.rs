@@ -43,6 +43,9 @@ pub const MANAGED_DSL_V1_RUNTIME_VERSION: &str = "hcode";
 pub const MANAGED_DSL_V1_SEMANTICS_MANIFEST_SHA256: &str =
     "sha256:1fb0e736676b6cc9d7090094b0e57e37f691b2b191eda5b9c7298a848bdc9593";
 pub const MANAGED_DSL_V1_COST_MODEL_VERSION: &str = "hcode-execution-cpt-v1";
+/// Managed DSL cost model with no charge for a task that ends without a certificate. The
+/// cost vectors and per-replica budgets are the v1 ones. Only the settlement outcome changes.
+pub const MANAGED_DSL_V2_COST_MODEL_VERSION: &str = "hcode-execution-cpt-v2";
 pub const MAX_CPU_MILLIS: u64 = 24 * 60 * 60 * 1000;
 pub const MAX_MEMORY_BYTES: u64 = 1024 * 1024 * 1024 * 1024;
 pub const MAX_WALL_TIME_MS: u64 = 7 * 24 * 60 * 60 * 1000;
