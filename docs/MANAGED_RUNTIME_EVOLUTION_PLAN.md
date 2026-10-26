@@ -1219,3 +1219,62 @@ Decision: the default stays 5 s. An operator who prefers latency sets
 second is not billed. Before changing the default, measure late-receipt arrival times
 in a real deployment. The create-to-dispatch variation is the next open item; it needs
 its own investigation before any change.
+
+### Dispatch wakeup checkpoint (2026-10-26)
+
+Root cause of the create-to-dispatch variation: the dispatch loop runs on a fixed
+5 s tick (`hivemind-bin/src/lib.rs`, `start_registered_dispatch_loop(5s)`). A burst
+created at once waits for the next tick, so its delay depends on where the burst
+lands in the tick. Tasks refused for a Worker slot also waited a full tick before
+retrying. The slow run 713 shows one pass, `Dispatched 20 pending tasks`, five seconds
+after the burst.
+
+Change: `6bd76c48` wakes the dispatch loop when a pending task is created and when an
+attempt finishes, since a finished attempt releases its slots. `3ed92bff` coalesces
+wakeups over 20 ms and documents the one-loop-per-process assumption. The 5 s tick
+remains the fallback. The independent review of `6bd76c48` (through Codex) is handled
+as follows: the wakeup cannot be lost; the per-completion scan is bounded by the 20 ms
+coalescing; the unbiased shutdown select is kept, since a biased select would starve
+dispatch if the watch sender were dropped; the process-global notification is
+documented, not restructured.
+
+The benchmark binary is the release build of `3ed92bff` (SHA-256 `2CFB67D4…9BBD`), bench
+build `wakeup`, twelve runs of 20 tasks, a fresh stack per run.
+
+| variant | runs | median s per run | p95 s per run | create→dispatch median | dispatch→certificate | slot warnings | billed CPT/task |
+|---|---|---|---|---|---|---|---|
+| lazy, normal path, no hedge | 3 | 0.24, 0.10, 0.17 | 0.29, 0.13, 0.21 | 0.22, 0.07, 0.12 s | n/a | 0 | 242 |
+| lazy, hedge 3 s, drain 5 s (default) | 3 | 8.08, 8.09, 8.14 | 8.14, 8.20, 16.09 | 0.05–0.14 s (max 8.1 s in run 813) | 8.0 s (hedge→certificate 5.0 s) | 0, 4, 19 | 242 |
+| lazy, hedge 3 s, drain 1 s | 3 | 4.10, 4.07, 4.17 | 4.22, 4.13, 4.27 | 0.06–0.18 s (max 3.9–4.0 s in runs 822, 823) | 4.0 s (hedge→certificate 1.0 s) | 10, 6, 5 | 242 |
+| eager, drain 5 s (default) | 3 | 5.19, 5.18, 5.26 | 10.08, 10.08, 10.20 | 0.12–0.21 s (max 5.0–5.2 s) | 5.0 s | 34, 31, 24 | 242 |
+
+All twelve runs complete every task, with no stuck or failed task.
+
+Findings:
+
+1. The variation is gone. Create-to-dispatch medians are 0.05–0.22 s, down from
+   0.5–5.1 s. The normal path falls from 1.1–1.4 s to 0.10–0.24 s.
+2. Lazy with hedge and a 1 s drain reaches a median of 4.07–4.17 s with p95 within
+   0.15 s of it, so the 3–5 s target from the drain checkpoint is met. The remaining
+   term is the 3 s hedge plus the 1 s drain, as designed.
+3. Lazy with hedge and the default 5 s drain falls to 8.1 s, as expected from the
+   3 s hedge plus the 5 s drain. Run 813 has one burst task that waited 8.1 s for a
+   slot, which lifts its p95 to 16 s.
+4. Eager timeouts keep their 5 s median, set by the drain, but p95 falls from 15–20 s
+   to about 10 s.
+5. Slot warnings rise for eager, from 13–16 to 24–34 per run. Dispatch now starts
+   the whole burst at once instead of in a later batch, so more attempts compete for
+   slots together, and refused tasks retry as soon as an attempt ends. The longest
+   create-to-dispatch waits, about 5 s, match the drain, since slots free only when
+   an attempt finishes its drain. This is the trade-off of starting sooner.
+6. Billing is 242 CPT per task in every variant. The bench does not return late
+   receipts inside the window, so no receipt is lost here.
+
+Limitations: three runs per variant, one host, and the proxy's 35 s hold on the held
+replica, which keeps late receipts out of the bench. The retry path is not exercised,
+because no task fails in these runs, so the immediate-retry effect the review raised
+is not measured here.
+
+Decision: the wakeup is kept, since it removes the tick delay without changing
+billing or the default drain. Whether the default drain should be 1 s is still a
+billing decision and remains with the operator, as recorded above.
