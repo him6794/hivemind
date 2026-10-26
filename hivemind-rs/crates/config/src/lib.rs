@@ -102,6 +102,11 @@ pub struct ManagedConsensusConfig {
     /// before. Must be at least 1 and below `timeout_secs`.
     #[serde(default)]
     pub hedge_after_secs: Option<u64>,
+    /// Seconds to wait after quorum for in-flight replicas to return their receipts before the
+    /// certificate is recorded. Receipts that arrive later are not billed. Must not exceed
+    /// `timeout_secs`.
+    #[serde(default = "default_consensus_drain_secs")]
+    pub drain_secs: u64,
     #[serde(default = "default_consensus_quorum")]
     pub quorum: u16,
     #[serde(default = "default_consensus_max_replicas")]
@@ -126,6 +131,10 @@ fn default_consensus_quorum() -> u16 {
 
 fn default_consensus_max_replicas() -> u16 {
     7
+}
+
+fn default_consensus_drain_secs() -> u64 {
+    5
 }
 
 fn default_consensus_timeout_secs() -> u64 {
@@ -163,6 +172,7 @@ impl Default for ManagedConsensusConfig {
             replica_count: default_consensus_replica_count(),
             initial_replicas: None,
             hedge_after_secs: None,
+            drain_secs: default_consensus_drain_secs(),
             quorum: default_consensus_quorum(),
             max_replicas: default_consensus_max_replicas(),
             timeout_secs: default_consensus_timeout_secs(),
@@ -206,6 +216,12 @@ impl ManagedConsensusConfig {
             return Err(format!(
                 "managed consensus max replicas cannot exceed {}",
                 hivemind_managed_consensus::MAX_REPLICAS
+            ));
+        }
+        if self.drain_secs > self.timeout_secs {
+            return Err(format!(
+                "managed consensus drain must not exceed the timeout {}, got {}",
+                self.timeout_secs, self.drain_secs
             ));
         }
         if self.timeout_secs == 0 || self.max_result_bytes == 0 {
@@ -816,6 +832,9 @@ impl HivemindConfig {
         if let Ok(value) = std::env::var("MANAGED_CONSENSUS_HEDGE_AFTER_SECS") {
             self.managed_consensus.hedge_after_secs =
                 Some(parse_env("MANAGED_CONSENSUS_HEDGE_AFTER_SECS", &value)?);
+        }
+        if let Ok(value) = std::env::var("MANAGED_CONSENSUS_DRAIN_SECS") {
+            self.managed_consensus.drain_secs = parse_env("MANAGED_CONSENSUS_DRAIN_SECS", &value)?;
         }
         if let Ok(value) = std::env::var("MANAGED_CONSENSUS_QUORUM") {
             self.managed_consensus.quorum = parse_env("MANAGED_CONSENSUS_QUORUM", &value)?;
@@ -1501,6 +1520,38 @@ mod tests {
             None => std::env::remove_var("MANAGED_CONSENSUS_HEDGE_AFTER_SECS"),
         }
         assert_eq!(loaded.managed_consensus.hedge_after_secs, Some(3));
+    }
+
+    #[test]
+    fn managed_consensus_drain_defaults_to_five_seconds_and_must_not_exceed_timeout() {
+        assert_eq!(ManagedConsensusConfig::default().drain_secs, 5);
+        let legacy: ManagedConsensusConfig =
+            serde_json::from_str(r#"{"replica_count":3,"quorum":2}"#).unwrap();
+        assert_eq!(legacy.drain_secs, 5);
+        let with_drain = |drain_secs| ManagedConsensusConfig {
+            drain_secs,
+            ..ManagedConsensusConfig::default()
+        };
+        assert!(with_drain(0).validate().is_ok());
+        let timeout = ManagedConsensusConfig::default().timeout_secs;
+        assert!(with_drain(timeout).validate().is_ok());
+        let error = with_drain(timeout + 1).validate().unwrap_err();
+        assert!(error.contains("drain"));
+    }
+
+    #[test]
+    fn managed_consensus_drain_loads_from_environment() {
+        let _environment_lock = lock_environment();
+        let old = std::env::var_os("MANAGED_CONSENSUS_DRAIN_SECS");
+        std::env::set_var("MANAGED_CONSENSUS_DRAIN_SECS", "1");
+
+        let loaded = HivemindConfig::load_from_env();
+
+        match old {
+            Some(value) => std::env::set_var("MANAGED_CONSENSUS_DRAIN_SECS", value),
+            None => std::env::remove_var("MANAGED_CONSENSUS_DRAIN_SECS"),
+        }
+        assert_eq!(loaded.managed_consensus.drain_secs, 1);
     }
 
     #[test]

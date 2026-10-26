@@ -89,6 +89,7 @@ pub struct Dispatcher {
     managed_consensus_replica_count: u16,
     managed_consensus_initial_replicas: Option<u16>,
     managed_consensus_hedge_after_secs: Option<u64>,
+    managed_consensus_drain_secs: u64,
     managed_consensus_quorum: u16,
     managed_consensus_max_replicas: u16,
     managed_consensus_timeout_secs: u64,
@@ -167,6 +168,9 @@ impl Dispatcher {
             managed_consensus_replica_count: 3,
             managed_consensus_initial_replicas: None,
             managed_consensus_hedge_after_secs: None,
+            // Matches the config default, so a dispatcher built without config keeps the
+            // drain it has always had.
+            managed_consensus_drain_secs: 5,
             managed_consensus_quorum: 2,
             managed_consensus_max_replicas: 7,
             managed_consensus_timeout_secs: 120,
@@ -186,6 +190,7 @@ impl Dispatcher {
         self.managed_consensus_replica_count = config.replica_count;
         self.managed_consensus_initial_replicas = config.initial_replicas;
         self.managed_consensus_hedge_after_secs = config.hedge_after_secs;
+        self.managed_consensus_drain_secs = config.drain_secs;
         self.managed_consensus_quorum = config.quorum;
         self.managed_consensus_max_replicas = config.max_replicas;
         self.managed_consensus_timeout_secs = config.timeout_secs;
@@ -688,6 +693,7 @@ impl Dispatcher {
                             timeout_secs: self.managed_consensus_timeout_secs,
                             owner_rule: self.managed_consensus_owner_rule,
                             hedge_after_secs: self.managed_consensus_hedge_after_secs,
+                            drain_secs: self.managed_consensus_drain_secs,
                         };
                         let repo = self.repo.clone();
                         let task = task.clone();
@@ -1347,6 +1353,7 @@ impl Dispatcher {
                 timeout_secs: self.managed_consensus_timeout_secs,
                 owner_rule: self.managed_consensus_owner_rule,
                 hedge_after_secs: self.managed_consensus_hedge_after_secs,
+                drain_secs: self.managed_consensus_drain_secs,
             };
             let repo = self.repo.clone();
             let private_key = self.worker_execution_private_key_pem.clone();
@@ -2335,8 +2342,9 @@ async fn drain_managed_consensus_workers(
     task: &Task,
     attempt: &ManagedConsensusAttempt,
     workers: &mut tokio::task::JoinSet<(String, Result<Option<ManagedConsensusVote>>)>,
+    drain: Duration,
 ) -> Result<()> {
-    let drain_deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    let drain_deadline = tokio::time::Instant::now() + drain;
     while !workers.is_empty() {
         let remaining = drain_deadline.saturating_duration_since(tokio::time::Instant::now());
         if remaining.is_zero() {
@@ -2632,6 +2640,8 @@ struct ManagedConsensusEscalation {
     /// Seconds after dispatch before the spare is added as a hedge. `None` keeps the spare
     /// for the deadline and the quorum-unreachable cases.
     hedge_after_secs: Option<u64>,
+    /// Seconds to wait for in-flight replicas after quorum, before the certificate is recorded.
+    drain_secs: u64,
 }
 
 /// Replicas assigned at dispatch. Enforce-mode hcode starts at `initial_replicas` and
@@ -3015,8 +3025,14 @@ async fn execute_managed_consensus_attempt(
                                 );
                             }
                         }
-                        drain_managed_consensus_workers(&repo, &task, &attempt, &mut workers)
-                            .await?;
+                        drain_managed_consensus_workers(
+                            &repo,
+                            &task,
+                            &attempt,
+                            &mut workers,
+                            Duration::from_secs(escalation.drain_secs),
+                        )
+                        .await?;
                         let output = outputs
                             .get(&certificate.result_digest)
                             .cloned()
@@ -3094,7 +3110,14 @@ async fn execute_managed_consensus_attempt(
             );
         }
     }
-    drain_managed_consensus_workers(&repo, &task, &attempt, &mut workers).await?;
+    drain_managed_consensus_workers(
+        &repo,
+        &task,
+        &attempt,
+        &mut workers,
+        Duration::from_secs(escalation.drain_secs),
+    )
+    .await?;
     workers.abort_all();
     let reason = "managed consensus quorum was not reached";
     warn!(
@@ -9548,6 +9571,7 @@ mod tests {
             timeout_secs,
             owner_rule: scheduler::OwnerRule::Distinct,
             hedge_after_secs: None,
+            drain_secs: 5,
         };
         execute_managed_consensus_attempt(
             repo.clone(),
