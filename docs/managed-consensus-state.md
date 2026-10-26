@@ -97,7 +97,10 @@ Outstanding replicas are explicitly fenced and receive an attempt-bound stop
 request after a quorum, timeout, or cancellation. If a stop cannot be
 confirmed, Nodepool retains the Worker-slot reservation in a durable
 `stop_pending`/`cancel_pending` state and retries the stop rather than
-redispatching the Worker immediately.
+redispatching the Worker immediately. A reply recorded while the attempt is
+`stop_pending` is kept as usage evidence and settles at finalization, but it
+cannot complete the task. A reply that reaches an already finalized attempt is
+rejected, so it neither votes nor bills.
 
 For `hcode` in enforce mode, settlement uses validated,
 assignment-bound per-replica usage evidence—including valid divergent results—

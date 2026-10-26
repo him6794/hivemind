@@ -1065,10 +1065,14 @@ recorded so that a change can be made deliberately.
   early can overlap a replica the Worker is still running. Kubernetes also waits
   out a toleration window (300 s by default) before evicting pods from a NotReady
   node.
-- **Replies after a confirmed stop.** Keep the fence. Such a reply cannot vote, and
-  its valid usage is billed. BOINC (arXiv 1903.01699) checks a copy that arrives
-  after a canonical result against it to decide credit, without changing the
-  result. Our rule has the same shape.
+- **Replies after a stop.** Keep the fence. A reply recorded while the attempt is
+  `stop_pending` is kept as usage evidence and settles at finalization, but it
+  cannot complete the task. A reply that reaches a finalized attempt is rejected:
+  no vote and no billing (`managed_consensus_no_quorum_fences_late_observations`).
+  BOINC (arXiv 1903.01699) checks a copy that arrives after a canonical result
+  against it to decide credit, without changing the result. Our rule has the same
+  shape. An earlier draft of this entry said valid usage is billed without this
+  distinction; it was too broad.
 - **Billing for FAILED tasks without a certificate.** Keep for this round, as
   instructed. v2 target: the requester pays nothing, because no certified result
   was delivered. Forum reports say BOINC pays by default only for results it can
