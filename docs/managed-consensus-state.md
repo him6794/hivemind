@@ -112,6 +112,12 @@ redispatching the Worker immediately. A reply recorded while the attempt is
 cannot complete the task. A reply that reaches an already finalized attempt is
 rejected, so it neither votes nor bills.
 
+After a quorum, Nodepool stops the outstanding replicas, then waits up to
+`MANAGED_CONSENSUS_DRAIN_SECS` (default 5) for any that are still running to return
+their receipts, and only then records the certificate. A receipt that arrives after
+that window is not billed. A shorter window lowers completion latency and the time a
+Worker slot stays reserved, at the cost of late receipts.
+
 For `hcode` in enforce mode, settlement uses validated,
 assignment-bound per-replica usage evidence—including valid divergent results—
 within the task-wide `max_cpt` cap. Missing or invalid receipts are not billable;
