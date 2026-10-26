@@ -998,6 +998,22 @@ where
     }
 }
 
+/// Replica rows an attempt must hold at settlement, when its initial count was persisted:
+/// the initial set plus every replica added since. `None` marks an attempt created before
+/// the count was persisted, which keeps the relaxed bounds.
+async fn persisted_replica_rows(
+    conn: &mut sqlx::PgConnection,
+    attempt_id: Uuid,
+) -> Result<Option<i64>> {
+    let (initial, added): (Option<i32>, i32) = sqlx::query_as(
+        "SELECT initial_replicas, added_replicas FROM managed_consensus_attempts WHERE id = $1",
+    )
+    .bind(attempt_id)
+    .fetch_one(conn)
+    .await?;
+    Ok(initial.map(|initial| i64::from(initial) + i64::from(added)))
+}
+
 /// Users whose balances a settlement changes: the owner, who receives any refund, and
 /// each eligible provider that receives a payout.
 fn settlement_account_names<'a>(owner: &'a str, plan: &'a ManagedV1SettlementPlan) -> Vec<&'a str> {
@@ -1242,8 +1258,17 @@ async fn settle_managed_v1_hold_without_certificate(
     .bind(attempt_id)
     .fetch_all(&mut **tx)
     .await?;
-    if replicas.is_empty() || replicas.len() > usize::try_from(attempt.replica_count).unwrap_or(0) {
-        anyhow::bail!("managed v1 attempt does not contain the assigned replica set");
+    match persisted_replica_rows(tx, attempt.id).await? {
+        Some(expected) if i64::try_from(replicas.len()).ok() != Some(expected) => {
+            anyhow::bail!("managed v1 attempt does not contain the persisted replica set");
+        }
+        Some(_) => {}
+        None if replicas.is_empty()
+            || replicas.len() > usize::try_from(attempt.replica_count).unwrap_or(0) =>
+        {
+            anyhow::bail!("managed v1 attempt does not contain the assigned replica set");
+        }
+        None => {}
     }
     let evidence: Vec<_> = replicas
         .iter()
@@ -2006,12 +2031,14 @@ impl TaskRepository {
             .bind(attempt_id)
             .fetch_one(&mut *tx)
             .await?;
-            // Lazily added replicas leave fewer rows than the attempt's replica_count.
-            // Only excess rows, or rows still awaiting a stop, block finalization.
-            if replica_count == 0
-                || replica_count > expected_replica_count
-                || unconfirmed_count != 0
-            {
+            // An attempt with a persisted replica count must match it exactly. Older attempts
+            // keep the bound on replica_count, because lazily added replicas leave fewer rows.
+            // Rows still awaiting a stop also block finalization.
+            let rows_match = match persisted_replica_rows(&mut tx, attempt_id).await? {
+                Some(expected) => replica_count == expected,
+                None => replica_count != 0 && replica_count <= expected_replica_count,
+            };
+            if !rows_match || unconfirmed_count != 0 {
                 tx.commit().await?;
                 return Ok(None);
             }
@@ -2401,8 +2428,9 @@ impl TaskRepository {
         }
         let attempt = sqlx::query_as::<_, ManagedConsensusAttempt>(
             "INSERT INTO managed_consensus_attempts
-                (task_id, execution_id, round_id, request_digest, replica_count, quorum, mode, state, deadline)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, 'dispatching', $8)
+                (task_id, execution_id, round_id, request_digest, replica_count, quorum, mode, state, deadline,
+                 initial_replicas)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, 'dispatching', $8, $9)
              RETURNING id, task_id, execution_id, round_id, request_digest,
                        replica_count, quorum, mode, state, deadline",
         )
@@ -2414,6 +2442,9 @@ impl TaskRepository {
         .bind(i32::from(policy.required_quorum))
         .bind(mode)
         .bind(deadline)
+        .bind(i32::try_from(workers.len()).map_err(|_| {
+            anyhow::anyhow!("managed consensus worker count is out of range")
+        })?)
         .fetch_one(&mut *tx)
         .await?;
         if let Some((replica_allowance_cpt, reserved_usage_cpt, reserved_fee_cpt, held_total_cpt)) =
@@ -2668,7 +2699,8 @@ impl TaskRepository {
         .execute(&mut *tx)
         .await?;
         sqlx::query(
-            "UPDATE managed_consensus_attempts SET deadline = $2, updated_at = NOW()
+            "UPDATE managed_consensus_attempts
+             SET deadline = $2, added_replicas = added_replicas + 1, updated_at = NOW()
              WHERE id = $1",
         )
         .bind(attempt_id)
@@ -3722,11 +3754,17 @@ impl TaskRepository {
         .bind(attempt.id)
         .fetch_all(&mut *tx)
         .await?;
-        // A certificate needs at least a quorum of dispatched replicas. Replicas that
-        // were never dispatched have no row, so fewer rows are not a fault.
-        if replicas.len() > usize::try_from(attempt.replica_count).unwrap_or(0)
-            || replicas.len() < usize::try_from(attempt.quorum).unwrap_or(usize::MAX)
-            || replicas.len() > hivemind_managed_consensus::MAX_CERTIFICATE_OBSERVATIONS
+        // A certificate needs at least a quorum of dispatched replicas. An attempt with a
+        // persisted replica count must match it exactly. Older attempts keep the relaxed
+        // bounds, because replicas that were never dispatched have no row.
+        let rows_match = match persisted_replica_rows(&mut tx, attempt.id).await? {
+            Some(expected) => i64::try_from(replicas.len()).ok() == Some(expected),
+            None => {
+                replicas.len() <= usize::try_from(attempt.replica_count).unwrap_or(0)
+                    && replicas.len() >= usize::try_from(attempt.quorum).unwrap_or(usize::MAX)
+            }
+        };
+        if !rows_match || replicas.len() > hivemind_managed_consensus::MAX_CERTIFICATE_OBSERVATIONS
         {
             anyhow::bail!("managed v1 attempt does not contain the assigned replica set");
         }
@@ -15409,6 +15447,161 @@ mod tests {
         .await;
         assert!(result.is_err());
         assert_eq!(calls, 1);
+    }
+
+    /// Creates an owner, three providers with Workers, and a pending managed task.
+    async fn persisted_count_fixture(
+        repo: &TaskRepository,
+        prefix: &str,
+    ) -> (Task, Vec<WorkerNode>) {
+        let unique = uuid::Uuid::new_v4().to_string();
+        let owner = format!("{prefix}-owner-{unique}");
+        let task_id = format!("{prefix}-task-{unique}");
+        sqlx::query(
+            "INSERT INTO users (username, password_hash, balance) VALUES ($1, 'hash', 1000)",
+        )
+        .bind(&owner)
+        .execute(&repo.pool)
+        .await
+        .unwrap();
+        let mut workers = Vec::new();
+        for index in 0..3 {
+            let worker_id = format!("{prefix}-worker-{index}-{unique}");
+            let provider = format!("{prefix}-provider-{index}-{unique}");
+            sqlx::query(
+                "INSERT INTO users (username, password_hash, balance) VALUES ($1, 'hash', 0)",
+            )
+            .bind(&provider)
+            .execute(&repo.pool)
+            .await
+            .unwrap();
+            insert_worker(&repo.pool, &worker_id, &provider).await;
+            let mut worker = make_worker_node(&worker_id, &format!("10.0.3.{}", index + 10));
+            worker.username = provider;
+            workers.push(worker);
+        }
+        let mut task = make_task(&task_id, &owner);
+        task.runtime = Some("hcode".into());
+        task.task_source = Some("return input".into());
+        task.torrent_source = Some("{}".into());
+        task.deterministic = true;
+        task.max_cpt = 100;
+        repo.create(&task).await.unwrap();
+        (task, workers)
+    }
+
+    /// Settlement must find the replica rows the attempt persisted. A row that disappears
+    /// from an attempt that was created with three replicas is corruption, so it refuses.
+    #[tokio::test]
+    async fn settlement_refuses_an_attempt_that_lost_a_replica_row() {
+        let (p, fixture) = match pool("task_repository_replica_rows_lost").await {
+            Some(parts) => parts,
+            None => return,
+        };
+        let repo = TaskRepository::new(p);
+        let (task, workers) = persisted_count_fixture(&repo, "rows-lost").await;
+        let (attempt, _assignments) = repo
+            .create_managed_consensus_attempt(&task, &workers, 3, 2, 120, "enforce")
+            .await
+            .unwrap()
+            .unwrap();
+        sqlx::query(
+            "DELETE FROM managed_consensus_replicas
+             WHERE attempt_id = $1 AND replica_id = 'replica-3'",
+        )
+        .bind(attempt.id)
+        .execute(&repo.pool)
+        .await
+        .unwrap();
+        let result = repo
+            .mark_managed_consensus_no_quorum(
+                &task.task_id,
+                attempt.id,
+                "test no quorum",
+                task.max_retries,
+            )
+            .await;
+        assert!(
+            result.is_err(),
+            "an attempt that lost a replica row must not settle"
+        );
+        fixture.cleanup().await.ok();
+    }
+
+    /// A lazily dispatched attempt persists two replicas, and settlement accepts exactly that.
+    #[tokio::test]
+    async fn lazy_settlement_accepts_the_persisted_initial_replica_set() {
+        let (p, fixture) = match pool("task_repository_lazy_initial_settles").await {
+            Some(parts) => parts,
+            None => return,
+        };
+        let repo = TaskRepository::new(p);
+        let (task, workers) = persisted_count_fixture(&repo, "lazy-initial").await;
+        let (attempt, _assignments) = repo
+            .create_managed_consensus_attempt(&task, &workers[..2], 3, 2, 120, "enforce")
+            .await
+            .unwrap()
+            .unwrap();
+        let updated = repo
+            .mark_managed_consensus_no_quorum(
+                &task.task_id,
+                attempt.id,
+                "test no quorum",
+                task.max_retries,
+            )
+            .await
+            .unwrap()
+            .expect("a lazy attempt with its persisted replica set should settle");
+        assert_eq!(updated.status, TaskStatus::Failed);
+        fixture.cleanup().await.ok();
+    }
+
+    /// An escalation adds one replica row and records it, so the strict count includes it.
+    #[tokio::test]
+    async fn settlement_counts_a_replica_added_by_escalation() {
+        let (p, fixture) = match pool("task_repository_lazy_escalated_settles").await {
+            Some(parts) => parts,
+            None => return,
+        };
+        let repo = TaskRepository::new(p);
+        let (task, workers) = persisted_count_fixture(&repo, "lazy-escalated").await;
+        let (attempt, _assignments) = repo
+            .create_managed_consensus_attempt(&task, &workers[..2], 3, 2, 120, "enforce")
+            .await
+            .unwrap()
+            .unwrap();
+        let spare = repo
+            .add_managed_consensus_replica(
+                &task.task_id,
+                attempt.id,
+                &workers[2],
+                120,
+                crate::scheduler::OwnerRule::Distinct,
+            )
+            .await
+            .unwrap()
+            .expect("the spare Worker should join the attempt");
+        assert_eq!(spare.0.replica_id, "replica-3");
+        let added: i32 = sqlx::query_scalar(
+            "SELECT added_replicas FROM managed_consensus_attempts WHERE id = $1",
+        )
+        .bind(attempt.id)
+        .fetch_one(&repo.pool)
+        .await
+        .unwrap();
+        assert_eq!(added, 1);
+        let updated = repo
+            .mark_managed_consensus_no_quorum(
+                &task.task_id,
+                attempt.id,
+                "test no quorum",
+                task.max_retries,
+            )
+            .await
+            .unwrap()
+            .expect("an escalated lazy attempt with its three rows should settle");
+        assert_eq!(updated.status, TaskStatus::Failed);
+        fixture.cleanup().await.ok();
     }
 
     /// An expiry mark applies only to the deadline its claim read. An escalation that

@@ -507,6 +507,23 @@ async fn run_migrations_inner(pool: &PgPool) -> Result<()> {
     .execute(&mut *tx)
     .await?;
 
+    // NULL marks an attempt created before the initial count was persisted. Settlement
+    // keeps its relaxed replica-set check for those rows.
+    sqlx::query(
+        "ALTER TABLE managed_consensus_attempts
+         ADD COLUMN IF NOT EXISTS initial_replicas INTEGER CHECK (initial_replicas >= 1);",
+    )
+    .execute(&mut *tx)
+    .await?;
+
+    sqlx::query(
+        "ALTER TABLE managed_consensus_attempts
+         ADD COLUMN IF NOT EXISTS added_replicas INTEGER NOT NULL DEFAULT 0
+             CHECK (added_replicas >= 0);",
+    )
+    .execute(&mut *tx)
+    .await?;
+
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS managed_consensus_worker_reservations (
             id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
