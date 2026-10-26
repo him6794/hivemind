@@ -1124,3 +1124,54 @@ Findings:
   the bench. The evidence for the fix is the RED test
   `expiry_leaves_attempt_whose_persisted_deadline_was_extended`, which fails on the
   previous expiry and passes now.
+
+### Opt-in hedge and strict replica-row checkpoint (2026-10-26)
+
+Commits: `568213a8` persists `initial_replicas` and `added_replicas` and checks the
+replica rows strictly at settlement. `9a1f3d32` adds `MANAGED_CONSENSUS_HEDGE_AFTER_SECS`,
+which is off by default. `9d26afcc` documents both. The benchmark binary is the release
+build of `9a1f3d32` (SHA-256 `53A55F22…AE67`), bench build `hedge`. Each run starts a
+fresh stack and has 20 tasks.
+
+| variant | runs | median s per run | p95 s per run | replicas/task | billed CPT/task | hedge lines | slot warnings |
+|---|---|---|---|---|---|---|---|
+| eager default, timeout | 3 | 10.11, 5.98, 10.14 | 19.88, 15.62, 19.89 | 3.00 | 242 | 0 | 16 (run 601 only) |
+| lazy, hedge 3 s, timeout | 3 | 12.42, 11.39, 12.77 | 12.50, 13.23, 22.57 | 2.6–2.7 | 242 | 12, 12, 14 | 2, 4, 6 |
+| lazy, hedge 3 s, normal | 3 | 1.17, 1.44, 1.09 | 1.26, 1.48, 1.20 | 2.00 | 242 | 0 | 0 |
+
+All nine runs complete every task, with no stuck or failed task.
+
+Findings:
+
+1. The hedge works as designed. The spare is added 3.0 s after dispatch. On the
+   answering Worker it replies in about 1 ms. Hedges appear only on timeout tasks.
+   The normal path has none, and billing is unchanged at 242 CPT.
+2. The 3–5 s target was not reached. Lazy timeout median fell from about 31 s to
+   11–13 s. The decomposition of one hedged task (`…w3-t20-1`) is:
+   - create to dispatch: 4.4 s. Burst tasks wait for the dispatcher, and slot
+     refusals add retries. The timeout runs have a median of 3.5–5.1 s, against
+     1.1–1.4 s on the normal path.
+   - hedge: 3.0 s, as configured.
+   - quorum to certificate: 5.0 s. After quorum, `drain_managed_consensus_workers`
+     waits a fixed 5 s for in-flight replicas before it records the certificate.
+     The held replica's reply never arrives in that window. The same 5 s drain
+     explains the eager timeout median of about 6 s, against about 1 s when all
+     replicas reply.
+3. The default is unchanged. Eager timeouts have a median of 6–10 s across runs,
+   within the range of earlier runs. The replica count and billing match.
+4. The normal-path median is 1.1–1.4 s. The earlier lazy normal runs were 0.5–1.0 s.
+   The strict replica-row check adds one indexed read at settlement. Run-to-run
+   variance is the more likely explanation, but it was not isolated.
+5. Slot warnings in timeout runs fell to 2–6 per run, from 10 in the T1.4 relon runs
+   and 48 in the T1.4 reloff runs. The normal path has none.
+
+Decisions needed before the 3–5 s target can be met:
+
+- The 5 s post-quorum drain. It exists to record usage receipts from stopped replicas
+  that are still finishing. Options: keep it; make the grace configurable with the
+  default unchanged, so an operator can trade late receipts for latency; or shorten
+  the default, which changes settlement inputs and needs the identity gate.
+- Create-to-dispatch delay under bursts. A task refused for a Worker slot stays
+  pending until a later dispatch pass, so burst tasks wait for passes. The refusal
+  is logged as `no available execution slot`. This is a throughput question,
+  separate from the hedge.
