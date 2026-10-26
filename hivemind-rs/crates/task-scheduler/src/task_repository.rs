@@ -5101,6 +5101,11 @@ impl TaskRepository {
             }
         }
         tx.commit().await?;
+        if created.status == TaskStatus::Pending {
+            // A pending task waits for a dispatch pass. Wake the dispatch loop now rather
+            // than letting the task wait for its next tick.
+            crate::dispatcher::DISPATCH_WAKEUP.notify_one();
+        }
         Ok(created)
     }
 

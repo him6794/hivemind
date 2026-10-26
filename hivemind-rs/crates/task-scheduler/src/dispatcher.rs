@@ -79,6 +79,12 @@ fn validated_execution_observation(response: &ExecuteTaskResponse) -> Option<Str
     serde_json::to_string(&parsed).ok()
 }
 
+/// Wakes the dispatch loop before its next tick. A newly pending task and a finished attempt
+/// (which releases its Worker slots) are both reasons to dispatch now, so the task does not
+/// wait for the next tick. Notifications coalesce, and the tick remains as a fallback.
+pub(crate) static DISPATCH_WAKEUP: std::sync::LazyLock<tokio::sync::Notify> =
+    std::sync::LazyLock::new(tokio::sync::Notify::new);
+
 pub struct Dispatcher {
     repo: Arc<TaskRepository>,
     db: DatabaseManager,
@@ -717,6 +723,7 @@ impl Dispatcher {
                             {
                                 warn!("Managed consensus execution failed: {}", error);
                             }
+                            DISPATCH_WAKEUP.notify_one();
                         });
                     }
                     Ok(None) => {}
@@ -1376,6 +1383,7 @@ impl Dispatcher {
                 {
                     warn!("Managed consensus recovery failed: {}", error);
                 }
+                DISPATCH_WAKEUP.notify_one();
             });
             resumed += 1;
         }
@@ -1399,10 +1407,15 @@ impl Dispatcher {
             let mut tick = tokio::time::interval(interval);
             loop {
                 tokio::select! {
-                    _ = tick.tick() => {
-                        if let Err(e) = self.dispatch_pending_from_registered_workers_and_execute().await { error!("Dispatch loop error: {}", e); }
-                    }
-                    _ = rx.changed() => { if *rx.borrow() { info!("Dispatch loop shutting down"); break; } }
+                    _ = tick.tick() => {}
+                    _ = DISPATCH_WAKEUP.notified() => {}
+                    _ = rx.changed() => { if *rx.borrow() { info!("Dispatch loop shutting down"); break; } continue; }
+                }
+                if let Err(e) = self
+                    .dispatch_pending_from_registered_workers_and_execute()
+                    .await
+                {
+                    error!("Dispatch loop error: {}", e);
                 }
             }
         });
