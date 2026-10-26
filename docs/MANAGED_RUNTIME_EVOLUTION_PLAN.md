@@ -1175,3 +1175,47 @@ Decisions needed before the 3–5 s target can be met:
   pending until a later dispatch pass, so burst tasks wait for passes. The refusal
   is logged as `no available execution slot`. This is a throughput question,
   separate from the hedge.
+
+### Drain window control checkpoint (2026-10-26)
+
+Commits: `5185d040` makes the post-quorum drain configurable, with
+`MANAGED_CONSENSUS_DRAIN_SECS` (`drain_secs`). The default stays 5 s, and the value
+must not exceed the timeout. `2b30a1c5` documents it. The benchmark binary is the
+release build of `5185d040` (SHA-256 `BF17E1EC…67E8`), bench build `drain`, timeout
+scenario, 20 tasks per run, a fresh stack per run.
+
+| variant | runs | median s per run | p95 s per run | dispatch→certificate | create→dispatch median | slot warnings | replicas/task | billed CPT/task |
+|---|---|---|---|---|---|---|---|---|
+| eager, drain 5 (default) | 3 | 9.80, 5.32, 5.52 | 19.58, 15.09, 15.29 | 5.02–5.03 s | 4.78, 0.26, 0.49 s | 14, 13, 16 | 3.00 | 242 |
+| eager, drain 1 | 3 | 1.95, 1.55, 2.14 | 6.69, 6.23, 6.87 | 1.03 s | 0.92, 0.52, 1.10 s | 6, 6, 7 | 3.00 | 242 |
+| lazy, hedge 3 s, drain 5 (default) | 3 | 8.56, 8.59, 8.62 | 18.40, 18.41, 18.40 | 8.02–8.03 s (hedge→certificate 5.02 s) | 0.53, 0.63, 0.62 s | 8, 8, 4 | 2.70–2.80 | 242 |
+| lazy, hedge 3 s, drain 1 | 3 | 5.25, 4.61, 9.01 | 10.04, 4.84, 9.26 | 4.02–4.03 s (hedge→certificate 1.02–1.03 s) | 1.24, 0.70, 5.13 s | 3, 0, 0 | 2.55–2.70 | 242 |
+
+All twelve runs complete every task, with no stuck or failed task.
+
+Findings:
+
+1. The knob does what it says. The certificate follows the last needed reply by the
+   configured drain: 5.02 s at the default and 1.03 s at 1 s, for eager and lazy alike.
+2. Eager timeouts drop from a median of 5.3–9.8 s to 1.6–2.1 s, and p95 drops from
+   15–20 s to 6–7 s. Slot warnings roughly halve, from 13–16 to 6–7 per run. The
+   drain holds each completed attempt's reservations for its whole length, so this
+   is the same effect that produced the slot waits.
+3. Lazy with hedge drops from a median of 8.6 s to 4.6–5.3 s in two of three runs.
+   The third run, at 9.0 s, has a create-to-dispatch median of 5.1 s, so dispatch
+   wait dominates there. Create-to-dispatch varies widely between runs: 0.5–5.1 s
+   medians here, and 3.5–5.1 s in the earlier hedge runs, which also had a median of
+   11–13 s with the same 5 s drain. The variation is not explained yet.
+4. Billing is 242 CPT per task in every variant. The held replica never returns inside
+   the window in this bench, so no receipt is lost. The bench cannot measure how often
+   real late receipts arrive after 1 s, so the billing effect of a shorter window is
+   unknown outside this bench.
+
+Limitations: three runs per variant, one host, and a proxy that holds the held
+replica's reply for 35 s, so late receipts are never tested here.
+
+Decision: the default stays 5 s. An operator who prefers latency sets
+`MANAGED_CONSENSUS_DRAIN_SECS=1` and accepts that a receipt arriving after one
+second is not billed. Before changing the default, measure late-receipt arrival times
+in a real deployment. The create-to-dispatch variation is the next open item; it needs
+its own investigation before any change.
