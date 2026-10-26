@@ -1100,3 +1100,27 @@ recorded so that a change can be made deliberately.
 - **Expiry race after an escalation.** Fixed in `d3693444`. Regression evidence is
   recorded below once the run completes.
 - **Codex review.** Not run. Codex is not logged in, and logging in needs the user.
+
+### Expiry claim regression (2026-10-26)
+
+Release build of `d3693444` (SHA-256 `ACFD76E9…C704D9`), bench build `fix`.
+Timeout scenario only, 20 tasks per run, a fresh stack per run. The eager variant
+leaves `MANAGED_CONSENSUS_INITIAL_REPLICAS` unset. The lazy variant sets it to 2.
+
+| variant | runs | completed | median s per run | p95 s per run | replicas/task | billed CPT/task | `superseded` lines | escalation lines | stuck tasks |
+|---|---|---|---|---|---|---|---|---|---|
+| eager | 3 × 20 | 60/60 | 6.46, 6.42, 6.61 | 16.24, 16.29, 16.32 | 3.00 | 242 | 0 | 0 | 0 |
+| lazy | 3 × 20 | 60/60 | 31.08, 31.43, 31.72 | 31.19, 31.54, 31.80 | 2.60 | 242 | 0 | 12 per run | 0 |
+
+Findings:
+
+- No regression. The eager runs fall inside the range of the earlier timeout
+  runs (median 5.2–9.6 s per run). The lazy median stays near the 30 s deadline,
+  which is the escalation-latency item (plan B).
+- No task stays in a non-terminal state. No run has a failed task or an
+  execution-failed log line.
+- The claim refusal never fired (`superseded` is 0). The race reproduced once in
+  60 lazy timeout tasks during the T1.4 rerun, so six runs cannot show the fix in
+  the bench. The evidence for the fix is the RED test
+  `expiry_leaves_attempt_whose_persisted_deadline_was_extended`, which fails on the
+  previous expiry and passes now.
