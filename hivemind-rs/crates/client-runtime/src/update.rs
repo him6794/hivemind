@@ -2518,12 +2518,31 @@ fn spawn_activated_service(
     service_arguments: &[String],
     helper_executable: &Path,
 ) -> Result<std::process::Child, UpdateError> {
-    std::process::Command::new(service_path)
+    spawn_activated_service_with(
+        service_path,
+        active_root,
+        service_arguments,
+        helper_executable,
+        |command| command.spawn(),
+    )
+}
+
+/// Builds the replacement command and hands it to `spawn`. Production passes the real spawn. Tests
+/// pass a failing spawn, so they can check the rollback without launching a newly written executable.
+#[cfg(windows)]
+fn spawn_activated_service_with(
+    service_path: &Path,
+    active_root: &Path,
+    service_arguments: &[String],
+    helper_executable: &Path,
+    spawn: impl FnOnce(&mut std::process::Command) -> std::io::Result<std::process::Child>,
+) -> Result<std::process::Child, UpdateError> {
+    let mut command = std::process::Command::new(service_path);
+    command
         .args(service_arguments)
         .current_dir(active_root)
-        .env("HIVEMIND_UPDATE_HELPER_TEMP", helper_executable)
-        .spawn()
-        .map_err(|error| UpdateError::ActivationFailed(error.to_string()))
+        .env("HIVEMIND_UPDATE_HELPER_TEMP", helper_executable);
+    spawn(&mut command).map_err(|error| UpdateError::ActivationFailed(error.to_string()))
 }
 
 #[cfg(windows)]
@@ -4108,8 +4127,21 @@ mod tests {
             manifest_sha256: "b".repeat(64),
         };
         let backup_dir = apply_release_files(&release_root, &active_root, &verified).unwrap();
-        let result =
-            spawn_activated_service(&service_path, &active_root, &[], &root.join("helper.exe"));
+        // Simulate the launch failure instead of starting the file just written above. Launching a new
+        // unsigned executable can stall on hosts that scan new files, and the rollback checked here does
+        // not depend on how the launch failed.
+        let result = spawn_activated_service_with(
+            &service_path,
+            &active_root,
+            &[],
+            &root.join("helper.exe"),
+            |_| {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "%1 is not a valid Win32 application",
+                ))
+            },
+        );
         assert!(
             matches!(result, Err(UpdateError::ActivationFailed(_))),
             "{result:?}"
