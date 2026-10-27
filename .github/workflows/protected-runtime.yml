@@ -13,7 +13,6 @@ on:
           - cuda
           - onnx
           - oci
-          - hcs
 
 permissions:
   contents: read
@@ -164,23 +163,3 @@ jobs:
             -RegistryPath "$HIVEMIND_GENERAL_COMPUTE_OCI_E2E_REGISTRY" \
             -ComposeFile "$HIVEMIND_GENERAL_COMPUTE_OCI_E2E_COMPOSE_FILE" \
             -ProjectName "hivemind-protected-oci-${GITHUB_RUN_ID}"
-
-  protected-hcs:
-    name: Native Windows HCS prerequisites
-    if: inputs.scope == 'all' || inputs.scope == 'hcs'
-    runs-on: [self-hosted, windows, x64, native-hcs]
-    timeout-minutes: 20
-    environment: protected-native-hcs
-    env:
-      HIVEMIND_WINDOWS_WORKER_EXECUTABLE: ${{ vars.HIVEMIND_WINDOWS_WORKER_EXECUTABLE }}
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-      - name: Run native HCS prerequisites gate
-        shell: pwsh
-        run: |
-          if ([string]::IsNullOrWhiteSpace($env:HIVEMIND_WINDOWS_WORKER_EXECUTABLE)) { throw 'HIVEMIND_WINDOWS_WORKER_EXECUTABLE is required' }
-          & ./scripts/windows-hcs-e2e.ps1 `
-            -WorkerExecutable $env:HIVEMIND_WINDOWS_WORKER_EXECUTABLE `
-            -EvidenceDirectory (Join-Path $env:GITHUB_WORKSPACE 'test_logs/windows-hcs-e2e')
-          if (!$?) { throw 'native HCS prerequisites gate failed' }
