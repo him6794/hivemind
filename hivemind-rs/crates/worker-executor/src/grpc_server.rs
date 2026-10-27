@@ -1254,8 +1254,6 @@ impl WorkerNodeService for GrpcWorkerNodeService {
             _ => None,
         };
         let is_managed_gpu = managed_gpu_request.is_some();
-        let is_general_compute =
-            req.runtime.trim() == general_compute_runtime::GENERAL_COMPUTE_RUNTIME_VERSION;
         let mut transfer_generation_for_execution = None;
         if let crate::runtime_admission::RuntimeRoute::GeneralComputeV1Alpha1(request) = &admitted {
             let token_identity = WorkerExecutionVerifier::from_pem(
@@ -1506,26 +1504,6 @@ impl WorkerNodeService for GrpcWorkerNodeService {
                     validate_managed_consensus_response_identity(&response, &consensus_request)?;
                     self.state
                         .cache_consensus_result(&consensus_request, &response)?;
-                }
-                if is_general_compute && response.success {
-                    if let Some(transfer_generation) = transfer_generation_for_execution {
-                        let journal_identity = crate::hcs_journal::HcsExecutionIdentity {
-                            task_id: req.task_id.clone(),
-                            execution_id: request_identity.execution_id.clone(),
-                            attempt_id: request_identity.attempt_id.clone(),
-                            idempotency_key: request_identity.idempotency_key.clone(),
-                            request_digest: request_identity.request_digest.clone(),
-                            transfer_generation: Some(transfer_generation),
-                        };
-                        self.state
-                            .executor
-                            .mark_hcs_delivery(&journal_identity)
-                            .map_err(|error| {
-                                Status::internal(format!(
-                                    "HCS journal delivery transition failed: {error}"
-                                ))
-                            })?;
-                    }
                 }
                 Ok(Response::new(response))
             }

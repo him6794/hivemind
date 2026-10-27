@@ -717,14 +717,8 @@ async fn run_service_inner(
             .or_else(|_| std::env::var("HOSTNAME"))
             .unwrap_or_else(|_| format!("worker-{}", uuid::Uuid::new_v4()));
         let executor_config = config.clone();
-        #[cfg(windows)]
-        let reconcile_worker_id = worker_id.clone();
         let executor = tokio::task::spawn_blocking(move || {
             let executor = Arc::new(WorkerExecutor::try_new(executor_config)?);
-            #[cfg(windows)]
-            executor
-                .reconcile_hcs_startup(&reconcile_worker_id, std::time::Duration::from_secs(5))
-                .context("native HCS startup reconciliation failed")?;
             let resources = executor.get_system_resources();
             info!(
                 "Worker executor: {} cores, {} GB RAM",

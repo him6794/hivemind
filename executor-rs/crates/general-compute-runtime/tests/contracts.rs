@@ -10,16 +10,6 @@ use general_compute_runtime::{
 };
 
 #[test]
-fn production_windows_execution_mode_round_trips_as_a_distinct_contract() {
-    let encoded = serde_json::to_string(&BackendExecutionMode::ProductionSandboxedWindows)
-        .expect("execution mode should serialize");
-    assert_eq!(encoded, "\"production_sandboxed_windows\"");
-    let decoded: BackendExecutionMode =
-        serde_json::from_str(&encoded).expect("execution mode should deserialize");
-    assert_eq!(decoded, BackendExecutionMode::ProductionSandboxedWindows);
-}
-
-#[test]
 fn production_dsl_execution_mode_round_trips_as_a_distinct_contract() {
     let encoded = serde_json::to_string(&BackendExecutionMode::ProductionSandboxedDsl)
         .expect("execution mode should serialize");

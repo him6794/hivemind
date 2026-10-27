@@ -60,7 +60,7 @@ pub struct GeneralComputeConfig {
     #[serde(default)]
     pub trusted_worker_capabilities: BTreeMap<String, TrustedGeneralComputeWorkerRegistration>,
     /// Nodepool operator-approved closed-DSL registrations keyed by immutable worker id.
-    /// This is deliberately separate from OCI/HCS capability snapshots.
+    /// This is deliberately separate from OCI capability snapshots.
     #[serde(default)]
     pub trusted_managed_dsl_worker_capabilities:
         BTreeMap<String, TrustedManagedDslWorkerRegistration>,

@@ -35,11 +35,15 @@ pub enum RuntimeAdmissionError {
     UnsupportedRuntime(String),
 }
 
+/// Operator setting from the removed native Windows general-compute backend.
+const REMOVED_WINDOWS_BACKENDS_ENV: &str = "HIVEMIND_GENERAL_COMPUTE_WINDOWS_BACKENDS";
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RuntimeAdmissionConfigError {
     InvalidBackends(String),
     InvalidWorkerCapabilities(String),
     InvalidTrustedRegistration(String),
+    RemovedWindowsBackends,
 }
 
 impl fmt::Display for RuntimeAdmissionConfigError {
@@ -58,6 +62,10 @@ impl fmt::Display for RuntimeAdmissionConfigError {
             Self::InvalidTrustedRegistration(message) => write!(
                 formatter,
                 "general-compute trusted registration is invalid: {message}"
+            ),
+            Self::RemovedWindowsBackends => write!(
+                formatter,
+                "HIVEMIND_GENERAL_COMPUTE_WINDOWS_BACKENDS is no longer supported: the native Windows general-compute backend was removed; unset it to start this worker"
             ),
         }
     }
@@ -205,7 +213,6 @@ impl WorkerRuntimeAdmission {
             "HIVEMIND_GENERAL_COMPUTE_TRUSTED_REGISTRATION",
             "HIVEMIND_GENERAL_COMPUTE_BACKENDS",
             "HIVEMIND_GENERAL_COMPUTE_WORKER_CAPABILITIES",
-            "HIVEMIND_GENERAL_COMPUTE_WINDOWS_BACKENDS",
         ]
         .iter()
         .any(|name| {
@@ -215,20 +222,15 @@ impl WorkerRuntimeAdmission {
         })
     }
 
-    /// Return whether an operator explicitly selected the HCS state or
-    /// registry. Package provisioning must not replace that private layout.
-    #[must_use]
-    pub fn has_explicit_windows_hcs_environment() -> bool {
-        std::env::var_os("HIVEMIND_WORKER_STATE_ROOT").is_some()
-            || std::env::var("HIVEMIND_GENERAL_COMPUTE_WINDOWS_BACKENDS")
-                .ok()
-                .is_some_and(|value| !value.trim().is_empty())
-    }
-
     /// Load an operator-owned capability registry.  An absent registry keeps
     /// the alpha runtime disabled; malformed configuration fails closed at
     /// worker startup instead of silently widening admission.
     pub fn from_environment() -> Result<Self, RuntimeAdmissionConfigError> {
+        // The removed backend setting must stop startup instead of silently changing
+        // the capabilities this worker advertises.
+        if std::env::var(REMOVED_WINDOWS_BACKENDS_ENV).is_ok_and(|value| !value.trim().is_empty()) {
+            return Err(RuntimeAdmissionConfigError::RemovedWindowsBackends);
+        }
         if let Ok(trusted) = std::env::var("HIVEMIND_GENERAL_COMPUTE_TRUSTED_REGISTRATION") {
             if !trusted.trim().is_empty() {
                 let registration = serde_json::from_str::<TrustedWorkerCapabilityRegistration>(
@@ -362,5 +364,30 @@ fn rejected(error: ValidationError) -> RuntimeAdmissionError {
     RuntimeAdmissionError::ManifestRejected {
         code: error.code,
         message: error.message,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn removed_windows_backend_setting_fails_closed() {
+        // Restore the caller environment before asserting. The worker test suite runs
+        // with one test thread, so no other test reads this variable concurrently.
+        let previous = std::env::var_os(REMOVED_WINDOWS_BACKENDS_ENV);
+        std::env::set_var(
+            REMOVED_WINDOWS_BACKENDS_ENV,
+            "operator-windows-backends.json",
+        );
+        let result = WorkerRuntimeAdmission::from_environment();
+        match previous {
+            Some(value) => std::env::set_var(REMOVED_WINDOWS_BACKENDS_ENV, value),
+            None => std::env::remove_var(REMOVED_WINDOWS_BACKENDS_ENV),
+        }
+        assert!(matches!(
+            result,
+            Err(RuntimeAdmissionConfigError::RemovedWindowsBackends)
+        ));
     }
 }

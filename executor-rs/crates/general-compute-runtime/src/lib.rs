@@ -28,7 +28,6 @@ pub mod statistics;
 pub mod supervisor;
 pub mod tensor;
 pub mod transport;
-pub mod windows_hcs;
 
 pub const GENERAL_COMPUTE_RUNTIME_VERSION: &str = "general-compute-v1alpha1";
 /// Frozen runtime identity used by the operator-registered production DSL

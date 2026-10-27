@@ -75,7 +75,7 @@ impl AttemptStopFenceStore {
             None => {
                 #[cfg(windows)]
                 {
-                    super::hcs_journal::HcsExecutionJournal::default_windows_worker_state_root()
+                    default_windows_worker_state_root()
                         .context("resolve the default Worker state root")?
                 }
                 #[cfg(not(windows))]
@@ -487,6 +487,24 @@ fn is_temporary_name(name: &str) -> bool {
             !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit())
         })
         && fields.next().is_none()
+}
+
+#[cfg(all(windows, not(test)))]
+fn default_windows_worker_state_root() -> Result<PathBuf> {
+    let local_app_data = std::env::var_os("LOCALAPPDATA").ok_or_else(|| {
+        anyhow::anyhow!("LOCALAPPDATA is required for the default Worker state root")
+    })?;
+    let local_app_data = PathBuf::from(local_app_data);
+    if !local_app_data.is_absolute()
+        || local_app_data.as_os_str().is_empty()
+        || local_app_data
+            .to_string_lossy()
+            .chars()
+            .any(char::is_control)
+    {
+        bail!("LOCALAPPDATA must be an absolute path without control characters");
+    }
+    Ok(local_app_data.join("Hivemind").join("Worker"))
 }
 
 #[cfg(windows)]

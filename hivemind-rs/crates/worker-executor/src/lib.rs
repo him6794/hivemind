@@ -4,13 +4,11 @@ pub mod chunk_transport;
 pub mod control_api;
 pub mod executor;
 pub mod grpc_server;
-pub mod hcs_journal;
 pub mod maintenance;
 pub mod nodepool_client;
 pub mod resource_monitor;
 pub mod runtime_admission;
 pub mod sandbox;
-pub mod windows_hcs_provisioning;
 
 use anyhow::Result;
 use attempt_stop_fence::AttemptStopFenceStore;
@@ -102,7 +100,6 @@ pub struct WorkerExecutor {
     task_runner: Arc<TaskRunner>,
     dynamic_capability_report: WorkerCapabilityReport,
     runtime_admission: runtime_admission::WorkerRuntimeAdmission,
-    hcs_journal: Option<hcs_journal::HcsExecutionJournal>,
 }
 
 impl WorkerExecutor {
@@ -117,58 +114,7 @@ impl WorkerExecutor {
         #[cfg(not(test))]
         let stop_fences = AttemptStopFenceStore::from_environment_or_default()?;
         let configured_admission = runtime_admission::WorkerRuntimeAdmission::from_environment()?;
-        let explicit_operator_admission =
-            runtime_admission::WorkerRuntimeAdmission::has_explicit_operator_admission_environment(
-            );
-        let explicit_hcs_environment =
-            runtime_admission::WorkerRuntimeAdmission::has_explicit_windows_hcs_environment();
-        let (package_runtime, hcs_journal) = if explicit_operator_admission
-            || explicit_hcs_environment
-        {
-            let hcs_journal = if explicit_hcs_environment {
-                hcs_journal::HcsExecutionJournal::from_environment_or_default()?
-            } else {
-                None
-            };
-            (None, hcs_journal)
-        } else {
-            match windows_hcs_provisioning::load_package_relative() {
-                Ok(Some(runtime)) => {
-                    let journal_root = runtime.state_root.join("hcs-journal");
-                    match hcs_journal::HcsExecutionJournal::open(journal_root) {
-                        Ok(journal) => (Some(runtime), Some(journal)),
-                        Err(error) => {
-                            tracing::warn!(
-                                error = %error,
-                                "signed package HCS runtime is unavailable because its journal cannot be opened"
-                            );
-                            (None, None)
-                        }
-                    }
-                }
-                Ok(None) => (None, None),
-                Err(error) => {
-                    tracing::warn!(error = %error, "signed package HCS runtime is unavailable");
-                    (None, None)
-                }
-            }
-        };
-        let (admission, windows_backends) = match package_runtime {
-            Some(runtime) => {
-                let trusted_registration = runtime.trusted_registration;
-                let windows_backends = Arc::new(runtime.registry);
-                (
-                    runtime_admission::WorkerRuntimeAdmission::new_with_trusted_registration(
-                        trusted_registration,
-                    ),
-                    Some(windows_backends),
-                )
-            }
-            None => (
-                configured_admission,
-                executor::windows_production_backends_from_environment()?,
-            ),
-        };
+        let admission = configured_admission;
         let dynamic_capability_report = admission.public_capability_report();
         let trusted_registration = admission.trusted_registration();
         // ReferenceDirect is a test-only backend. Production workers must never
@@ -207,11 +153,6 @@ impl WorkerExecutor {
                 maintenance_roots.push(backend.artifact_root.clone());
             }
         }
-        if let Some(backends) = windows_backends.as_ref() {
-            for backend in backends.registrations() {
-                maintenance_roots.push(backend.artifact_root.clone());
-            }
-        }
         for root in &maintenance_roots {
             if let Err(error) = maintenance::scavenge_operator_root(root) {
                 tracing::warn!(
@@ -226,7 +167,6 @@ impl WorkerExecutor {
         } else {
             Some(Arc::new(admission.capability_matrix()))
         };
-        let runner_hcs_journal = hcs_journal.clone();
         let benchmark = benchmark::BenchmarkCoordinator::new(stop_fences.worker_state_root())?;
         Ok(Self {
             benchmark,
@@ -238,18 +178,16 @@ impl WorkerExecutor {
             latest_resource_sample: Arc::new(std::sync::RwLock::new(None)),
             resource_refresh_lock: Arc::new(Mutex::new(())),
             task_runner: Arc::new(
-                move |task, cancellation, _consensus_request, execution_context| {
+                move |task, cancellation, _consensus_request, _execution_context| {
                     let config = runner_config.clone();
                     let reference_executor = reference_executor.clone();
                     let cas_store = cas_store.clone();
                     let production_backends = production_backends.clone();
                     let managed_gpu_production_backends = managed_gpu_production_backends.clone();
-                    let windows_backends = windows_backends.clone();
                     let capability_matrix = capability_matrix.clone();
                     let trusted_registration = trusted_registration.clone();
-                    let hcs_journal = runner_hcs_journal.clone();
                     Box::pin(async move {
-                        executor::run_task_with_cancel_and_backends_and_trusted_registration_and_windows_and_managed_gpu_with_context(
+                        executor::run_task_with_cancel_and_backends_and_trusted_registration_and_managed_gpu_with_context(
                         &task,
                         &config,
                         cancellation,
@@ -257,11 +195,8 @@ impl WorkerExecutor {
                         cas_store,
                         production_backends,
                         managed_gpu_production_backends,
-                        windows_backends,
                         capability_matrix,
                         Some(trusted_registration),
-                        hcs_journal,
-                        execution_context,
                     )
                     .await
                     })
@@ -269,7 +204,6 @@ impl WorkerExecutor {
             ),
             dynamic_capability_report,
             runtime_admission: admission,
-            hcs_journal,
         })
     }
 
@@ -312,7 +246,6 @@ impl WorkerExecutor {
             ),
             dynamic_capability_report: WorkerCapabilityReport::public_managed_dsl(),
             runtime_admission: runtime_admission::WorkerRuntimeAdmission::default(),
-            hcs_journal: None,
         }
     }
     pub async fn execute_task(&self, task: &Task) -> Result<TaskResult> {
@@ -586,305 +519,6 @@ impl WorkerExecutor {
     #[must_use]
     pub fn runtime_admission(&self) -> runtime_admission::WorkerRuntimeAdmission {
         self.runtime_admission.clone()
-    }
-
-    #[must_use]
-    pub fn hcs_journal(&self) -> Option<hcs_journal::HcsExecutionJournal> {
-        self.hcs_journal.clone()
-    }
-
-    /// Reconcile native HCS state before this Worker accepts new work.
-    ///
-    /// Restart adoption is deliberately unavailable until a fresh execution
-    /// lease token can be presented to Nodepool. Pending systems are therefore
-    /// terminated only by exact journal identity; unknown or untrusted systems
-    /// quarantine the Worker instead of being guessed at or adopted.
-    #[cfg(windows)]
-    pub fn reconcile_hcs_startup(
-        &self,
-        worker_id: &str,
-        timeout: std::time::Duration,
-    ) -> Result<()> {
-        let Some(journal) = self.hcs_journal.as_ref() else {
-            return Ok(());
-        };
-        let systems = general_compute_runtime::windows_hcs::enumerate_systems(timeout)
-            .map_err(|error| anyhow::anyhow!("HCS startup enumeration failed: {error}"))?;
-        let actions = journal
-            .plan_reconciliation(&systems, worker_id)
-            .map_err(|error| {
-                anyhow::anyhow!("HCS startup reconciliation planning failed: {error}")
-            })?;
-
-        for action in actions {
-            match action {
-                hcs_journal::HcsReconciliationAction::QuarantineSystem { system, reason } => {
-                    anyhow::bail!(
-                        "HCS startup reconciliation quarantined system {}: {}",
-                        system.id,
-                        reason
-                    );
-                }
-                hcs_journal::HcsReconciliationAction::WorkerIdentityMismatch { record } => {
-                    anyhow::bail!(
-                        "HCS journal record belongs to Worker {} rather than {}",
-                        record.worker_id,
-                        worker_id
-                    );
-                }
-                hcs_journal::HcsReconciliationAction::IdentityMismatch { record, system } => {
-                    journal
-                        .append_event(
-                            &record.identity,
-                            hcs_journal::HcsJournalEvent::Reconciled {
-                                outcome: hcs_journal::HcsReconciliationOutcome::HcsIdentityMismatch,
-                                detail: Some(format!(
-                                    "HCS system {} failed exact identity or owner validation",
-                                    system.id
-                                )),
-                            },
-                        )
-                        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
-                    anyhow::bail!(
-                        "HCS startup reconciliation quarantined identity-mismatched system {}",
-                        system.id
-                    );
-                }
-                hcs_journal::HcsReconciliationAction::MissingSystem { record } => {
-                    journal
-                        .append_event(
-                            &record.identity,
-                            hcs_journal::HcsJournalEvent::Reconciled {
-                                outcome: hcs_journal::HcsReconciliationOutcome::MissingSystem,
-                                detail: Some(
-                                    "journaled HCS system is absent from the authoritative enumeration"
-                                        .into(),
-                                ),
-                            },
-                        )
-                        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
-                    journal
-                        .append_event(
-                            &record.identity,
-                            hcs_journal::HcsJournalEvent::CleanupConfirmedAbsent,
-                        )
-                        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
-                    if record.delivery != hcs_journal::HcsDeliveryState::Delivered {
-                        journal
-                            .append_event(
-                                &record.identity,
-                                hcs_journal::HcsJournalEvent::Abandoned {
-                                    reason:
-                                        "missing HCS system cannot be safely reattached or replayed"
-                                            .into(),
-                                },
-                            )
-                            .map_err(|error| anyhow::anyhow!(error.to_string()))?;
-                    }
-                }
-                hcs_journal::HcsReconciliationAction::RecoverCompletedResult { record } => {
-                    journal
-                        .append_event(
-                            &record.identity,
-                            hcs_journal::HcsJournalEvent::Reconciled {
-                                outcome: hcs_journal::HcsReconciliationOutcome::LeaseRequired,
-                                detail: Some(
-                                    "restart recovery has no current Nodepool transfer lease token"
-                                        .into(),
-                                ),
-                            },
-                        )
-                        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
-                    if let Some(system_id) = record.hcs_system_id.as_deref() {
-                        terminate_recorded_hcs_system(journal, &record, system_id, timeout)?;
-                    }
-                    journal
-                        .append_event(
-                            &record.identity,
-                            hcs_journal::HcsJournalEvent::Abandoned {
-                                reason: "completed result was not delivered without current Nodepool lease authority".into(),
-                            },
-                        )
-                        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
-                }
-                hcs_journal::HcsReconciliationAction::ReattachCandidate { record, system } => {
-                    journal
-                        .append_event(
-                            &record.identity,
-                            hcs_journal::HcsJournalEvent::Reconciled {
-                                outcome: hcs_journal::HcsReconciliationOutcome::LeaseRequired,
-                                detail: Some(
-                                    "restart reattachment is unavailable without current Nodepool transfer lease authority".into(),
-                                ),
-                            },
-                        )
-                        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
-                    terminate_recorded_hcs_system(journal, &record, &system.id, timeout)?;
-                    journal
-                        .append_event(
-                            &record.identity,
-                            hcs_journal::HcsJournalEvent::Abandoned {
-                                reason: "running HCS system was terminated because restart lease validation was unavailable".into(),
-                            },
-                        )
-                        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
-                }
-                hcs_journal::HcsReconciliationAction::CleanupRecordedSystem { record, system } => {
-                    terminate_recorded_hcs_system(journal, &record, &system.id, timeout)?;
-                }
-            }
-        }
-        Ok(())
-    }
-
-    pub fn mark_hcs_delivery(&self, identity: &hcs_journal::HcsExecutionIdentity) -> Result<()> {
-        let Some(journal) = self.hcs_journal.as_ref() else {
-            return Ok(());
-        };
-        let record = match journal.load(identity) {
-            Ok(record) => record,
-            Err(hcs_journal::HcsJournalError::UnknownEntry) => return Ok(()),
-            Err(error) => return Err(anyhow::anyhow!(error.to_string())),
-        };
-        if record.lifecycle != hcs_journal::HcsLifecycleState::Completed
-            || record.cleanup != hcs_journal::HcsCleanupState::Succeeded
-        {
-            return Err(anyhow::anyhow!(
-                "HCS journal record is not a completed, cleaned execution"
-            ));
-        }
-        journal
-            .append_event(identity, hcs_journal::HcsJournalEvent::DeliveryValidated)
-            .map_err(|error| anyhow::anyhow!(error.to_string()))?;
-        journal
-            .append_event(identity, hcs_journal::HcsJournalEvent::Delivered)
-            .map_err(|error| anyhow::anyhow!(error.to_string()))?;
-
-        // The result bytes have already been copied into the response before
-        // this boundary is reached. Only now is it safe to remove the host
-        // artifact tree. Cleanup is deliberately best-effort: Delivered is a
-        // durable fact, so a cleanup failure must not turn an already accepted
-        // result into a misleading gRPC error. Startup maintenance can retry
-        // the retained task root.
-        if let Err(error) = cleanup_delivered_hcs_artifacts(&record) {
-            tracing::error!(
-                task_id = %identity.task_id,
-                execution_id = %identity.execution_id,
-                error = %error,
-                "HCS result was delivered but host artifact cleanup failed"
-            );
-            if let Some(task_root) = record.scratch_path.parent() {
-                if let Err(record_error) = crate::maintenance::record_cleanup_failure(task_root) {
-                    tracing::error!(
-                        task_id = %identity.task_id,
-                        execution_id = %identity.execution_id,
-                        error = %record_error,
-                        "HCS cleanup failure could not be recorded durably"
-                    );
-                }
-            }
-        }
-        Ok(())
-    }
-}
-
-fn cleanup_delivered_hcs_artifacts(record: &hcs_journal::HcsJournalRecord) -> Result<()> {
-    if record
-        .scratch_path
-        .file_name()
-        .and_then(|name| name.to_str())
-        != Some("scratch")
-        || record
-            .result_path
-            .file_name()
-            .and_then(|name| name.to_str())
-            != Some("result.json")
-        || record.result_path.parent() != Some(record.scratch_path.as_path())
-    {
-        return Err(anyhow::anyhow!(
-            "HCS journal paths do not describe the owned scratch/result layout"
-        ));
-    }
-
-    let task_root = record
-        .scratch_path
-        .parent()
-        .ok_or_else(|| anyhow::anyhow!("HCS scratch path has no task root"))?;
-    let task_root_name = task_root
-        .file_name()
-        .and_then(|name| name.to_str())
-        .ok_or_else(|| anyhow::anyhow!("HCS task root has no valid name"))?;
-    if task_root_name.len() != 64
-        || !task_root_name.starts_with("exec-")
-        || !task_root_name[5..]
-            .bytes()
-            .all(|byte| byte.is_ascii_hexdigit())
-    {
-        return Err(anyhow::anyhow!(
-            "HCS task root is not an execution-scoped directory"
-        ));
-    }
-
-    match std::fs::symlink_metadata(task_root) {
-        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
-            Err(anyhow::anyhow!("HCS task root is not a real directory"))
-        }
-        Ok(_) => std::fs::remove_dir_all(task_root)
-            .map_err(|error| anyhow::anyhow!("remove HCS task root: {error}")),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(anyhow::anyhow!("inspect HCS task root: {error}")),
-    }
-}
-
-#[cfg(windows)]
-fn terminate_recorded_hcs_system(
-    journal: &hcs_journal::HcsExecutionJournal,
-    record: &hcs_journal::HcsJournalRecord,
-    system_id: &str,
-    timeout: std::time::Duration,
-) -> Result<()> {
-    journal
-        .append_event(
-            &record.identity,
-            hcs_journal::HcsJournalEvent::TerminateStarted,
-        )
-        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
-    match general_compute_runtime::windows_hcs::terminate_system_with_status(system_id, timeout) {
-        Ok(status) => {
-            journal
-                .append_event(
-                    &record.identity,
-                    hcs_journal::HcsJournalEvent::Terminated {
-                        status: status.status,
-                        exit_type: status.exit_type.clone(),
-                    },
-                )
-                .map_err(|error| anyhow::anyhow!(error.to_string()))?;
-            tracing::info!(
-                task_id = %record.identity.task_id,
-                system_id,
-                status = status.status,
-                exit_type = %status.exit_type,
-                "terminated journaled HCS system during Worker startup"
-            );
-            Ok(())
-        }
-        Err(error) => {
-            let journal_error = journal.append_event(
-                &record.identity,
-                hcs_journal::HcsJournalEvent::TerminateFailed {
-                    error: error.to_string(),
-                },
-            );
-            if let Err(journal_error) = journal_error {
-                return Err(anyhow::anyhow!(
-                    "HCS termination failed and its failure could not be journaled: {error}; {journal_error}"
-                ));
-            }
-            Err(anyhow::anyhow!(
-                "HCS termination failed for recorded system {system_id}: {error}"
-            ))
-        }
     }
 }
 
