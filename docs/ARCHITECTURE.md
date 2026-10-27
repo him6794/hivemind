@@ -440,8 +440,7 @@ Worker into a settlement authority; only Nodepool can verify a quorum certificat
   interpreter，並以每個 replica 的實際執行 operation 做 Nodepool settlement。
   `managed-function-v0` 僅保留歷史相容契約；舊資料可讀取，但新的 v0 submission
   會被拒絕，未完成的 v0 work 會在 Nodepool 啟動時取消。
-- Managed function 不執行使用者提供的 executable，也不需要 HCS；只有
-  `general-compute-v1alpha1` 的 arbitrary-compute 路徑使用原生 Windows HCS。
+- Managed function 不執行使用者提供的 executable，也不需要容器執行環境；`general-compute-v1alpha1` 的 Windows 原生後端已移除。
 - `hivemind-bin` 可以在本機開發時執行 `master`、`nodepool`、`worker` 或
   `all`；正式 Orange Pi 部署使用 role-specific services。
 - binary 也提供 `submit`、`status` 與 `result` CLI helper。

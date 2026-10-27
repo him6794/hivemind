@@ -142,7 +142,7 @@ Crate 目錄名不一定等於 Cargo package 名；使用 `cargo test -p` 前應
 ### 4.1 先選擇你的情境
 
 - **一般任務使用者**：使用 Master client／UI；不需要部署平台資料庫或取得 signing private key。
-- **一般 Worker 使用者**：使用相符平台的 client，登入並等待 enrollment／registration／readiness；closed DSL 不要求安裝 Docker、WSL 或 HCS。
+- **一般 Worker 使用者**：使用相符平台的 client，登入並等待 enrollment／registration／readiness；closed DSL 不要求安裝 Docker、WSL 或其他 container runtime。
 - **開發者**：建立 Rust／Node 環境，跑適用測試；需要 settlement evidence 時附加真正的 test PostgreSQL。
 - **Operator**：部署官方 Nodepool、Website API、Headscale 與資料服務，準備 secrets、keys、routing、backend policy 和 release evidence。
 
@@ -344,7 +344,7 @@ Standalone Worker state 在 Windows 預設 `%LOCALAPPDATA%\Hivemind\Worker`；�
 
 Smoke 可管理的 host-port variables 包括 `POSTGRES_HOST_PORT`、`REDIS_HOST_PORT`、`NODEPOOL_GRPC_HOST_PORT`、`TORRENT_TRACKER_HOST_PORT`、`TORRENT_SEED_HOST_PORT`、`MASTER_HTTP_HOST_PORT`、`WORKER_GRPC_HOST_PORT`、`WORKER_CONTROL_HOST_PORT`、`MASTER_UI_HOST_PORT`、`WORKER_UI_HOST_PORT`、`SITE_HOST_PORT`。Tracker／seed ports 用於相容與基礎設施；active managed input 使用 JSON data。
 
-Worker loader／provider 的其他 registry variables 應依對應 backend 文檔 provision；單靠通用 sandbox env 不會自動建立 operator-owned OCI／HCS assets。
+Worker loader／provider 的其他 registry variables 應依對應 backend 文檔 provision；單靠通用 sandbox env 不會自動建立 operator-owned OCI assets。
 
 <a id="enrollment"></a>
 
@@ -895,15 +895,13 @@ Runner、image、bundle／rootfs、state root 與 policy 都必須是 operator-o
 
 OCI fixture 與 prerequisites 見 [OCI fixture guide](general-compute-oci-fixture.md)。
 
-### 10.4 Native Windows general compute
+原生 Windows general-compute 後端（`production_sandboxed_windows`，以 Windows Containers／HCS 為邊界）已移除。Windows Worker 只提供 closed DSL；Linux general-compute 仍使用 `production_sandboxed_oci`。Job Object 主要提供 lifecycle／process cleanup，單獨存在不夠證明隔離。
 
-Production mode 是 `production_sandboxed_windows`，以原生 Windows Containers／HCS provider 為邊界。Job Object 主要提供 lifecycle／process cleanup，單獨存在不夠證明隔離。
+任何 general-compute 生產邊界還需 verified container、restricted identity、read-only root、safe explicit mounts、deny-by-default network、CPU／memory／process bounds、reparse-point-safe roots 和 hostile-workload evidence。
 
-生產邊界還需 verified container、restricted identity、read-only root、safe explicit mounts、deny-by-default network、CPU／memory／process bounds、reparse-point-safe roots 和 hostile-workload evidence。
+不得用 direct host process、`cmd.exe`、PowerShell、Docker CLI、WSL、Linux VM 或未受限 AppContainer 代替 general-compute 隔離。**移除 Windows general-compute 不影響 closed DSL；closed DSL 不需要任何 container provider。**
 
-不得用 direct host process、`cmd.exe`、PowerShell、Docker CLI、WSL、Linux VM 或未受限 AppContainer 代替。**缺少 HCS 不阻擋 closed DSL；它只阻擋需要 HCS 的 general-compute backend。**
-
-`scripts/windows-hcs-e2e.ps1` 目前檢查 prerequisites，並不自己執行 task。要聲稱原生 HCS workload pass，需額外保存真正的 HCS task execution evidence。
+Windows 已沒有 HCS prerequisite gate；任何 general-compute 隔離宣稱都必須有對應平台的實機執行證據。
 
 ### 10.5 ONNX artifact 與 tensor 邊界
 
@@ -1031,11 +1029,10 @@ Browser UI contracts、accessibility／theme checks、native lifecycle、three-s
 | Compile／package | Artifact 可建置及部分靜態條件 | Workload 執行、網路可達性、隔離、結算 |
 | DSL semantic／limit test | 測試涵蓋的語法、determinism、bounds 與 budget semantics | 外部 replicas 執行、資料庫結算 |
 | Database-backed test | 該環境的 transaction、hold、receipt、ledger assertions | 公網路徑、hostile provider security |
-| Mock／fake runner | Protocol、routing、lifecycle 與錯誤映射 | 真正 OCI／HCS 隔離 |
+| Mock／fake runner | Protocol、routing、lifecycle 與錯誤映射 | 真正 OCI 隔離 |
 | Local Compose health／HTML smoke | 已檢查的 services 與 responses | Account enrollment、三 replica success、外部 Headscale |
 | Browser test | 實際執行的 UI／API assertions | 未執行的 assertions、其他 provider gates |
 | OCI `-CheckOnly` | Prerequisites、assets、policy preflight | OCI task 執行與隔離效果 |
-| Windows HCS prerequisites script | Feature、service、bundle prerequisites | HCS task 執行 |
 | GPU／ONNX backend test | 指定裝置、driver、provider 與 workload 的結果 | 其他硬體、provider 或 release 組合 |
 | External enrollment／task E2E | 受測部署路徑的 auth、overlay、replicas、result、usage、settlement | 其他 release／平台／規模／SLA |
 | Signed update clean-host check | 該 artifact／channel 的 verify、activation、recovery | 其他 keyset／channel 的可用性 |
@@ -1073,7 +1070,6 @@ Browser UI contracts、accessibility／theme checks、native lifecycle、three-s
 | Cancel 後 slot 沒立即釋放 | `stop_pending`／`cancel_pending`、attempt-bound stop confirmation | 強制重派尚未確認停止的 capacity |
 | GPU backend unavailable | Feature、typed capability、trusted backend、driver／assets identity | Silent CPU fallback 並回報 GPU success |
 | Linux OCI unavailable | Rootless／namespaces、cgroup v2、seccomp、pinned assets、safe mounts | 用 rootful／fake runner 宣稱 production pass |
-| Windows HCS unavailable | Native feature／vmcompute／operator bundle 與 policy | 用 Job Object／WSL 代替原生 isolation |
 | Browser QA 找不到服務 | Smoke 打印的動態 URLs、test shell 的 overrides | 固定猜 8080／3000／3001 |
 | Workspace tests 綠但 settlement 未確認 | PostgreSQL reachable、test skip／early return、相關 cases output | 將 skip 計成有效 DB pass |
 | 更新不可用 | Approved signed metadata／package／version／keyset、activation/recovery evidence | Unsigned fallback 或直接替換 binary |
@@ -1169,7 +1165,7 @@ Browser UI contracts、accessibility／theme checks、native lifecycle、three-s
 | UI workflow／polling | [Master App](../frontend/master-ui/src/App.jsx#L322)、[Worker App](../frontend/worker-ui/src/App.jsx#L221)、[Master observability](../frontend/master-ui/src/taskObservability.mjs#L16) |
 | Same-origin Windows packages | [Master package:45–55](../scripts/package-master-windows.ps1#L45)、[Worker package:132–144](../scripts/package-worker-windows.ps1#L132) |
 | Canonical protobuf／generation | [hivemind.proto](../proto/hivemind.proto#L11)、[vpn.proto](../proto/vpn.proto#L11)、[build.rs](../hivemind-rs/crates/proto/build.rs#L1) |
-| General-compute request／gates | [runtime request／validation](../executor-rs/crates/general-compute-runtime/src/lib.rs#L111)、[Worker provider selection](../hivemind-rs/crates/worker-executor/src/executor.rs#L1252)、[production registration](../executor-rs/crates/general-compute-runtime/src/production.rs#L139)、[Windows HCS](../executor-rs/crates/general-compute-runtime/src/windows_hcs.rs#L69) |
+| General-compute request／gates | [runtime request／validation](../executor-rs/crates/general-compute-runtime/src/lib.rs#L111)、[Worker provider selection](../hivemind-rs/crates/worker-executor/src/executor.rs#L1252)、[production registration](../executor-rs/crates/general-compute-runtime/src/production.rs#L139) |
 | Managed GPU 執行與獨立結算 | [Worker GPU route](../hivemind-rs/crates/worker-executor/src/executor.rs#L812)、[GPU semantics](../executor-rs/crates/managed-function-runtime/hcode-gpu-semantics.json)、[完成派送分支](../hivemind-rs/crates/task-scheduler/src/dispatcher.rs#L3418)、[結果驗證與結算](../hivemind-rs/crates/task-scheduler/src/task_repository.rs#L6294) |
 | Documentation contract | [release-docs checks](../scripts/release-docs.Tests.ps1#L34)、[site contract](../frontend/site-contract.test.mjs#L282) |
 

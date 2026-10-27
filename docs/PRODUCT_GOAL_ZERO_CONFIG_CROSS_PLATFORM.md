@@ -130,7 +130,6 @@ Android ARM64
 核心不得依賴：
 
 ```text
-Windows HCS
 Linux cgroup
 Docker
 WSL
@@ -316,7 +315,7 @@ Headscale 可以保留為選配：
 - 將 DSL、task protocol、auth、consensus client、state、retry 與 idempotency
   保持在 core。
 - 建立明確的 OS adapter interface。
-- 確認 core 不引用 Windows HCS、Linux cgroup、Docker、WSL、shell 或
+- 確認 core 不引用 Linux cgroup、Docker、WSL、shell 或
   OS-specific sandbox。
 
 ### Phase 2：完成登入後自動 enrollment

@@ -20,8 +20,7 @@ The archived request shape was:
 The `torrent` field was used as JSON input for managed functions.
 `managed-function-v0` remains a frozen historical runtime contract. Operators
 may still need the cross-platform `production_sandboxed_dsl` Worker backend to
-read compatible historical work; that route does not require Windows
-Containers/HCS.
+read compatible historical work; that route requires no container runtime.
 
 Templates:
 

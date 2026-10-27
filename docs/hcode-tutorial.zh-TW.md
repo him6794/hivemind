@@ -11,7 +11,7 @@ hcode 是 Hivemind 的 CPU 任務語言。提交一段 source 和 JSON 資料，
 3. 每個副本使用 Nodepool 分配的執行額度，產生最終值、`print` 輸出和用量 receipt。
 4. Nodepool 驗證指派身分、結果綁定、共識與用量證據，決定任務結果與實際費用。
 
-直譯器沒有檔案系統、網路、環境變數、import、subprocess、eval、DLL 或 native API。CPU hcode 不需要 Docker、WSL、Windows HCS 或另一個 shell，也不會在失敗時改用主機直接執行。任務必須是確定性、無外部副作用的計算；Worker 共識不是密碼學正確性證明。
+直譯器沒有檔案系統、網路、環境變數、import、subprocess、eval、DLL 或 native API。CPU hcode 不需要 Docker、WSL 或另一個 shell，也不會在失敗時改用主機直接執行。任務必須是確定性、無外部副作用的計算；Worker 共識不是密碼學正確性證明。
 
 最終值除頂層字串外，以緊湊 JSON 表示，dict keys 有固定排序；頂層字串以原始 UTF-8 輸出。`print` 是額外的文字輸出，不等同最終值。
 

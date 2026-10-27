@@ -8,9 +8,8 @@ closed Rust-owned interpreter, and returns deterministic output and execution
 receipts. It does not execute user-supplied executables or expose file, network,
 import, subprocess, reflection, or arbitrary host-function capabilities.
 
-General-compute tasks are a separate runtime. Only that arbitrary-compute route
-may use the native Windows HCS backend; managed functions never require HCS,
-Docker, WSL, a VM, SSH, or a direct host-process fallback.
+General-compute tasks are a separate runtime. Managed functions never require a
+container runtime, Docker, WSL, a VM, SSH, or a direct host-process fallback.
 
 ## Active contract
 

@@ -61,10 +61,8 @@ v0 submission 會被拒絕，未完成的 v0 work 在 Nodepool 啟動時取消�
 本計畫另明確區分執行邊界：active `hcode` 以及相容用的 frozen v0
 interpreter 都只執行封閉自訂語法，沒有 filesystem、network、process、DLL 或 native
 API capability。`production_sandboxed_dsl` 仍保留其 frozen v0 semantics identity，並在
-自身路由中使用對應的封閉 interpreter；Windows DSL Worker 不需要 Windows
-Containers/HCS。真正需要 operator-owned runner、image、rootfs、artifact mounts 或
-外部程式的 general-compute workload，才分別使用 Linux `production_sandboxed_oci` 或
-Windows `production_sandboxed_windows`/HCS，且各自的 provider prerequisite 不得套用到 DSL。
+自身路由中使用對應的封閉 interpreter；Windows DSL Worker 不需要 container runtime。真正需要 operator-owned runner、image、rootfs、artifact mounts 或
+外部程式的 general-compute workload，才使用 Linux `production_sandboxed_oci`。Windows 原生 general-compute（原 `production_sandboxed_windows`/HCS）已於 2026-10-27 移除，且 provider prerequisite 不得套用到 DSL。
 
 Rust control plane 負責驗證請求、建立 sandbox、套用配額、串流 artifact、取消／kill／reap、收集 telemetry 與產生結果 envelope；guest/backend 負責執行使用者程式。
 
@@ -1287,3 +1285,13 @@ is not measured here.
 Decision: the wakeup is kept, since it removes the tick delay without changing
 billing or the default drain. Whether the default drain should be 1 s is still a
 billing decision and remains with the operator, as recorded above.
+
+## 2026-10-27: native Windows general compute removed
+
+The native Windows general-compute backend (`production_sandboxed_windows`, Windows Containers/HCS) is removed from the code, the Windows worker package, and the CI and protected-runtime gates.
+
+Reasons. The first public version excludes general compute. The Windows worker linked the HCS API unconditionally, and the HCS runtime is a load-time import of `computecore.dll`, so a host without that DLL may be unable to start the worker (not verified here). `HIVEMIND_WORKER_STATE_ROOT` was also treated as an explicit HCS setting, so setting this generic state-root override on a host without HCS stopped the worker at startup with `native HCS startup reconciliation failed`.
+
+Kept: the closed DSL, the Linux rootless OCI path, and the Job Object supervisor used for process cleanup. Removed: `windows_hcs.rs`, the HCS journal and provisioning modules, the Windows backend registry and its environment variable, HCS startup reconciliation, the `production_sandboxed_windows` execution mode, `scripts/windows-hcs-e2e.ps1` and its contract test, and the HCS steps of the package and workflow files.
+
+Operators upgrading from a release that used the native Windows backend must unset `HIVEMIND_GENERAL_COMPUTE_WINDOWS_BACKENDS`. The worker refuses to start while the variable is set, so a stale registry cannot silently change the capabilities the worker advertises.

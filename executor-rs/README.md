@@ -7,7 +7,7 @@ This Rust workspace contains the execution libraries used by Hivemind:
   `managed-function-v0` contract remains available only for compatibility
   parsing and frozen fixtures.
   Production closed-DSL execution is exposed as `production_sandboxed_dsl`;
-  it is cross-platform and requires no Windows Containers or HCS.
+  it is cross-platform and requires no container runtime.
 - `general-compute-runtime` owns the versioned contracts and bounded
   supervisor primitives for the planned `general-compute-v1alpha1` backends.
 
@@ -16,9 +16,8 @@ replacement for the managed-function runtime. The Worker routes
 `general-compute-v1alpha1` through an operator-owned capability registry:
 `reference_direct` is reference/test-only, while
 `production_sandboxed_oci` requires a pinned OCI runner, task-bound artifact
-materialization, and a validated bundle. Windows general-compute uses the
-separate `production_sandboxed_windows` HCS backend and only requires Windows
-Containers when that backend is selected. The runner must emit the versioned
+materialization, and a validated bundle. Native Windows general-compute is not
+provided. The runner must emit the versioned
 `general-compute-result-v1` envelope; its `input_sha256` is the canonical,
 length-framed digest of the materialized source followed by inputs. Missing or
 mismatched production configuration or result claims fail closed as

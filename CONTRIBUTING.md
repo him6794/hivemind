@@ -111,7 +111,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/release-docs.Tests.p
 | 計費與結算 | 使用 PostgreSQL 驗證交易、冪等性、hold/refund 與有效用量 |
 | API／auth | 未登入、錯誤 owner、過期 token、權限、正常請求與錯誤映射 |
 | 前端 | 所屬介面的契約測試與建置，必要時追加瀏覽器、鍵盤與小螢幕測試 |
-| Linux OCI／Windows HCS | provider/policy 測試，以及對應平台的實機執行測試 |
+| Linux OCI | provider/policy 測試，以及對應平台的實機執行測試 |
 | Client 更新 | 簽章、digest、版本限制、activation/recovery；正式通道需在乾淨主機驗證 |
 | 文檔 | 實作一致性、相對連結、範例與文檔契約 |
 

@@ -7,7 +7,7 @@ See the [project manual](HIVEMIND_MANUAL.zh-TW.md) for configuration and the sou
 ## First public version scope
 
 The first public version covers managed `hcode` CPU execution, quorum consensus,
-and Nodepool settlement. It excludes general-compute routes (OCI, HCS, GPU, and
+and Nodepool settlement. It excludes general-compute routes (OCI, GPU, and
 ONNX), Linux, macOS, and Android client packages, and the signed update channel.
 Lazy dispatch (`MANAGED_CONSENSUS_INITIAL_REPLICAS`) and hedging
 (`MANAGED_CONSENSUS_HEDGE_AFTER_SECS`) are off by default. The drain window
@@ -65,11 +65,9 @@ NumPy/SciPy programs.
 - Linux general compute requires the approved rootless OCI provider, pinned
   operator-owned assets, namespaces, cgroup v2, seccomp, read-only root, explicit
   artifact mounts, and deny-all networking.
-- Native Windows general compute requires Windows Containers/HCS and its
-  validated policy. Job Objects or direct host processes do not provide the
-  required isolation; Docker Desktop, WSL, and Linux VMs are not native Windows
-  providers.
-- The closed Windows DSL does not require HCS. Missing general-compute
+- Native Windows general compute is not provided. Job Objects, direct host processes,
+  Docker Desktop, WSL, and Linux VMs are not isolation for it.
+- The closed Windows DSL needs no Windows container feature. Missing general-compute
   prerequisites block only that backend, with no weaker execution fallback.
 - GPU and ONNX routes require compatible typed capabilities and approved backend
   assets. Managed GPU operations are fixed; user-supplied native code is not accepted.
@@ -103,7 +101,7 @@ Validate the release artifact with its deployed backend configuration:
 3. Run settlement tests against a dedicated PostgreSQL database and record any
    skipped cases.
 4. Run general-compute workloads on the selected provider, including hostile-workload
-   tests. `-CheckOnly`, mocks, and HCS prerequisite checks cover setup, not execution.
+   tests. `-CheckOnly` and mocks cover setup, not execution.
 5. Measure throughput, p95 latency, cost, and availability for the actual workload
    and topology before publishing performance comparisons.
 

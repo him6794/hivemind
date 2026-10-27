@@ -16,7 +16,7 @@
 
 ## 建置、介面與測試
 
-- [平台驗證指南](platform-validation-state.md)：單元測試、資料庫、mock、preflight、本機 smoke、外部 VPN、Linux OCI 與 Windows HCS 測試。
+- [平台驗證指南](platform-validation-state.md)：單元測試、資料庫、mock、preflight、本機 smoke、外部 VPN、Linux OCI 測試。
 - [Reviewed OCI fixture](general-compute-oci-fixture.md)：Linux OCI fixture、policy 與執行要求。
 - [shadcn UI 與原生 client](SHADCN_UI.md)：介面樣式、Windows 視窗生命週期、native bridge 與測試方法。
 - [Smoke Benchmarks](SMOKE_BENCHMARKS.md)：三個／五個 Worker 的測量方法與 release criteria。
