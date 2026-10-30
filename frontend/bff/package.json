@@ -1,0 +1,13 @@
+{
+  "name": "hivemind-website-backend",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Account API for the official website. Runs beside Nodepool and is the only path the site uses to reach the user service.",
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@grpc/grpc-js": "^1.14.5",
+    "@grpc/proto-loader": "^0.8.1"
+  }
+}

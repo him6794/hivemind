@@ -46,3 +46,20 @@ test("registration validation mirrors the nodepool username and password contrac
     code: "password_mismatch",
   });
 });
+
+test("registration refuses passwords with leading or trailing spaces", async () => {
+  const { validateRegistrationInput } = await loadPolicy();
+
+  assert.deepEqual(validateRegistrationInput("alice", "  long-enough", "  long-enough"), {
+    ok: false,
+    code: "password_edge_whitespace",
+  });
+  assert.deepEqual(validateRegistrationInput("alice", "long-enough ", "long-enough "), {
+    ok: false,
+    code: "password_edge_whitespace",
+  });
+  assert.deepEqual(validateRegistrationInput("alice", "long enough", "long enough"), {
+    ok: true,
+    username: "alice",
+  });
+});

@@ -21,7 +21,7 @@ export function validateLoginInput(username, password) {
  *   username: string
  * } | {
  *   ok: false,
- *   code: "username_too_short" | "password_too_short" | "password_mismatch"
+ *   code: "username_too_short" | "password_too_short" | "password_edge_whitespace" | "password_mismatch"
  * }} RegistrationValidation
  */
 
@@ -33,6 +33,11 @@ export function validateRegistrationInput(username, password, confirmation) {
   }
   if (text(password).length < 8) {
     return { ok: false, code: "password_too_short" };
+  }
+  // The website backend trims passwords at sign-in. Refusing edge spaces here
+  // keeps the password a user typed the same password that is stored.
+  if (text(password) !== text(password).trim()) {
+    return { ok: false, code: "password_edge_whitespace" };
   }
   if (password !== confirmation) {
     return { ok: false, code: "password_mismatch" };
