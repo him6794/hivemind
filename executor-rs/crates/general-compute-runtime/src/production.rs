@@ -1713,6 +1713,7 @@ fn clone_file_reflink_or_copy(
 
 #[cfg(target_os = "linux")]
 fn try_reflink_file(source: &Path, destination: &Path) -> bool {
+    use std::fs::File;
     use std::os::fd::AsRawFd;
     const FICLONE: u64 = 0x4004_9409;
     unsafe extern "C" {
