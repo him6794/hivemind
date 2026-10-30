@@ -27,10 +27,11 @@ tmp/
 artifacts/
 vendor/
 
-# Frontend build outputs (Next.js standalone, Vite dist, Vite dep cache)
+# Frontend build outputs (Next.js static export, Vite dist, Vite dep cache)
 dist/
 .next/
 .vite/
+frontend/out/
 
 # Python caches
 __pycache__/
@@ -45,9 +46,7 @@ worklog/
 # Local data and backups
 docs_backup_*/
 api/
-!frontend/src/app/api/
-!frontend/src/app/api/[...path]/
-!frontend/src/app/api/[...path]/route.ts
+!frontend/functions/api/
 hivemind-rs/api/
 hivemind-rs/bt_torrents/
 test_tasks/

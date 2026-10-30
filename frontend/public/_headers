@@ -1,0 +1,9 @@
+# Applies to every response from the static site.
+# Script-level policy is left out on purpose: Next.js injects inline scripts, which
+# a strict script-src would block. HSTS is set at the Cloudflare zone, not here.
+/*
+  X-Content-Type-Options: nosniff
+  X-Frame-Options: DENY
+  Referrer-Policy: strict-origin-when-cross-origin
+  Permissions-Policy: camera=(), microphone=(), geolocation=(), payment=()
+  Content-Security-Policy: frame-ancestors 'none'; base-uri 'self'; form-action 'self'
