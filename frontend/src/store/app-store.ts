@@ -2,13 +2,18 @@
 
 import { create } from "zustand";
 import { clearLegacyAuthStorage } from "@/lib/auth-storage-policy.mjs";
+import { DEFAULT_DOCS_SLUG, docsSlugFrom } from "@/lib/docs/structure.mjs";
 
 export type Route =
   | "home"
   | "login"
   | "register"
   | "account"
+  | "download"
+  | "pricing"
+  | "share"
   | "security"
+  | "faq"
   | "docs"
   | "terms";
 
@@ -18,10 +23,11 @@ export interface AuthUser {
 
 interface AppState {
   route: Route;
+  docsSlug: string;
   user: AuthUser | null;
   token: string | null;
   commandOpen: boolean;
-  navigate: (route: Route) => void;
+  navigate: (route: Route, docsSlug?: string) => void;
   setAuth: (user: AuthUser, token: string) => void;
   logout: () => void;
   setCommandOpen: (open: boolean) => void;
@@ -38,13 +44,14 @@ function clearLegacyBrowserAuthStorage() {
 
 clearLegacyBrowserAuthStorage();
 
-export const useAppStore = create<AppState>()((set) => ({
+export const useAppStore = create<AppState>()((set, get) => ({
   route: "home",
+  docsSlug: DEFAULT_DOCS_SLUG,
   user: null,
   token: null,
   commandOpen: false,
-  navigate: (route) => {
-    set({ route });
+  navigate: (route, docsSlug) => {
+    set({ route, docsSlug: route === "docs" ? docsSlugFrom(docsSlug) : get().docsSlug });
     if (typeof window !== "undefined") {
       window.scrollTo({ top: 0, behavior: "smooth" });
     }
