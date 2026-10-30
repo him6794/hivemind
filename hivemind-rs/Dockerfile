@@ -14,7 +14,7 @@ COPY executor-rs/crates/general-compute-runtime ./executor-rs/crates/general-com
 
 WORKDIR /app/hivemind-rs
 ARG HIVEMIND_BIN=hivemind-bin
-ARG HIVEMIND_FEATURES=master,nodepool,worker,cli
+ARG HIVEMIND_FEATURES=master,nodepool,worker,website,cli
 ARG CARGO_BUILD_JOBS=2
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
