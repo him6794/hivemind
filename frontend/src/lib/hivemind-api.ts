@@ -12,6 +12,18 @@ async function readJson(res: Response) {
   }
 }
 
+// Carries the stable error code the website backend returns, so pages can show
+// a message in the visitor's language instead of the server's English text.
+export class AccountApiError extends Error {
+  readonly code: string;
+
+  constructor(message: string, code: string) {
+    super(message);
+    this.name = "AccountApiError";
+    this.code = code;
+  }
+}
+
 async function request(method: string, path: string, body?: JsonValue, token?: string) {
   const headers: Record<string, string> = {};
   if (token) headers.Authorization = `Bearer ${token}`;
@@ -25,11 +37,10 @@ async function request(method: string, path: string, body?: JsonValue, token?: s
 
   const data = await readJson(res);
   if (!res.ok) {
-    const message =
-      (data as { message?: string; status_message?: string }).message ||
-      (data as { message?: string; status_message?: string }).status_message ||
-      `Request failed: ${res.status}`;
-    throw new Error(message);
+    const failure = data as { message?: string; status_message?: string; code?: unknown };
+    const message = failure.message || failure.status_message || `Request failed: ${res.status}`;
+    const code = typeof failure.code === "string" ? failure.code : "request_failed";
+    throw new AccountApiError(message, code);
   }
 
   return data as JsonValue;

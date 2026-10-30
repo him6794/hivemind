@@ -15,7 +15,7 @@ export function LocaleToggle({ className }: { className?: string }) {
   return (
     <DropdownMenu.Root>
       <DropdownMenu.Trigger asChild>
-        <Button type="button" variant="ghost" size="icon" aria-label="Switch language" className={`size-11 text-muted-foreground ${className || ""}`}><Languages aria-hidden="true" className="size-4" /></Button>
+        <Button type="button" variant="ghost" size="icon" aria-label={locale === "zh" ? "切換語言" : "Switch language"} className={`size-11 text-muted-foreground ${className || ""}`}><Languages aria-hidden="true" className="size-4" /></Button>
       </DropdownMenu.Trigger>
       <DropdownMenu.Portal>
         <DropdownMenu.Content onCloseAutoFocus={(event) => { if (document.querySelector('[role="dialog"]')) event.preventDefault(); }} align="end" sideOffset={6} className="z-[60] min-w-36 rounded-md border bg-popover p-1 text-popover-foreground shadow-md outline-none data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=open]:fade-in-0 data-[state=closed]:fade-out-0 data-[state=open]:zoom-in-95 data-[state=closed]:zoom-out-95">

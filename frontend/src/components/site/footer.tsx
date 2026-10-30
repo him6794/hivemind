@@ -1,87 +1,47 @@
 "use client";
 
-import { Cpu, HardDrive, Network, ShieldCheck } from "lucide-react";
 import { useMemo } from "react";
 import { HiveLogo } from "./hive-logo";
-import { useAppStore } from "@/store/app-store";
+import { useAppStore, type Route } from "@/store/app-store";
 import { useI18n } from "@/store/i18n-store";
 import { getSiteDefinition } from "@/lib/hivemind-site-data.mjs";
-
-const icons = [Network, Cpu, HardDrive, ShieldCheck];
 
 export function Footer() {
   const navigate = useAppStore((state) => state.navigate);
   const { locale } = useI18n();
+  const zh = locale === "zh";
   const site = useMemo(() => getSiteDefinition(locale), [locale]);
 
   return (
-    <footer className="mt-auto border-t border-border/60 bg-background">
+    <footer className="mt-auto border-t bg-background">
       <div className="mx-auto max-w-7xl px-4 py-14 sm:px-6">
-        <div className="grid gap-10 lg:grid-cols-[1.4fr_1fr_1fr]">
+        <div className="grid gap-10 md:grid-cols-[1.4fr_repeat(4,1fr)]">
           <div className="space-y-4">
             <HiveLogo withText />
-            <p className="max-w-md text-sm leading-relaxed text-muted-foreground">
-              {locale === "zh"
-                ? "送出工作說明和輸入資料，讓共享網路幫你完成工作。"
-                : "Send the task instructions and input, then let the shared network do the work."}
-            </p>
+            <p className="max-w-xs text-sm leading-relaxed text-muted-foreground">{site.brand.tagline}</p>
           </div>
-
-          <div>
-            <h4 className="mb-4 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
-              {locale === "zh" ? "網站導覽" : "Navigation"}
-            </h4>
-            <ul className="space-y-2.5">
-              {site.routes.map((route) => (
-                <li key={route.id}>
-                  <button
-                    type="button"
-                    onClick={() => navigate(route.id as import("@/store/app-store").Route)}
-                    className="text-sm text-muted-foreground transition-colors hover:text-foreground"
-                  >
-                    {route.label}
-                  </button>
-                </li>
-              ))}
-            </ul>
-          </div>
-
-          <div>
-            <h4 className="mb-4 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
-              {locale === "zh" ? "平台重點" : "Platform Highlights"}
-            </h4>
-            <div className="grid gap-3">
-              {site.sections.features.map((feature, index) => {
-                const Icon = icons[index % icons.length];
-                return (
-                  <div key={feature.title} className="flex items-start gap-3 rounded-xl border border-border bg-card p-3">
-                    <span className="mt-0.5 flex size-8 items-center justify-center rounded-lg bg-honey/10 text-honey">
-                      <Icon className="size-4" />
-                    </span>
-                    <div>
-                      <div className="text-sm font-medium">{feature.title}</div>
-                      <div className="text-xs leading-relaxed text-muted-foreground">{feature.body}</div>
-                    </div>
-                  </div>
-                );
-              })}
+          {site.footer.map((column: { title: string; links: { label: string; route: string; slug?: string }[] }) => (
+            <div key={column.title}>
+              <h2 className="mb-4 text-xs font-semibold uppercase tracking-wider text-muted-foreground">{column.title}</h2>
+              <ul className="space-y-2.5">
+                {column.links.map((link) => (
+                  <li key={link.label}>
+                    <button
+                      type="button"
+                      onClick={() => navigate(link.route as Route, link.slug)}
+                      className="text-sm text-muted-foreground transition-colors hover:text-foreground"
+                    >
+                      {link.label}
+                    </button>
+                  </li>
+                ))}
+              </ul>
             </div>
-          </div>
+          ))}
         </div>
-
-        <div className="mt-12 flex flex-col items-start justify-between gap-4 border-t border-border/60 pt-6 text-xs text-muted-foreground sm:flex-row sm:items-center">
-          <p>
-            © {new Date().getFullYear()} Hivemind. {locale === "zh" ? "利用閒置算力執行任務的網路。" : "A network for running jobs on spare compute."}
-          </p>
-          <div className="flex items-center gap-4">
-            <span className="inline-flex items-center gap-1.5">
-              <span className="relative flex size-2">
-                <span className="relative inline-flex size-2 rounded-full bg-foreground" />
-              </span>
-              {locale === "zh" ? "官方網站" : "Official site"}
-            </span>
-            <span className="font-mono-tech">Hivemind</span>
-          </div>
+        <div className="mt-12 flex flex-col items-start justify-between gap-4 border-t pt-6 text-xs text-muted-foreground sm:flex-row sm:items-center">
+          <p>© {new Date().getFullYear()} Hivemind</p>
+          <p className="font-mono-tech">{zh ? "首次公開版本" : "First public version"}</p>
         </div>
       </div>
     </footer>

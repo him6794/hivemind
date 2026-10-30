@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { CornerDownLeft, FileText, Home, LogIn, ScrollText, Shield, User, UserPlus } from "lucide-react";
+import { CircleHelp, CornerDownLeft, Download, FileText, Home, Laptop, LogIn, Receipt, ScrollText, Shield, User, UserPlus } from "lucide-react";
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from "@/components/ui/dialog";
 import { useAppStore, type Route } from "@/store/app-store";
 import { useI18n } from "@/store/i18n-store";
@@ -14,7 +14,11 @@ const routeIcons: Record<Route, React.ElementType> = {
   login: LogIn,
   register: UserPlus,
   account: User,
+  download: Download,
+  pricing: Receipt,
+  share: Laptop,
   security: Shield,
+  faq: CircleHelp,
   docs: FileText,
   terms: ScrollText,
 };

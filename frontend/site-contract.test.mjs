@@ -2,6 +2,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import { getSiteDefinition } from './src/lib/hivemind-site-data.mjs';
+import { EXAMPLES } from './src/lib/docs/examples.mjs';
+import { DOCS_GROUP_IDS, DOCS_PAGE_SLUGS } from './src/lib/docs/structure.mjs';
 
 test('frontend lockfiles retain the complete bundled WASM dependency graph', () => {
   for (const surface of ['.', 'master-ui', 'worker-ui']) {
@@ -45,7 +47,7 @@ test('site definition exposes only official website and account-center routes', 
   assert.equal(site.brand.name, 'Hivemind');
   assert.deepEqual(
     site.routes.map((route) => route.id),
-    ['home', 'login', 'register', 'account', 'security', 'docs', 'terms']
+    ['home', 'login', 'register', 'account', 'pricing', 'share', 'download', 'security', 'faq', 'docs', 'terms']
   );
   // The point of pinning the route list: the official site is a product and
   // account surface, so an operations console must never appear in it.
@@ -100,7 +102,7 @@ test('public copy explains cross-account worker scheduling and prices every func
 
 test('documentation page renders the function-level pricing table', () => {
   const docsSource = fs.readFileSync(
-    new URL('./src/components/pages/docs-page.tsx', import.meta.url),
+    new URL('./src/components/pages/docs-reference.tsx', import.meta.url),
     'utf8'
   );
 
@@ -351,7 +353,7 @@ test('browser API adapter stays on same-origin website-backend account endpoints
 });
 
 test('website backend only exposes account-center routes through user service', () => {
-  const source = fs.readFileSync(new URL('./src/app/api/[...path]/route.ts', import.meta.url), 'utf8');
+  const source = fs.readFileSync(new URL('./bff/account-api.mjs', import.meta.url), 'utf8');
 
   assert.match(source, /UserService/);
   assert.match(source, /RegisterUser/);
@@ -428,4 +430,248 @@ test('release browser QA covers account, worker registration, and task lifecycle
   assert.match(flowSource, /getByLabel\('Max CPT'\)\.fill\('200'\)/);
   assert.match(flowSource, /getByLabel\('Max CPT'\)\.fill\('100'\)/);
   assert.doesNotMatch(flowSource, /getByLabel\('Max CPT'\)\.fill\('1000000'\)/);
+});
+
+// Settlement copy has to match the billing identity the backend applies:
+// a task without a quorum certificate is not charged, and replicas do not sign.
+test('settlement copy states the no-quorum rule and makes no signing claim', () => {
+  const en = getSiteDefinition('en');
+  const zh = getSiteDefinition('zh');
+  const enSettlement = [...en.sections.docs.billing.notes, en.sections.docs.settlement.body].join('\n');
+  const zhSettlement = [...zh.sections.docs.billing.notes, zh.sections.docs.settlement.body].join('\n');
+
+  assert.match(enSettlement, /not charged/);
+  assert.match(zhSettlement, /不會扣款/);
+  assert.doesNotMatch(enSettlement, /divergent replicas|independently of quorum/i);
+  assert.doesNotMatch(zhSettlement, /獨立於共識|結果不同/);
+
+  // "signed 64-bit" (integer type) and "signed in" / "signed-in" (logged in) are not claims about replicas.
+  assert.doesNotMatch(JSON.stringify(en), /\b(signs|signed)\b(?! 64-bit| in\b|-in\b)/i, 'English copy must not claim replicas sign results');
+  assert.doesNotMatch(JSON.stringify(zh), /簽署|已簽署/, 'Chinese copy must not claim replicas sign results');
+});
+
+test('public copy does not describe a task dashboard on this site', () => {
+  for (const locale of ['en', 'zh']) {
+    const text = JSON.stringify(getSiteDefinition(locale));
+    assert.doesNotMatch(text, /dashboard|任務頁面|task page/i, `${locale} copy must point task submission to Master`);
+  }
+});
+
+test('platform matrix does not present unreleased platforms as supported', () => {
+  for (const locale of ['en', 'zh']) {
+    const platforms = getSiteDefinition(locale).sections.docs.billing.platforms;
+    for (const id of ['linux', 'macos', 'wsl']) {
+      const platform = platforms.find((entry) => entry.id === id);
+      assert.notEqual(platform.status, locale === 'en' ? 'Supported' : '支援', `${locale} ${id} is not in the first public version`);
+    }
+  }
+});
+
+test('download page takes its links only from the release metadata', () => {
+  const metadata = fs.readFileSync(new URL('./src/lib/downloads.mjs', import.meta.url), 'utf8');
+  const page = fs.readFileSync(new URL('./src/components/pages/download-page.tsx', import.meta.url), 'utf8');
+
+  assert.doesNotMatch(metadata, /url: '[^']+'/, 'no download address may be published in source');
+  assert.match(metadata, /master: \{ version: '', url: '', sha256: '' \}/);
+  assert.match(metadata, /worker: \{ version: '', url: '', sha256: '' \}/);
+  assert.match(page, /isPublishedDownload\(release\)/);
+  assert.doesNotMatch(page, /https?:\/\//, 'the page must not hard-code a download address');
+});
+
+test('website backend limits attempts, bounds request bodies, and keeps registration errors generic', () => {
+  const route = fs.readFileSync(new URL('./bff/account-api.mjs', import.meta.url), 'utf8');
+
+  assert.match(route, /createRateLimiter/);
+  assert.match(route, /readJsonObject\(request, MAX_BODY_BYTES\)/);
+  assert.match(route, /rate_limited/);
+  assert.match(route, /registration_failed/);
+  assert.doesNotMatch(route, /already exists/i, 'the duplicate-username message must not reach the browser');
+});
+
+test('security headers and a non-root container user are configured', () => {
+  const headers = fs.readFileSync(new URL('./public/_headers', import.meta.url), 'utf8');
+  const dockerfile = fs.readFileSync(new URL('./bff/Dockerfile', import.meta.url), 'utf8');
+
+  for (const header of ['X-Frame-Options', 'X-Content-Type-Options', 'Referrer-Policy', 'Content-Security-Policy']) {
+    assert.match(headers, new RegExp(header), `${header} must be set`);
+  }
+  assert.match(dockerfile, /^USER node$/m);
+});
+
+test('static export serves the site and sends account calls to the website backend', () => {
+  const config = fs.readFileSync(new URL('./next.config.ts', import.meta.url), 'utf8');
+  const proxy = fs.readFileSync(new URL('./functions/api/[[path]].js', import.meta.url), 'utf8');
+
+  assert.match(config, /output: "export"/);
+  assert.equal(fs.existsSync(new URL('./src/app/api', import.meta.url)), false, 'the static app must not contain route handlers');
+  assert.match(proxy, /API_ORIGIN/);
+  assert.match(proxy, /CF-Connecting-IP/);
+  assert.match(proxy, /PROXY_SHARED_SECRET/);
+  assert.doesNotMatch(proxy, /grpc|nodepool/i, 'the Pages function must not talk to the user service directly');
+});
+
+test('website backend refuses to start without the proxy secret and checks it before reading bodies', () => {
+  const server = fs.readFileSync(new URL('./bff/server.mjs', import.meta.url), 'utf8');
+
+  assert.match(server, /PROXY_SHARED_SECRET/);
+  assert.match(server, /process\.exit\(1\)/);
+  assert.match(server, /timingSafeEqual/);
+  // Match the call sites, not the function definitions, which appear earlier in the file.
+  const gate = server.indexOf('if (!fromPagesFunction(req.headers))');
+  const bodyRead = server.indexOf('await readBody(req)');
+  assert.ok(gate > 0 && bodyRead > gate, 'the secret check must run before the body is read');
+});
+
+test('every page in the route list has a renderer, and every navigation target is a page', () => {
+  const pageSource = fs.readFileSync(new URL('./src/app/page.tsx', import.meta.url), 'utf8');
+
+  for (const locale of ['en', 'zh']) {
+    const site = getSiteDefinition(locale);
+    const ids = site.routes.map((route) => route.id);
+    for (const id of ids) {
+      assert.match(pageSource, new RegExp(`case "${id}":`), `page.tsx must render "${id}"`);
+    }
+    const targets = [...site.nav, ...site.footer.flatMap((column) => column.links)].map((item) => item.route);
+    assert.ok(targets.length > 0, `${locale} navigation must link to pages`);
+    for (const target of targets) {
+      assert.ok(ids.includes(target), `${locale} navigation target "${target}" must be a page in the route list`);
+    }
+  }
+});
+
+// The documentation pages are built from block data. Every block type and every
+// reference section needs a renderer, and both locales must share one structure.
+test('documentation pages follow the shared structure in both locales', () => {
+  const blocks = fs.readFileSync(new URL('./src/components/pages/docs-blocks.tsx', import.meta.url), 'utf8');
+  const reference = fs.readFileSync(new URL('./src/components/pages/docs-reference.tsx', import.meta.url), 'utf8');
+  const blockTypes = ['p', 'h2', 'list', 'steps', 'code', 'tabs', 'example', 'table', 'callout', 'links', 'reference', 'demo'];
+  const referenceNames = ['flow', 'terms', 'quickstart', 'settings', 'language', 'billing', 'limits', 'failures', 'api', 'platforms'];
+  const exampleIds = new Set(EXAMPLES.map((example) => example.id));
+  // Demo entries are keyed by id in the demo source files, each as `"id": { title: ... }`.
+  const demoSource = ['docs-demos.tsx', 'docs-demos-charts.tsx', 'docs-demos-motion.tsx']
+    .map((file) => fs.readFileSync(new URL(`./src/components/pages/${file}`, import.meta.url), 'utf8'))
+    .join('\n');
+  const demoIds = new Set([...demoSource.matchAll(/"([a-z0-9-]+)": \{\s*\n\s*title:/g)].map((match) => match[1]));
+  assert.ok(demoIds.size >= 30, 'the demo sources must define the component examples');
+
+  for (const type of blockTypes) {
+    assert.match(blocks, new RegExp(`case "${type}":`), `documentation blocks must render "${type}"`);
+  }
+  for (const name of referenceNames) {
+    assert.match(reference, new RegExp(`case "${name}":`), `reference sections must render "${name}"`);
+  }
+
+  // Compares structure only: block kinds, ids, references, and item counts.
+  // The wording differs by language on purpose.
+  const shape = (page) => ({
+    slug: page.slug,
+    group: page.group,
+    blocks: page.blocks.map((block) => {
+      switch (block.type) {
+        case 'h2':
+          return ['h2', block.id];
+        case 'example':
+          return ['example', block.id];
+        case 'reference':
+          return ['reference', block.name];
+        case 'demo':
+          return ['demo', block.id];
+        case 'links':
+          return ['links', block.slugs.join(',')];
+        case 'tabs':
+          return ['tabs', block.tabs.map((tab) => tab.label).join(',')];
+        case 'table':
+          return ['table', block.head.length, block.rows.length];
+        case 'list':
+        case 'steps':
+          return [block.type, block.items.length];
+        case 'code':
+          return ['code', block.lang];
+        case 'callout':
+          return ['callout', block.tone];
+        default:
+          return [block.type];
+      }
+    }),
+  });
+  const en = getSiteDefinition('en').sections.docs;
+  const zh = getSiteDefinition('zh').sections.docs;
+  assert.deepEqual(en.groups.map((group) => group.id), DOCS_GROUP_IDS);
+  assert.deepEqual(zh.groups.map((group) => group.id), DOCS_GROUP_IDS);
+  assert.deepEqual(en.pages.map((page) => page.slug), DOCS_PAGE_SLUGS);
+  assert.deepEqual(zh.pages.map((page) => page.slug), DOCS_PAGE_SLUGS);
+  assert.deepEqual(
+    zh.pages.map(shape),
+    en.pages.map(shape),
+    'the Chinese pages must mirror the English blocks, ids, examples, and links'
+  );
+
+  const published = new Set();
+  for (const locale of ['en', 'zh']) {
+    for (const page of getSiteDefinition(locale).sections.docs.pages) {
+      const headings = page.blocks.filter((block) => block.type === 'h2').map((block) => block.id);
+      assert.equal(new Set(headings).size, headings.length, `${locale} ${page.slug} must not repeat a section id`);
+      for (const block of page.blocks) {
+        assert.ok(blockTypes.includes(block.type), `${locale} ${page.slug} uses unknown block "${block.type}"`);
+        if (block.type === 'example') {
+          assert.ok(exampleIds.has(block.id), `${locale} ${page.slug} references unknown example "${block.id}"`);
+          published.add(block.id);
+        }
+        if (block.type === 'demo') {
+          assert.ok(demoIds.has(block.id), `${locale} ${page.slug} references unknown demo "${block.id}"`);
+        }
+        if (block.type === 'reference') {
+          assert.ok(referenceNames.includes(block.name), `${locale} ${page.slug} references unknown section "${block.name}"`);
+        }
+        if (block.type === 'links') {
+          for (const slug of block.slugs) {
+            assert.ok(DOCS_PAGE_SLUGS.includes(slug), `${locale} ${page.slug} links to unknown page "${slug}"`);
+          }
+        }
+      }
+    }
+  }
+  for (const id of exampleIds) {
+    assert.ok(published.has(id), `example "${id}" must appear on a documentation page`);
+  }
+});
+
+// The repository templates in templates/hcode are the programs the CLI users
+// submit. Their documentation examples must be the same programs.
+test('repository templates are the programs the documentation examples publish', () => {
+  const templates = {
+    'policy-gate': '01_policy_gate',
+    'weighted-score': '02_weighted_score',
+    'batch-sum': '03_batch_sum',
+    'price-quote': '04_price_quote',
+    'route-task': '05_route_task',
+  };
+  for (const [id, base] of Object.entries(templates)) {
+    const example = EXAMPLES.find((entry) => entry.id === id);
+    assert.ok(example, `${id} must be a documentation example`);
+    const source = fs.readFileSync(new URL(`../templates/hcode/${base}.hmf`, import.meta.url), 'utf8');
+    const input = JSON.parse(fs.readFileSync(new URL(`../templates/hcode/${base}.input.json`, import.meta.url), 'utf8'));
+    assert.equal(source.replace(/\r\n/g, '\n').trim(), example.source.trim(), `${id} must match templates/hcode/${base}.hmf`);
+    assert.deepEqual(JSON.parse(example.input), input, `${id} must match templates/hcode/${base}.input.json`);
+  }
+});
+
+// The programs on the pages are the programs the runtime test runs, with the
+// same source, input, value, printed output, and usage units.
+test('documentation programs are the programs the runtime test runs', () => {
+  const runtimeTest = fs
+    .readFileSync(
+      new URL('../executor-rs/crates/managed-function-runtime/tests/docs_examples.rs', import.meta.url),
+      'utf8'
+    )
+    .replace(/\r\n/g, '\n');
+
+  for (const example of EXAMPLES) {
+    assert.ok(runtimeTest.includes(`"${example.id}"`), `${example.id} must be listed in the runtime test`);
+    assert.ok(runtimeTest.includes(example.source), `${example.id} source must match the runtime test`);
+    assert.ok(runtimeTest.includes(example.input), `${example.id} input must match the runtime test`);
+    assert.ok(runtimeTest.includes(JSON.stringify(example.result)), `${example.id} result must match the runtime test`);
+    assert.ok(runtimeTest.includes(JSON.stringify(example.output)), `${example.id} output must match the runtime test`);
+    assert.ok(Number.isInteger(example.usage) && example.usage > 0, `${example.id} must publish its usage units`);
+  }
 });

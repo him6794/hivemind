@@ -11,11 +11,11 @@ export function SecurityPage() {
 
   return (
     <PageSection
-      eyebrow={locale === "zh" ? "信任與安全" : "Trust & Safety"}
-      title={locale === "zh" ? "單一電腦的回報不能直接扣款。" : "One computer cannot charge your account by itself."}
+      eyebrow={locale === "zh" ? "信任與安全" : "Trust and security"}
+      title={locale === "zh" ? "網路如何確認扣款" : "How the network confirms charges"}
       body={locale === "zh"
-        ? "扣款之前，幾台參與工作的電腦會回報結果，網路會比較它們並確認是否達成共識。無法確認的工作就直接失敗。"
-        : "Before anything is charged, several participating computers report their results and the network checks whether they agree. A task the network cannot confirm fails outright."}
+        ? "單一電腦的紀錄不足以扣款。系統會讓幾台電腦執行同一份工作，比對它們的紀錄；只有能確認的工作才會扣款。無法確認時，工作失敗，不扣任何費用。"
+        : "A single computer's record is not enough to charge anyone. Several computers run the same task, the network compares their records, and it charges only work it can confirm. If the work cannot be confirmed, the task fails and nothing is charged."}
     >
       <div className="mt-10 grid gap-4 lg:grid-cols-2">
         {security.items.map((item: string) => (

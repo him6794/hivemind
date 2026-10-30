@@ -3,10 +3,12 @@
 import { useTheme } from "next-themes";
 import { Moon, Sun } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { useI18n } from "@/store/i18n-store";
 import { cn } from "@/lib/utils";
 
 export function ThemeToggle({ className }: { className?: string }) {
   const { theme, setTheme } = useTheme();
+  const { locale } = useI18n();
   const isDark = theme === "dark";
 
   return (
@@ -14,7 +16,7 @@ export function ThemeToggle({ className }: { className?: string }) {
       type="button"
       variant="ghost"
       size="icon"
-      aria-label="Toggle theme"
+      aria-label={locale === "zh" ? "切換主題" : "Toggle theme"}
       aria-pressed={isDark}
       onClick={() => setTheme(isDark ? "light" : "dark")}
       className={cn("relative size-11 text-muted-foreground", className)}
