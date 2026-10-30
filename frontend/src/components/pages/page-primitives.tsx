@@ -18,7 +18,7 @@ export function PageSection({
   className?: string;
 }) {
   return (
-    <section className={cn("mx-auto max-w-7xl px-4 pb-16 pt-28 sm:px-6 sm:pb-24 sm:pt-32", className)}>
+    <section className={cn("mx-auto w-full max-w-7xl px-4 pb-16 pt-28 sm:px-6 sm:pb-24 sm:pt-32", className)}>
       <div className="max-w-3xl">
         <div className="font-mono-tech text-xs uppercase tracking-[0.24em] text-honey">{eyebrow}</div>
         <h1 className="mt-3 text-balance text-3xl font-semibold tracking-tight sm:text-5xl">{title}</h1>
@@ -37,7 +37,7 @@ export function Surface({
   className?: string;
 }) {
   return (
-    <Card className={cn("p-6", className)}>
+    <Card className={cn("min-w-0 p-6", className)}>
       {children}
     </Card>
   );

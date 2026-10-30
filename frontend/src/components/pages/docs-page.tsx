@@ -1,425 +1,242 @@
 "use client";
 
+import { useEffect, useMemo, useState } from "react";
+import { ArrowLeft, ArrowRight, Menu } from "lucide-react";
+import { Button } from "@/components/ui/button";
+import { Dialog, DialogContent, DialogDescription, DialogTitle } from "@/components/ui/dialog";
+import { useAppStore } from "@/store/app-store";
 import { useI18n } from "@/store/i18n-store";
 import { getSiteDefinition } from "@/lib/hivemind-site-data.mjs";
-import { Surface } from "./page-primitives";
+import { DocsBlock, renderInline, type DocsBlockData } from "./docs-blocks";
+import { referenceSections } from "./docs-reference";
 
-type Copy = { zh: string; en: string };
+type DocsPageData = { slug: string; group: string; title: string; description: string; blocks: DocsBlockData[] };
+type DocsGroup = { id: string; title: string };
+type TocItem = { id: string; text: string };
 
-const t = (locale: string, copy: Copy) => (locale === "zh" ? copy.zh : copy.en);
-
-const SECTIONS: { id: string; label: Copy }[] = [
-  { id: "quickstart", label: { zh: "快速上手", en: "Quick start" } },
-  { id: "api", label: { zh: "API 參考", en: "API reference" } },
-  { id: "fields", label: { zh: "任務欄位", en: "Task fields" } },
-  { id: "language", label: { zh: "語言參考", en: "Language reference" } },
-  { id: "example", label: { zh: "完整範例", en: "Worked example" } },
-  { id: "limits", label: { zh: "限制", en: "Limits" } },
-  { id: "billing", label: { zh: "計費", en: "Billing" } },
-  { id: "failures", label: { zh: "失敗代碼", en: "Failure codes" } },
-];
-
-function CodeBlock({ children }: { children: string }) {
-  return (
-    <pre className="mt-4 overflow-x-auto rounded-xl border border-border/60 bg-background p-4 text-xs leading-relaxed">
-      <code className="font-mono-tech">{children}</code>
-    </pre>
-  );
+function tocFor(page: DocsPageData, locale: string): TocItem[] {
+  return page.blocks.flatMap((block) => {
+    if (block.type === "h2") return [{ id: block.id, text: block.text }];
+    if (block.type === "reference") return referenceSections(block.name, locale);
+    return [];
+  });
 }
 
-function DocSection({
-  id,
-  title,
-  body,
-  children,
+function jumpTo(id: string) {
+  document.getElementById(id)?.scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
+// Marks the section nearest the top of the viewport. Sections are read from the
+// rendered page, so the list must be rebuilt whenever the page changes.
+function useActiveSection(ids: string[]) {
+  const [active, setActive] = useState<string | undefined>(undefined);
+  const key = ids.join("|");
+
+  useEffect(() => {
+    const elements = key
+      .split("|")
+      .filter(Boolean)
+      .map((id) => document.getElementById(id))
+      .filter((element): element is HTMLElement => element !== null);
+    if (elements.length === 0) {
+      setActive(undefined);
+      return;
+    }
+    setActive(elements[0].id);
+    const observer = new IntersectionObserver(
+      (entries) => {
+        const visible = entries
+          .filter((entry) => entry.isIntersecting)
+          .sort((a, b) => a.boundingClientRect.top - b.boundingClientRect.top);
+        if (visible.length > 0) setActive(visible[0].target.id);
+      },
+      { rootMargin: "-120px 0px -60% 0px" }
+    );
+    elements.forEach((element) => observer.observe(element));
+    return () => observer.disconnect();
+  }, [key]);
+
+  return active;
+}
+
+function DocsNav({
+  groups,
+  pages,
+  activeSlug,
+  label,
+  onSelect,
 }: {
-  id: string;
-  title: string;
-  body?: string;
-  children?: React.ReactNode;
+  groups: DocsGroup[];
+  pages: DocsPageData[];
+  activeSlug: string;
+  label: string;
+  onSelect: (slug: string) => void;
 }) {
   return (
-    <section id={id} className="scroll-mt-28 border-t border-border/60 pt-12 first:border-t-0 first:pt-0">
-      <h2 className="text-2xl font-semibold tracking-tight sm:text-3xl">{title}</h2>
-      {body ? <p className="mt-3 text-pretty leading-relaxed text-muted-foreground">{body}</p> : null}
-      {children}
-    </section>
-  );
-}
-
-function Pill({ children }: { children: React.ReactNode }) {
-  return (
-    <span className="rounded-md bg-honey/10 px-2 py-0.5 font-mono-tech text-xs text-honey ring-1 ring-honey/20">
-      {children}
-    </span>
+    <nav aria-label={label} className="space-y-6">
+      {groups.map((group) => (
+        <div key={group.id}>
+          <p className="mb-2 px-2 text-xs font-semibold uppercase tracking-wider text-muted-foreground">{group.title}</p>
+          <ul className="space-y-0.5">
+            {pages
+              .filter((page) => page.group === group.id)
+              .map((page) => {
+                const current = page.slug === activeSlug;
+                return (
+                  <li key={page.slug}>
+                    <button
+                      type="button"
+                      onClick={() => onSelect(page.slug)}
+                      aria-current={current ? "page" : undefined}
+                      className={`w-full rounded-md px-2 py-1.5 text-left text-sm transition-colors ${
+                        current
+                          ? "bg-accent font-medium text-foreground"
+                          : "text-muted-foreground hover:bg-accent/60 hover:text-foreground"
+                      }`}
+                    >
+                      {page.title}
+                    </button>
+                  </li>
+                );
+              })}
+          </ul>
+        </div>
+      ))}
+    </nav>
   );
 }
 
 export function DocsPage() {
   const { locale } = useI18n();
-  const site = getSiteDefinition(locale);
-  const docs = site.sections.docs;
+  const zh = locale === "zh";
+  const docs = getSiteDefinition(locale).sections.docs as { groups: DocsGroup[]; pages: DocsPageData[] };
+  const slug = useAppStore((state) => state.docsSlug);
+  const navigate = useAppStore((state) => state.navigate);
+  const [menuOpen, setMenuOpen] = useState(false);
+
+  const index = Math.max(0, docs.pages.findIndex((entry) => entry.slug === slug));
+  const page = docs.pages[index] ?? docs.pages[0];
+  const previous = docs.pages[index - 1];
+  const next = docs.pages[index + 1];
+  const group = docs.groups.find((entry) => entry.id === page.group);
+  const toc = useMemo(() => tocFor(page, locale), [page, locale]);
+  const active = useActiveSection(toc.map((item) => item.id));
+  const navLabel = zh ? "文件頁面" : "Documentation pages";
+
+  const select = (target: string) => {
+    setMenuOpen(false);
+    navigate("docs", target);
+  };
 
   return (
-    <div className="mx-auto max-w-7xl px-4 pb-16 pt-28 sm:px-6 sm:pb-24 sm:pt-32">
-      <div className="max-w-3xl">
-        <div className="font-mono-tech text-xs uppercase tracking-[0.24em] text-honey">
-          {t(locale, { zh: "文件", en: "Documentation" })}
-        </div>
-        <h1 className="mt-3 text-balance text-3xl font-semibold tracking-tight sm:text-5xl">
-          {t(locale, {
-            zh: "從建立帳號到跑完第一份工作。",
-            en: "From an account to your first finished job.",
-          })}
-        </h1>
-        <p className="mt-4 text-pretty leading-relaxed text-muted-foreground">
-          {t(locale, {
-            zh: "以下的路由、欄位、限制與失敗代碼，都對應目前執行中的系統行為。任務 API 會透過承載任務服務的電腦運作，不在本網站。",
-            en: "Every route, field, limit, and failure code below matches how the running system behaves today. The task API runs through the computer that hosts your task service, not through this website.",
-          })}
-        </p>
-      </div>
+    <div className="mx-auto w-full max-w-7xl px-4 pb-16 pt-28 sm:px-6 sm:pb-24 sm:pt-32">
+      <div className="lg:grid lg:grid-cols-[210px_minmax(0,1fr)] lg:gap-10 xl:grid-cols-[210px_minmax(0,1fr)_190px]">
+        <aside className="hidden lg:sticky lg:top-28 lg:block lg:max-h-[calc(100vh-8rem)] lg:self-start lg:overflow-y-auto">
+          <DocsNav groups={docs.groups} pages={docs.pages} activeSlug={page.slug} label={navLabel} onSelect={select} />
+        </aside>
 
-      <div className="mt-14 grid gap-12 lg:grid-cols-[200px_1fr] lg:gap-16">
-        <nav aria-label={t(locale, { zh: "文件目錄", en: "On this page" })} className="lg:sticky lg:top-28 lg:self-start">
-          <div className="mb-3 text-xs uppercase tracking-wide text-muted-foreground">
-            {t(locale, { zh: "本頁內容", en: "On this page" })}
+        <div className="min-w-0">
+          <div className="mb-6 flex justify-end lg:hidden">
+            <Button variant="outline" size="sm" onClick={() => setMenuOpen(true)}>
+              <Menu aria-hidden="true" className="size-4" />
+              {zh ? "所有頁面" : "All pages"}
+            </Button>
           </div>
-          <ul className="flex flex-wrap gap-x-4 gap-y-2 lg:flex-col lg:gap-2">
-            {SECTIONS.map((section) => (
-              <li key={section.id}>
-                <a
-                  href={`#${section.id}`}
-                  className="text-sm text-muted-foreground transition-colors hover:text-honey"
-                >
-                  {t(locale, section.label)}
-                </a>
-              </li>
-            ))}
-          </ul>
-        </nav>
 
-        <div className="flex min-w-0 flex-col gap-12">
-          <DocSection
-            id="quickstart"
-            title={t(locale, { zh: "快速上手", en: "Quick start" })}
-          >
-            <div className="mt-6 grid gap-4 sm:grid-cols-2">
-              {docs.quickstart.map((item: { step: string; title: string; body: string }) => (
-                <Surface key={item.step}>
-                  <div className="font-mono-tech text-xs text-honey">STEP {item.step}</div>
-                  <h3 className="mt-2 text-base font-semibold">{item.title}</h3>
-                  <p className="mt-2 text-sm leading-relaxed text-muted-foreground">{item.body}</p>
-                </Surface>
+          <article className="max-w-3xl">
+            <header>
+              <p className="font-mono-tech text-xs uppercase tracking-[0.24em] text-honey">{group?.title}</p>
+              <h1 className="mt-3 text-balance text-3xl font-semibold tracking-tight sm:text-4xl">{page.title}</h1>
+              <p className="mt-4 text-pretty text-lg leading-relaxed text-muted-foreground">{renderInline(page.description)}</p>
+              <div className="mt-6 flex flex-wrap items-center gap-2">
+                {previous ? (
+                  <Button variant="outline" size="sm" onClick={() => select(previous.slug)}>
+                    <ArrowLeft aria-hidden="true" className="size-4" />
+                    {previous.title}
+                  </Button>
+                ) : null}
+                {next ? (
+                  <Button variant="outline" size="sm" onClick={() => select(next.slug)}>
+                    {next.title}
+                    <ArrowRight aria-hidden="true" className="size-4" />
+                  </Button>
+                ) : null}
+              </div>
+            </header>
+
+            <div className="mt-10">
+              {page.blocks.map((block, blockIndex) => (
+                <DocsBlock key={`${page.slug}-${blockIndex}`} block={block} />
               ))}
             </div>
-          </DocSection>
+          </article>
 
-          <DocSection id="api" title={t(locale, { zh: "API 參考", en: "API reference" })}>
-            {docs.groups.map((group: {
-              id: string;
-              title: string;
-              note: string;
-              rows: { method: string; path: string; note: string }[];
-            }) => (
-              <div key={group.id} className="mt-8">
-                <h3 className="text-lg font-semibold">{group.title}</h3>
-                <p className="mt-2 text-sm leading-relaxed text-muted-foreground">{group.note}</p>
-                <div className="mt-4 overflow-hidden rounded-xl border border-border bg-card">
-                  {group.rows.map((row) => (
-                    <div
-                      key={`${row.method}-${row.path}`}
-                      className="grid gap-2 border-b border-border/40 px-5 py-4 text-sm last:border-b-0 sm:grid-cols-[72px_minmax(0,1fr)] sm:gap-4 lg:grid-cols-[72px_240px_minmax(0,1fr)]"
-                    >
-                      <div className="font-mono-tech text-xs text-honey">{row.method}</div>
-                      <div className="font-mono-tech text-xs break-all">{row.path}</div>
-                      <div className="text-sm text-muted-foreground">{row.note}</div>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            ))}
-          </DocSection>
-
-          <DocSection
-            id="fields"
-            title={t(locale, { zh: "任務欄位", en: "Task fields" })}
-            body={t(locale, {
-              zh: "POST /api/tasks 的請求主體。標示必填的欄位若缺少或不合法，會在送出當下被拒絕。",
-              en: "The request body for POST /api/tasks. A required field that is missing or invalid is rejected at submission time.",
-            })}
+          <nav
+            aria-label={zh ? "上一頁與下一頁" : "Previous and next pages"}
+            className="mt-16 grid max-w-3xl gap-3 border-t border-border/60 pt-8 sm:grid-cols-2"
           >
-            <div className="mt-6 overflow-hidden rounded-xl border border-border bg-card">
-              {docs.taskFields.map((field: { name: string; type: string; required: string; note: string }) => (
-                <div
-                  key={field.name}
-                  className="grid gap-2 border-b border-border/40 px-5 py-4 last:border-b-0 lg:grid-cols-[180px_minmax(0,1fr)] lg:gap-4"
-                >
-                  <div className="flex flex-wrap items-center gap-2">
-                    <span className="font-mono-tech text-sm">{field.name}</span>
-                    <Pill>{field.type}</Pill>
-                  </div>
-                  <div className="text-sm text-muted-foreground">
-                    <span className="mr-2 text-xs uppercase tracking-wide text-foreground/70">{field.required}</span>
-                    {field.note}
-                  </div>
-                </div>
-              ))}
-            </div>
-          </DocSection>
-
-          <DocSection
-            id="language"
-            title={t(locale, { zh: "語言參考", en: "Language reference" })}
-            body={docs.language.intro}
-          >
-            <div className="mt-6 grid gap-4 lg:grid-cols-2">
-              <Surface>
-                <h3 className="text-base font-semibold">{t(locale, { zh: "陳述式", en: "Statements" })}</h3>
-                <ul className="mt-3 space-y-1.5">
-                  {docs.language.statements.map((line: string) => (
-                    <li key={line} className="font-mono-tech text-xs text-muted-foreground">{line}</li>
-                  ))}
-                </ul>
-              </Surface>
-              <Surface>
-                <h3 className="text-base font-semibold">{t(locale, { zh: "運算式", en: "Expressions" })}</h3>
-                <ul className="mt-3 space-y-1.5">
-                  {docs.language.expressions.map((line: string) => (
-                    <li key={line} className="font-mono-tech text-xs text-muted-foreground">{line}</li>
-                  ))}
-                </ul>
-              </Surface>
-              <Surface>
-                <h3 className="text-base font-semibold">{t(locale, { zh: "內建函式", en: "Builtins" })}</h3>
-                <ul className="mt-3 space-y-2">
-                  {docs.language.builtins.map((builtin: { sig: string; note: string }) => (
-                    <li key={builtin.sig} className="text-sm">
-                      <span className="font-mono-tech text-xs text-honey">{builtin.sig}</span>
-                      <span className="ml-2 text-muted-foreground">{builtin.note}</span>
-                    </li>
-                  ))}
-                </ul>
-              </Surface>
-              <Surface>
-                <h3 className="text-base font-semibold">{t(locale, { zh: "規則", en: "Rules" })}</h3>
-                <ul className="mt-3 space-y-2">
-                  {docs.language.rules.map((rule: string) => (
-                    <li key={rule} className="text-sm leading-relaxed text-muted-foreground">{rule}</li>
-                  ))}
-                </ul>
-              </Surface>
-            </div>
-
-            <Surface className="mt-4 border-honey/25 bg-honey/[0.04]">
-              <h3 className="text-base font-semibold">
-                {t(locale, { zh: "hcode 不支援", en: "Not available in hcode" })}
-              </h3>
-              <div className="mt-3 flex flex-wrap gap-2">
-                {docs.language.forbidden.map((item: string) => (
-                  <span
-                    key={item}
-                    className="rounded-md border border-border/60 bg-background px-2.5 py-1 text-xs text-muted-foreground"
-                  >
-                    {item}
-                  </span>
-                ))}
-              </div>
-            </Surface>
-          </DocSection>
-
-          <DocSection
-            id="example"
-            title={t(locale, { zh: "完整範例", en: "Worked example" })}
-            body={t(locale, {
-              zh: "一個讀取 JSON 輸入、以使用者函式計分、再加總的工作。",
-              en: "A job that reads its JSON input, scores each row with a user function, and totals the result.",
-            })}
-          >
-            <div className="mt-2">
-              <div className="mt-6 text-sm font-medium">{t(locale, { zh: "task_source", en: "task_source" })}</div>
-              <CodeBlock>{docs.language.example}</CodeBlock>
-
-              <div className="mt-6 text-sm font-medium">
-                {t(locale, { zh: "JSON 輸入（torrent 欄位）", en: "JSON input (torrent field)" })}
-              </div>
-              <CodeBlock>{docs.language.exampleInput}</CodeBlock>
-              <p className="mt-3 text-sm text-muted-foreground">{docs.language.exampleNote}</p>
-
-              <div className="mt-6 text-sm font-medium">
-                {t(locale, { zh: "透過任務服務送出", en: "Send it through your task service" })}
-              </div>
-              <CodeBlock>{docs.language.submitExample}</CodeBlock>
-            </div>
-          </DocSection>
-
-          <DocSection
-            id="limits"
-            title={t(locale, { zh: "限制", en: "Limits" })}
-            body={t(locale, {
-              zh: "這些是目前的實際上限。超過上限的工作會被拒絕或中止，而不是靜默截斷。",
-              en: "These are the ceilings in force today. A job that crosses one is rejected or stopped, never silently truncated.",
-            })}
-          >
-            <div className="mt-6 overflow-hidden rounded-xl border border-border bg-card">
-              {docs.limits.map((limit: { name: string; value: string; note: string }) => (
-                <div
-                  key={limit.name}
-                  className="grid gap-1 border-b border-border/40 px-5 py-4 last:border-b-0 lg:grid-cols-[minmax(0,1fr)_200px_minmax(0,1fr)] lg:gap-4"
-                >
-                  <div className="text-sm font-medium">{limit.name}</div>
-                  <div className="font-mono-tech text-sm text-honey">{limit.value}</div>
-                  <div className="text-sm text-muted-foreground">{limit.note}</div>
-                </div>
-              ))}
-            </div>
-          </DocSection>
-
-          <DocSection id="billing" title={docs.billing.title} body={docs.billing.body}>
-            <CodeBlock>{docs.billing.formula}</CodeBlock>
-            <div className="mt-4 grid gap-4 sm:grid-cols-2">
-              {docs.billing.rows.map((row: { name: string; value: string }) => (
-                <Surface key={row.name} className="flex items-center justify-between">
-                  <span className="text-sm text-muted-foreground">{row.name}</span>
-                  <span className="font-mono-tech text-lg text-honey">{row.value}</span>
-                </Surface>
-              ))}
-            </div>
-
-            <div className="mt-8">
-              <h3 className="text-lg font-semibold">
-                {t(locale, { zh: "函式級計價", en: "Function-level pricing" })}
-              </h3>
-              <p className="mt-2 text-sm leading-relaxed text-muted-foreground">
-                {t(locale, {
-                  zh: "以下是每個可呼叫函式的固定成本；引數、函式本體與迴圈內實際執行的運算，會再逐項加入 usage units。",
-                  en: "These are the fixed costs for each callable function form. Argument evaluation, function bodies, and loop work add their own usage units on top.",
-                })}
-              </p>
-              <div className="mt-4 overflow-hidden rounded-xl border border-border bg-card">
-                {docs.billing.functionRows.map((row: {
-                  id: string;
-                  name: string;
-                  price: string;
-                  note: string;
-                }) => (
-                  <div
-                    key={row.id}
-                    className="grid gap-2 border-b border-border/40 px-5 py-4 last:border-b-0 lg:grid-cols-[220px_240px_minmax(0,1fr)] lg:gap-4"
-                  >
-                    <div className="font-mono-tech text-xs text-honey">{row.name}</div>
-                    <div className="text-sm font-medium">{row.price}</div>
-                    <div className="text-sm leading-relaxed text-muted-foreground">{row.note}</div>
-                  </div>
-                ))}
-              </div>
-            </div>
-
-            <div className="mt-8">
-              <h3 className="text-lg font-semibold">
-                {t(locale, { zh: "工作記錄與扣款範例", en: "Task record examples" })}
-              </h3>
-              <p className="mt-2 text-sm leading-relaxed text-muted-foreground">
-                {t(locale, {
-                  zh: "以下數字來自工作記錄；每個範例都顯示單一有效副本的實際用量，不代表整份任務的固定總額。",
-                  en: "Each example uses a task record and shows one valid replica's measured usage, not a fixed whole-task total.",
-                })}
-              </p>
-              <div className="mt-4 grid gap-4 lg:grid-cols-2">
-                {docs.billing.examples.map((example: {
-                  id: string;
-                  title: string;
-                  program: string;
-                  receiptUsageUnits: number;
-                  breakdown: string;
-                }) => (
-                  <Surface key={example.id} className="flex flex-col gap-3">
-                    <div className="flex items-start justify-between gap-4">
-                      <h4 className="text-base font-semibold">{example.title}</h4>
-                      <span className="shrink-0 font-mono-tech text-sm text-honey">
-                        {example.receiptUsageUnits} {t(locale, { zh: "用量／副本", en: "usage / replica" })}
-                      </span>
-                    </div>
-                    <CodeBlock>{example.program}</CodeBlock>
-                    <div className="grid gap-2 text-sm sm:grid-cols-2">
-                      <div className="rounded-xl bg-background p-3">
-                        <div className="text-xs uppercase tracking-wide text-muted-foreground">
-                          {t(locale, { zh: "每個有效副本用量", en: "usage per valid replica" })}
-                        </div>
-                        <div className="mt-1 font-mono-tech text-lg text-honey">{example.receiptUsageUnits}</div>
-                      </div>
-                      <div className="rounded-xl bg-background p-3">
-                        <div className="text-xs uppercase tracking-wide text-muted-foreground">
-                          {t(locale, { zh: "結算依據", en: "settlement basis" })}
-                        </div>
-                        <div className="mt-1 font-mono-tech text-lg text-honey">
-                          {t(locale, { zh: "有效用量 + 10% 費用", en: "valid usage + 10% fee" })}
-                        </div>
-                      </div>
-                    </div>
-                    <p className="text-sm leading-relaxed text-muted-foreground">{example.breakdown}</p>
-                  </Surface>
-                ))}
-              </div>
-            </div>
-
-            <div className="mt-8">
-              <h3 className="text-lg font-semibold">
-                {t(locale, { zh: "平台支援矩陣", en: "Platform support matrix" })}
-              </h3>
-              <div className="mt-4 overflow-hidden rounded-xl border border-border bg-card">
-                {docs.billing.platforms.map((platform: {
-                  id: string;
-                  name: string;
-                  status: string;
-                  check: string;
-                }) => (
-                  <div
-                    key={platform.id}
-                    className="grid gap-2 border-b border-border/40 px-5 py-4 last:border-b-0 lg:grid-cols-[180px_140px_minmax(0,1fr)] lg:gap-4"
-                  >
-                    <div className="text-sm font-medium">{platform.name}</div>
-                    <div className="font-mono-tech text-xs text-honey">{platform.status}</div>
-                    <div className="text-sm leading-relaxed text-muted-foreground">{platform.check}</div>
-                  </div>
-                ))}
-              </div>
-            </div>
-
-            <ul className="mt-4 space-y-2">
-              {docs.billing.notes.map((note: string) => (
-                <li key={note} className="text-sm leading-relaxed text-muted-foreground">{note}</li>
-              ))}
-            </ul>
-
-            <Surface className="mt-6 border-honey/25 bg-honey/[0.04]">
-              <h3 className="text-base font-semibold">{docs.settlement.title}</h3>
-              <p className="mt-2 text-sm leading-relaxed text-muted-foreground">{docs.settlement.body}</p>
-            </Surface>
-          </DocSection>
-
-          <DocSection
-            id="failures"
-            title={t(locale, { zh: "失敗代碼", en: "Failure codes" })}
-            body={t(locale, {
-              zh: "每一次失敗的工作都會在工作記錄中帶一個代碼。",
-              en: "Every failed task carries one of these codes in its task record.",
-            })}
-          >
-            <div className="mt-6 overflow-hidden rounded-xl border border-border bg-card">
-              {docs.failures.map((failure: { code: string; note: string }) => (
-                <div
-                  key={failure.code}
-                  className="grid gap-1 border-b border-border/40 px-5 py-3.5 last:border-b-0 lg:grid-cols-[220px_minmax(0,1fr)] lg:gap-4"
-                >
-                  <div className="font-mono-tech text-xs text-honey">{failure.code}</div>
-                  <div className="text-sm text-muted-foreground">{failure.note}</div>
-                </div>
-              ))}
-            </div>
-          </DocSection>
+            {previous ? (
+              <button
+                type="button"
+                onClick={() => select(previous.slug)}
+                className="rounded-xl border border-border bg-card p-4 text-left transition-colors hover:bg-accent"
+              >
+                <span className="text-xs uppercase tracking-wide text-muted-foreground">{zh ? "上一頁" : "Previous"}</span>
+                <span className="mt-1 block text-sm font-medium">{previous.title}</span>
+              </button>
+            ) : (
+              <span />
+            )}
+            {next ? (
+              <button
+                type="button"
+                onClick={() => select(next.slug)}
+                className="rounded-xl border border-border bg-card p-4 text-right transition-colors hover:bg-accent sm:col-start-2"
+              >
+                <span className="text-xs uppercase tracking-wide text-muted-foreground">{zh ? "下一頁" : "Next"}</span>
+                <span className="mt-1 block text-sm font-medium">{next.title}</span>
+              </button>
+            ) : null}
+          </nav>
         </div>
+
+        <aside className="hidden xl:sticky xl:top-28 xl:block xl:self-start">
+          {toc.length > 0 ? (
+            <div>
+              <p className="mb-3 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+                {zh ? "本頁內容" : "On this page"}
+              </p>
+              <ul className="space-y-1.5 border-l border-border/60">
+                {toc.map((item) => (
+                  <li key={item.id}>
+                    <button
+                      type="button"
+                      onClick={() => jumpTo(item.id)}
+                      className={`-ml-px block border-l py-0.5 pl-3 text-left text-sm transition-colors ${
+                        active === item.id
+                          ? "border-honey text-foreground"
+                          : "border-transparent text-muted-foreground hover:text-foreground"
+                      }`}
+                    >
+                      {item.text}
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          ) : null}
+        </aside>
       </div>
+
+      <Dialog open={menuOpen} onOpenChange={setMenuOpen}>
+        <DialogContent className="max-h-[80dvh] max-w-sm overflow-y-auto">
+          <DialogTitle>{zh ? "所有頁面" : "All pages"}</DialogTitle>
+          <DialogDescription className="sr-only">{zh ? "文件頁面清單" : "List of documentation pages"}</DialogDescription>
+          <div className="mt-4">
+            <DocsNav groups={docs.groups} pages={docs.pages} activeSlug={page.slug} label={navLabel} onSelect={select} />
+          </div>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }
