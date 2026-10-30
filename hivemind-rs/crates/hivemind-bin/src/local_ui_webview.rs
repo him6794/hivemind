@@ -24,6 +24,7 @@ const BOOTSTRAP_URL: &str = "about:blank";
 const CONTROL_PREFIX: &str = "/__hivemind_desktop__/";
 const QUIT_MARKER: &[u8] = hivemind_client_runtime::LOCAL_UI_QUIT_MARKER;
 const SHOW_MARKER: &[u8] = hivemind_client_runtime::LOCAL_UI_SHOW_MARKER;
+const TRAY_ICON_RGBA: &[u8] = include_bytes!("../icons/tray-32.rgba");
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -259,15 +260,8 @@ fn install_tray(app: &AppHandle, lifecycle: Arc<WindowLifecycle>, title: &str) -
     let show = MenuItem::with_id(app, "show", "Open", true, None::<&str>)?;
     let quit = MenuItem::with_id(app, "quit", "Quit…", true, None::<&str>)?;
     let menu = Menu::with_items(app, &[&show, &quit])?;
-    let mut pixels = vec![0_u8; 32 * 32 * 4];
-    for y in 4..28 {
-        for x in 4..28 {
-            let index = (y * 32 + x) * 4;
-            let ink = (7..11).contains(&x) || (21..25).contains(&x) || (14..18).contains(&y);
-            let value = if ink { 245 } else { 32 };
-            pixels[index..index + 4].copy_from_slice(&[value, value, value, 255]);
-        }
-    }
+    // 32x32 RGBA of the Hivemind mark, generated from the app icon (icons/tray-32.rgba).
+    let pixels = TRAY_ICON_RGBA.to_vec();
     TrayIconBuilder::with_id("local-ui-tray")
         .icon(tauri::image::Image::new_owned(pixels, 32, 32))
         .tooltip(title)
