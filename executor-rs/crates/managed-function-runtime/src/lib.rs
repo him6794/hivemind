@@ -21,7 +21,7 @@ pub const V1_SEMANTICS_MANIFEST_JSON: &str = include_str!("../hcode-semantics.js
 /// SHA-256 of the canonical JSON bytes in [`V1_SEMANTICS_MANIFEST_JSON`],
 /// excluding the file's trailing newline.
 pub const V1_SEMANTICS_MANIFEST_SHA256: &str =
-    "3f2b92a13bcedc25ed3728d36c164db8c4a880eca32c75f7b4000126eb1441cc";
+    "51edac96795664e5dcef2d0fc8d7751805211328795550904ea40bec50b21264";
 
 /// Versioned metering identity committed by the v1 semantics manifest.
 pub const V1_COST_MODEL_ID: &str = "hcode-execution-cpt-v1";
@@ -34,6 +34,9 @@ pub const GPU_SEMANTICS_MANIFEST_SHA256: &str =
 
 mod deterministic_math;
 mod gpu;
+mod tensor;
+
+pub use tensor::{DType, Tensor};
 
 #[cfg(all(feature = "cuda", target_os = "linux"))]
 pub use gpu::CudaGpuBackend;
@@ -110,19 +113,7 @@ const TRANSCENDENTAL_UNITS: u64 = 16;
 /// surfaces pass through unchanged.
 fn finish_hcode_numeric(surface: Surface, value: Value) -> Result<Value, RuntimeError> {
     match value {
-        Value::Float(value) if surface == Surface::Hcode => {
-            if !value.is_finite() {
-                return Err(RuntimeError::new(
-                    "runtime_error",
-                    "float result is not finite",
-                ));
-            }
-            Ok(Value::Float(if value.abs().to_bits() == 0 {
-                0.0
-            } else {
-                value
-            }))
-        }
+        Value::Float(value) if surface == Surface::Hcode => finite_float(value).map(Value::Float),
         other => Ok(other),
     }
 }
@@ -152,7 +143,25 @@ pub enum Value {
     String(String),
     List(Vec<Self>),
     Dict(BTreeMap<String, Self>),
+    /// A dense tensor. Only CPU hcode can create one.
+    Tensor(Tensor),
     Null,
+}
+
+/// The CPU hcode float rule for one value: a non-finite float is an error, and
+/// -0.0 folds into 0.0.
+fn finite_float(value: f64) -> Result<f64, RuntimeError> {
+    if !value.is_finite() {
+        return Err(RuntimeError::new(
+            "runtime_error",
+            "float result is not finite",
+        ));
+    }
+    Ok(if value.abs().to_bits() == 0 {
+        0.0
+    } else {
+        value
+    })
 }
 
 /// Render a managed value using the canonical task-output representation.
@@ -198,7 +207,9 @@ pub fn render_output_bounded(value: &Value, max_bytes: u64) -> Result<String, Ru
         }
         Value::Bool(value) => output.push_str(if *value { "true" } else { "false" })?,
         Value::Null => output.push_str("null")?,
-        Value::List(_) | Value::Dict(_) => write_json_value(value, &mut output)?,
+        Value::List(_) | Value::Dict(_) | Value::Tensor(_) => {
+            write_json_value(value, &mut output)?;
+        }
     }
     Ok(output.into_inner())
 }
@@ -298,6 +309,7 @@ fn write_json_value(value: &Value, output: &mut BoundedOutput) -> Result<(), Run
             }
             output.push_char('}')
         }
+        Value::Tensor(tensor) => tensor::write_canonical(tensor, output),
     }
 }
 
@@ -707,6 +719,7 @@ fn value_metrics(value: &Value) -> Result<ValueMetrics, RuntimeError> {
         }),
         Value::List(values) => list_value_metrics(values),
         Value::Dict(values) => dict_value_metrics(values),
+        Value::Tensor(tensor) => tensor::metrics(tensor),
     }
 }
 
@@ -1868,6 +1881,19 @@ const HCODE_BUILTIN_NAMES: &[&str] = &[
     "tanh",
     "float",
     "int",
+    "tensor",
+    "zeros",
+    "shape",
+    "reshape",
+    "transpose",
+    "tolist",
+    "cast",
+    "sum",
+    "dot",
+    "matmul",
+    "relu",
+    "gelu",
+    "softmax",
 ];
 
 struct Evaluator<'a> {
@@ -2078,6 +2104,19 @@ impl<'a> Evaluator<'a> {
             }
             Expr::Unary { op, expr } => {
                 let value = self.eval_expr(expr)?;
+                if let (UnaryOp::Neg, Value::Tensor(_)) = (op, &value) {
+                    // Negating a tensor is `0 - tensor`, charged like any
+                    // elementwise operation.
+                    let units = tensor::elementwise_units(&Value::Int(0), &value);
+                    self.charge(units)?;
+                    let negated = tensor::binary(
+                        BinaryOp::Sub,
+                        &Value::Int(0),
+                        &value,
+                        self.checked_integer_arithmetic,
+                    )?;
+                    return self.materialize_owned_value(negated);
+                }
                 eval_unary(*op, &value, self.surface, self.checked_integer_arithmetic)
             }
             Expr::Logical { left, op, right } => {
@@ -2239,6 +2278,9 @@ impl<'a> Evaluator<'a> {
         op: BinaryOp,
         right: Value,
     ) -> Result<Value, RuntimeError> {
+        if matches!(left, Value::Tensor(_)) || matches!(right, Value::Tensor(_)) {
+            return self.eval_tensor_binary(&left, op, &right);
+        }
         if !self.surface.floats_enabled() {
             return match (op, left, right) {
                 (BinaryOp::Add, Value::String(left), Value::String(right)) => {
@@ -2310,6 +2352,11 @@ impl<'a> Evaluator<'a> {
             (Value::List(values), Value::Int(index)) => {
                 let index = normalize_index(index, values.len())?;
                 self.clone_value(&values[index])
+            }
+            (Value::Tensor(tensor), Value::Int(index)) => {
+                let position = normalize_index(index, tensor.shape()[0])?;
+                self.charge(tensor::index_units(&tensor))?;
+                self.materialize_owned_value(tensor::index(&tensor, position))
             }
             (Value::String(value), Value::Int(index)) => {
                 let index = normalize_index(index, value.chars().count())?;
@@ -2454,10 +2501,11 @@ impl<'a> Evaluator<'a> {
                     Value::String(value) => value.len(),
                     Value::List(value) => value.len(),
                     Value::Dict(value) => value.len(),
+                    Value::Tensor(value) => value.shape()[0],
                     _ => {
                         return Err(RuntimeError::new(
                             "type_error",
-                            "len expects string, list, or dict",
+                            "len expects string, list, dict, or tensor",
                         ));
                     }
                 };
@@ -2580,6 +2628,12 @@ impl<'a> Evaluator<'a> {
             }
             "float" | "int" if self.surface.hcode_extensions() => {
                 self.eval_numeric_conversion(name, args).map(Some)
+            }
+            "tensor" | "zeros" | "shape" | "reshape" | "transpose" | "tolist" | "cast" | "sum"
+            | "dot" | "matmul" | "relu" | "gelu" | "softmax"
+                if self.surface.hcode_extensions() =>
+            {
+                self.eval_tensor_builtin(name, args).map(Some)
             }
             "sqrt" | "floor" | "ceil" | "round" | "exp" | "ln" if self.surface.floats_enabled() => {
                 let [arg] = args else {
@@ -2774,6 +2828,135 @@ impl<'a> Evaluator<'a> {
                 format!("{name} expects a number"),
             )),
         }
+    }
+
+    /// Elementwise tensor operators. `==` and `!=` compare structurally, and the
+    /// arithmetic operators follow the tensor rules. Every other operator is a
+    /// type error for tensors.
+    fn eval_tensor_binary(
+        &mut self,
+        left: &Value,
+        op: BinaryOp,
+        right: &Value,
+    ) -> Result<Value, RuntimeError> {
+        match op {
+            BinaryOp::Eq | BinaryOp::NotEq => {
+                self.charge(tensor::elementwise_units(left, right))?;
+                let equal = left == right;
+                Ok(Value::Bool(equal == matches!(op, BinaryOp::Eq)))
+            }
+            BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Div => {
+                self.charge(tensor::elementwise_units(left, right))?;
+                let value = tensor::binary(op, left, right, self.checked_integer_arithmetic)?;
+                self.materialize_owned_value(value)
+            }
+            _ => Err(RuntimeError::new(
+                "type_error",
+                "tensors support + - * / and == != only",
+            )),
+        }
+    }
+
+    /// Fails before any allocation when a tensor would exceed the element limit.
+    fn check_element_limit(&self, count: usize) -> Result<(), RuntimeError> {
+        let within =
+            u64::try_from(count).is_ok_and(|count| count <= self.limits.max_collection_items);
+        if within {
+            Ok(())
+        } else {
+            Err(value_limit_error())
+        }
+    }
+
+    /// CPU hcode tensor builtins. Each one checks its size, charges its work,
+    /// and only then computes the result.
+    fn eval_tensor_builtin(&mut self, name: &str, args: &[Expr]) -> Result<Value, RuntimeError> {
+        let arity = match name {
+            "zeros" | "reshape" | "cast" | "dot" | "matmul" => 2,
+            _ => 1,
+        };
+        if args.len() != arity {
+            return Err(RuntimeError::new(
+                "arity_error",
+                format!("{name} expects {arity} argument(s)"),
+            ));
+        }
+        let mut values = Vec::with_capacity(arity);
+        for arg in args {
+            values.push(self.eval_expr(arg)?);
+        }
+        let checked = self.checked_integer_arithmetic;
+        let result = match (name, values.as_slice()) {
+            ("tensor", [nested]) => {
+                let tensor = tensor::from_nested(nested)?;
+                self.charge(tensor::element_units(&tensor))?;
+                Value::Tensor(tensor)
+            }
+            ("zeros", [shape, dtype]) => {
+                let shape = tensor::shape_from_value(shape)?;
+                let dtype = tensor::dtype_from_value(dtype)?;
+                let count = tensor::shape_count(&shape)?;
+                self.check_element_limit(count)?;
+                self.charge(u64::try_from(count).unwrap_or(u64::MAX))?;
+                Value::Tensor(tensor::zeros(shape, dtype)?)
+            }
+            ("shape", [Value::Tensor(tensor)]) => {
+                self.charge(u64::try_from(tensor.shape().len()).unwrap_or(u64::MAX))?;
+                tensor::shape_value(tensor)
+            }
+            ("reshape", [Value::Tensor(tensor), shape]) => {
+                let shape = tensor::shape_from_value(shape)?;
+                self.charge(tensor::element_units(tensor))?;
+                Value::Tensor(tensor::reshape(tensor, shape)?)
+            }
+            ("transpose", [Value::Tensor(tensor)]) => {
+                self.charge(tensor::element_units(tensor))?;
+                Value::Tensor(tensor::transpose(tensor)?)
+            }
+            ("tolist", [Value::Tensor(tensor)]) => {
+                self.charge(tensor::element_units(tensor))?;
+                tensor::to_nested(tensor)
+            }
+            ("cast", [Value::Tensor(tensor), dtype]) => {
+                let dtype = tensor::dtype_from_value(dtype)?;
+                self.charge(tensor::element_units(tensor))?;
+                Value::Tensor(tensor::cast(tensor, dtype)?)
+            }
+            ("sum", [Value::Tensor(tensor)]) => {
+                self.charge(tensor::element_units(tensor))?;
+                tensor::sum(tensor, checked)?
+            }
+            ("dot", [Value::Tensor(left), Value::Tensor(right)]) => {
+                let length = tensor::dot_length(left, right)?;
+                self.charge(u64::try_from(length).unwrap_or(u64::MAX))?;
+                tensor::dot(left, right, checked)?
+            }
+            ("matmul", [Value::Tensor(left), Value::Tensor(right)]) => {
+                let plan = tensor::matmul_plan(left, right)?;
+                self.check_element_limit(plan.output_count()?)?;
+                self.charge(plan.units())?;
+                Value::Tensor(tensor::matmul(left, right, &plan, checked)?)
+            }
+            ("relu", [Value::Tensor(tensor)]) => {
+                self.charge(tensor::element_units(tensor) * tensor::RELU_UNITS_PER_ELEMENT)?;
+                Value::Tensor(tensor::relu(tensor)?)
+            }
+            ("gelu", [Value::Tensor(tensor)]) => {
+                self.charge(tensor::element_units(tensor) * tensor::GELU_UNITS_PER_ELEMENT)?;
+                Value::Tensor(tensor::gelu(tensor)?)
+            }
+            ("softmax", [Value::Tensor(tensor)]) => {
+                self.charge(tensor::element_units(tensor) * tensor::SOFTMAX_UNITS_PER_ELEMENT)?;
+                Value::Tensor(tensor::softmax(tensor)?)
+            }
+            _ => {
+                return Err(RuntimeError::new(
+                    "type_error",
+                    format!("{name} expects tensor arguments"),
+                ));
+            }
+        };
+        self.materialize_owned_value(result)
     }
 
     fn eval_int_arg(&mut self, expr: &Expr, name: &str) -> Result<i64, RuntimeError> {
@@ -3370,6 +3553,10 @@ fn append_debug_output(
         Value::String(value) => writer.write_str(value),
         Value::List(values) => write!(&mut writer, "{values:?}"),
         Value::Dict(values) => write!(&mut writer, "{values:?}"),
+        Value::Tensor(tensor) => match tensor::canonical_string(tensor) {
+            Ok(text) => writer.write_str(&text),
+            Err(_) => Err(std::fmt::Error),
+        },
         Value::Null => writer.write_str("null"),
     }
     .map_err(|_| output_limit_error())?;
@@ -3823,6 +4010,249 @@ mod tests {
         assert_eq!(
             hcode_error_code("fn sin(x) { return x; } return sin(1.0);"),
             "parse_error"
+        );
+    }
+
+    fn eval_hcode_with_budget(source: &str, budget: u64) -> Result<String, String> {
+        let max_output_bytes = ExecutionLimits::default().max_output_bytes;
+        let execution = ManagedExecutor
+            .execute_json_input(
+                source,
+                ExecutionLimits::for_managed_function_budget(budget),
+                "null",
+            )
+            .map_err(|error| error.to_string())?;
+        render_output_bounded(&execution.value, max_output_bytes).map_err(|error| error.to_string())
+    }
+
+    #[test]
+    fn tensors_render_in_canonical_form_and_convert_to_lists() {
+        assert_eq!(
+            eval_hcode("return tensor([[1, 2], [3, 4]]);").unwrap(),
+            r#"{"data":[1,2,3,4],"dtype":"i64","shape":[2,2]}"#
+        );
+        assert_eq!(
+            eval_hcode("return tensor([1, 2.5]);").unwrap(),
+            r#"{"data":[1.0,2.5],"dtype":"f64","shape":[2]}"#
+        );
+        assert_eq!(
+            eval_hcode("return zeros([2, 0], \"f64\");").unwrap(),
+            r#"{"data":[],"dtype":"f64","shape":[2,0]}"#
+        );
+        assert_eq!(
+            eval_hcode("return shape(zeros([2, 3], \"i64\"));").unwrap(),
+            "[2,3]"
+        );
+        assert_eq!(
+            eval_hcode("return tensor([[1, 2], [3, 4]])[1][0];").unwrap(),
+            "3"
+        );
+        assert_eq!(eval_hcode("return len(tensor([5, 6, 7]));").unwrap(), "3");
+        assert_eq!(
+            eval_hcode("return tolist(reshape(tensor([1, 2, 3, 4]), [2, 2]));").unwrap(),
+            "[[1,2],[3,4]]"
+        );
+        assert_eq!(
+            eval_hcode("return tolist(transpose(tensor([[1, 2, 3], [4, 5, 6]])));").unwrap(),
+            "[[1,4],[2,5],[3,6]]"
+        );
+        assert_eq!(
+            eval_hcode("return tolist(cast(tensor([1.9, -2.9]), \"i64\"));").unwrap(),
+            "[1,-2]"
+        );
+        assert_eq!(
+            eval_hcode("return tolist(cast(tensor([1, 2]), \"f64\"));").unwrap(),
+            "[1.0,2.0]"
+        );
+        assert_eq!(eval_hcode("return sum(tensor([1, 2, 3]));").unwrap(), "6");
+        assert_eq!(
+            eval_hcode("return sum(tensor([0.5, 0.25]));").unwrap(),
+            "0.75"
+        );
+    }
+
+    #[test]
+    fn tensor_arithmetic_is_elementwise_with_scalar_broadcast() {
+        assert_eq!(
+            eval_hcode("return tolist(tensor([1, 2]) + tensor([10, 20]));").unwrap(),
+            "[11,22]"
+        );
+        assert_eq!(
+            eval_hcode("return tolist(tensor([1, 2]) * 3);").unwrap(),
+            "[3,6]"
+        );
+        assert_eq!(
+            eval_hcode("return tolist(10 - tensor([1, 2]));").unwrap(),
+            "[9,8]"
+        );
+        assert_eq!(
+            eval_hcode("return tolist(tensor([1, 2]) / 2.0);").unwrap(),
+            "[0.5,1.0]"
+        );
+        assert_eq!(
+            eval_hcode("return tolist(-tensor([1, -2]));").unwrap(),
+            "[-1,2]"
+        );
+        assert_eq!(
+            eval_hcode("return tensor([1, 2]) == tensor([1, 2]);").unwrap(),
+            "true"
+        );
+        assert_eq!(
+            eval_hcode("return tensor([1, 2]) != tensor([1, 3]);").unwrap(),
+            "true"
+        );
+        assert_eq!(eval_hcode("return tensor([1, 2]) == 1;").unwrap(), "false");
+        assert_eq!(
+            hcode_error_code("return tensor([1, 2]) + tensor([1, 2, 3]);"),
+            "type_error"
+        );
+        assert_eq!(
+            hcode_error_code("return tensor([9223372036854775807]) + 1;"),
+            "integer_arithmetic_overflow"
+        );
+        assert_eq!(
+            hcode_error_code("return tensor([1e308]) * 10.0;"),
+            "runtime_error"
+        );
+        assert_eq!(
+            hcode_error_code("return tensor([1, 2]) / 0;"),
+            "runtime_error"
+        );
+        assert_eq!(
+            hcode_error_code("return tensor([1]) < tensor([2]);"),
+            "type_error"
+        );
+    }
+
+    #[test]
+    fn matmul_and_dot_follow_row_major_order() {
+        assert_eq!(
+            eval_hcode(
+                "return tolist(matmul(tensor([[1, 2], [3, 4]]), tensor([[5, 6], [7, 8]])));"
+            )
+            .unwrap(),
+            "[[19,22],[43,50]]"
+        );
+        assert_eq!(
+            eval_hcode("return tolist(matmul(tensor([[1, 2], [3, 4]]), tensor([1, 1])));").unwrap(),
+            "[3,7]"
+        );
+        assert_eq!(
+            eval_hcode("return tolist(matmul(tensor([1, 1]), tensor([[1, 2], [3, 4]])));").unwrap(),
+            "[4,6]"
+        );
+        assert_eq!(
+            eval_hcode("return tolist(matmul(tensor([[0.5]]), tensor([[4]])));").unwrap(),
+            "[[2.0]]"
+        );
+        assert_eq!(
+            eval_hcode("return dot(tensor([1, 2, 3]), tensor([4, 5, 6]));").unwrap(),
+            "32"
+        );
+        assert_eq!(
+            hcode_error_code("return matmul(tensor([[1, 2]]), tensor([[1, 2]]));"),
+            "type_error"
+        );
+        assert_eq!(
+            hcode_error_code("return dot(tensor([1, 2]), tensor([1]));"),
+            "type_error"
+        );
+        assert_eq!(
+            hcode_error_code("return matmul(zeros([400, 1], \"i64\"), zeros([1, 400], \"i64\"));"),
+            "value_limit_exceeded"
+        );
+    }
+
+    #[test]
+    fn activations_and_softmax_are_deterministic_and_normalized() {
+        assert_eq!(
+            eval_hcode("return tolist(relu(tensor([-1, 2])));").unwrap(),
+            "[0,2]"
+        );
+        assert_eq!(
+            eval_hcode("return tolist(relu(tensor([-0.5, 0.5])));").unwrap(),
+            "[0.0,0.5]"
+        );
+        assert_eq!(
+            eval_hcode("return tolist(gelu(tensor([0.0])));").unwrap(),
+            "[0.0]"
+        );
+        let gelu_one = parse_output(&eval_hcode("return tolist(gelu(tensor([1.0])))[0];").unwrap());
+        let x = 1.0_f64;
+        let inner = 0.797_884_560_802_865_4_f64 * (x + 0.044_715 * x * x * x);
+        let reference = 0.5 * x * (1.0 + inner.tanh());
+        assert!((gelu_one - reference).abs() < 1e-14, "gelu(1.0)");
+        assert_eq!(
+            eval_hcode("return tolist(softmax(tensor([0.0, 0.0])));").unwrap(),
+            "[0.5,0.5]"
+        );
+        let probabilities =
+            eval_hcode("return tolist(softmax(tensor([[1.0, 2.0, 3.0], [0.0, 0.0, 0.0]])));")
+                .unwrap();
+        assert!(probabilities.starts_with("[["), "{probabilities}");
+        let total = eval_hcode("return sum(softmax(tensor([1.0, 2.0, 3.0])));").unwrap();
+        assert!(
+            (parse_output(&total) - 1.0).abs() < 1e-15,
+            "softmax total {total}"
+        );
+    }
+
+    #[test]
+    fn tensor_builtins_check_size_rank_dtype_and_budget() {
+        assert_eq!(
+            hcode_error_code("return zeros([400, 400], \"i64\");"),
+            "value_limit_exceeded"
+        );
+        assert_eq!(hcode_error_code("return zeros([], \"i64\");"), "type_error");
+        assert_eq!(
+            hcode_error_code("return zeros([1, 1, 1, 1, 1, 1, 1, 1, 1], \"i64\");"),
+            "type_error"
+        );
+        assert_eq!(hcode_error_code("return zeros([2], \"u8\");"), "type_error");
+        assert_eq!(
+            hcode_error_code("return reshape(tensor([1, 2, 3]), [2, 2]);"),
+            "type_error"
+        );
+        assert_eq!(
+            hcode_error_code("return transpose(tensor([1, 2]));"),
+            "type_error"
+        );
+        assert_eq!(
+            hcode_error_code("for x in tensor([1]) { return x; }"),
+            "type_error"
+        );
+        // Ten elements cost ten units, so a budget of five stops before the work.
+        assert_eq!(
+            eval_hcode_with_budget("return sum(zeros([10], \"i64\"));", 5)
+                .unwrap_err()
+                .split(':')
+                .next(),
+            Some("budget_exhausted")
+        );
+        // The tensor surface is closed to v0 and to hcode-gpu.
+        let error = ManagedExecutor
+            .execute("return tensor([1]);", ExecutionLimits::default())
+            .unwrap_err();
+        assert_eq!(error.code(), "name_error");
+        assert!(
+            eval_gpu("return tensor([1]);", "null")
+                .unwrap_err()
+                .starts_with("name_error")
+        );
+    }
+
+    #[test]
+    fn print_writes_the_canonical_tensor_form() {
+        let execution = ManagedExecutor
+            .execute_json_input(
+                "print(tensor([1, 2])); return 0;",
+                ExecutionLimits::for_managed_function_budget(1000),
+                "null",
+            )
+            .unwrap();
+        assert_eq!(
+            execution.output,
+            "{\"data\":[1,2],\"dtype\":\"i64\",\"shape\":[2]}\n"
         );
     }
 

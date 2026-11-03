@@ -65,12 +65,12 @@ if count > 0 { count } else { 0 };
 
 ### 型別與運算
 
-CPU hcode 支援 signed `i64` 整數、有限的 `f64` 浮點數、boolean、string、list、string-keyed dict 與 `null`。
+CPU hcode 支援 signed `i64` 整數、有限的 `f64` 浮點數、boolean、string、list、string-keyed dict、`null`，以及由 tensor builtins 建立的 tensor。
 
 | 寫法 | 說明 |
 | --- | --- |
 | `1.5`、`1e3` | 浮點數常量；`-0.0` 會正規化為 `0.0`，`1e400` 這類超出範圍的常量會被拒絕 |
-| `+ - * /` | 整數與浮點算術；整數超出 i64 範圍、除以零，或任何浮點運算產生 NaN／無限大，都會失敗 |
+| `+ - * /` | 整數與浮點算術；整數超出 i64 範圍、除以零，或任何浮點運算產生 NaN／無限大，都會失敗。tensor 逐元素運算要求同形狀，或另一側是純量 |
 | `%` | 整數取餘（CPU hcode）；結果符號與被除數相同，除以零失敗 |
 | `& \| ^ ~ << >>` | 位元運算（CPU hcode）；移位數須在 0 到 63，`>>` 為算術右移 |
 | `== != < <= > >=` | 比較運算，運算元仍須符合型別要求 |
@@ -90,6 +90,10 @@ CPU hcode 支援 signed `i64` 整數、有限的 `f64` 浮點數、boolean、str
 | `abs(n)`、`min(a, b)`、`max(a, b)` | 整數絕對值、最小值與最大值（CPU hcode）；`abs(i64::MIN)` 會失敗 |
 | `range(stop)`、`range(start, stop)`、`range(start, stop, step)` | 產生 int list（CPU hcode）；每個元素計一次用量，超過 collection 上限會失敗；step 不可為 0 |
 | `wrapping_add`、`wrapping_sub`、`wrapping_mul` | 整數運算保留低 64 位元，不因溢位失敗（CPU hcode） |
+| `tensor(list)`、`zeros(shape, "i64")`、`zeros(shape, "f64")` | 建立 tensor（CPU hcode）。巢狀 list 必須是矩形；含任一 float 時為 `f64`；元素數超過 collection 上限會失敗 |
+| `shape(t)`、`reshape(t, shape)`、`transpose(t)`、`tolist(t)`、`cast(t, "f64")` | 查詢或改變形狀、轉成巢狀 list、改變 dtype。`transpose` 只支援 rank 2 |
+| `sum(t)`、`dot(a, b)`、`matmul(a, b)` | 總和、向量內積，以及矩陣乘法（矩陣×矩陣、矩陣×向量、向量×矩陣）。每次乘加計一次用量 |
+| `relu(t)`、`gelu(t)`、`softmax(t)` | 激活函式。`gelu` 每元素計 24 單位；`softmax` 沿最後一維計算，每元素計 20 單位 |
 | `float(x)`、`int(x)` | 整數與浮點數互轉（CPU hcode）；`int` 向零截斷，超出 int64 範圍會失敗 |
 | `sqrt`、`floor`、`ceil`、`round` | 平方根與取整（CPU hcode）；負數開根號會失敗 |
 | `exp`、`ln`、`pow`、`sin`、`cos`、`tanh` | 超越函式（CPU hcode）；使用固定的軟體級數而非主機 libm，每次呼叫另計 16 單位用量。`sin`、`cos` 接受 `\|x\|` 至 1000000；`ln` 需要正數 |
