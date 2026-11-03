@@ -369,8 +369,10 @@ For a supplied artifact named `model` with an F32 tensor `weights = [[1,2],[3,4]
 
 ```hcode
 let w = load_tensor("model", "weights");
-return tolist(matmul(w, tensor([1.0, 2.0]))); // [5.0,11.0]
+return tolist(matmul(w, tensor([1.0, 2.0])));
 ```
+
+The output is `[5.0,11.0]`.
 
 Storage types `I8`, `U8`, `I16`, `I32`, and `I64` decode to exact i64 values;
 `F16`, `BF16`, `F32`, and `F64` decode to finite f64. Negative zero normalizes to
@@ -396,8 +398,76 @@ work, not interpreter `executed_ops`.
 
 This API does not expose artifact outputs, arbitrary model code, ONNX/GGUF
 execution, GPU loading, or an automatic large-language-model inference engine.
-At this layer the host supplies the bytes; network upload and task transport are
-separate platform integration responsibilities.
+
+### Submitting model inputs
+
+The CLI prepares the manifests, creates the task, then uploads the exact bytes it
+hashed, in chunks of at most 1 MiB. Repeat `--artifact` for multiple files:
+
+```powershell
+hivemind-bin submit inference.hcode --api http://127.0.0.1:8082 --username alice --password "$env:HIVEMIND_PASSWORD" --input "[1.0,2.0]" --artifact model=weights.safetensors --max-cpt 10000
+```
+
+Use the normal CLI authentication options. The name before `=` is the lookup key
+used by `load_tensor`; the path is read by the CLI, never by the hcode program.
+Task artifact IDs use the platform's safe ASCII identifier rules. Tensor names
+inside the safetensors header retain the UTF-8 rules above. A runnable
+[linear inference example](../examples/hcode/tensor-inference/README.md) includes
+a standard-library Python generator for a multi-chunk safetensors fixture.
+
+The task input sent to Master/Nodepool is an explicit JSON envelope:
+
+```json
+{
+  "$hcode_tensor_inputs": 1,
+  "input": [1.0, 2.0],
+  "artifacts": ["ArtifactManifest objects, not file paths or URLs"]
+}
+```
+
+The example illustrates the envelope shape; each `artifacts` entry must actually
+be a validated input `ArtifactManifest` with MIME type
+`application/x-safetensors`, a whole-file SHA-256, size, and a complete contiguous
+chunk manifest. Inline bytes are not accepted. The CLI constructs these objects;
+clients do not need to construct the envelope manually. The complete envelope
+must still fit the 1 MiB JSON input limit. The root key `$hcode_tensor_inputs` is
+reserved: its presence opts into strict envelope validation, not ordinary input.
+
+The consensus request/input digest binds the **complete envelope**, including
+all model hashes and chunk coordinates. Workers pass only its `input` field to
+the interpreter. Existing JSON inputs without the reserved key are unchanged.
+
+Nodepool persists manifests with the task before accepting chunks through the
+existing Master endpoint
+`POST /api/tasks/{task_id}/general-compute/artifacts/chunk`. The historical route
+name does not change the task runtime: this remains CPU `hcode`, not general
+compute. Uploads require the task owner's session (or an administrator), and
+cannot replace pinned bytes. Incomplete uploads leave the task pending, without
+an execution hold or replica assignment, and do not occupy dispatch candidate
+slots. Expired inputs fail a pending task without billing once it has no held
+usage or active Worker reservations. Identical chunk uploads are idempotent;
+this CLI version does not offer a resume command.
+
+Artifact tasks have an at-most-24-hour input-availability deadline, reserve at
+least 1 GiB of Worker memory, and share a 1 GiB per-owner quota measured in
+declared artifact bytes (not physical PostgreSQL storage). Reservations count
+before upload. Expired hcode payloads are reclaimed when that owner submits new
+artifact work; this is not a periodic garbage collector. Storage and transfer
+have hard bounds but no separate CPT price in this implementation. Execution
+continues to use the normal hcode metering and consensus settlement.
+
+Workers download only declared chunks with a Nodepool-issued, attempt-bound
+execution token. Each request checks the current task, owner, Worker, replica,
+round, request digest, deadline, and active assignment. A session token or stale
+execution token cannot read model bytes. The Worker checks chunk hashes and the
+whole-file digest and validates safetensors layout before execution. Cancellation
+also stops an outstanding download. This transport adds no network or filesystem
+capability to hcode itself.
+
+Assigned Workers necessarily receive the input and model bytes. Authentication
+limits access to assigned replicas; it does not make public-network Workers
+confidential or prevent them from retaining bytes they received. Do not submit
+private data or model weights that cannot be disclosed to those providers.
 
 ## hcode-gpu extension
 

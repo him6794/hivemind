@@ -1023,6 +1023,9 @@ fn validate_task_input_contract(
             Ok(())
         }
         _ if torrent.trim().is_empty() => Err("torrent is required"),
+        "hcode" => general_compute_runtime::hcode_artifacts::parse_input(torrent)
+            .map(|_| ())
+            .map_err(|_| "invalid hcode JSON input or tensor artifact envelope"),
         _ => Ok(()),
     }
 }
@@ -2002,6 +2005,46 @@ impl GrpcGeneralComputeArtifactService {
 
 #[tonic::async_trait]
 impl GeneralComputeArtifactService for GrpcGeneralComputeArtifactService {
+    async fn download_hcode_chunk(
+        &self,
+        request: Request<hivemind_proto::HcodeArtifactChunkDownload>,
+    ) -> Result<Response<hivemind_proto::HcodeArtifactChunkDownloadResponse>, Status> {
+        let req = request.into_inner();
+        if !is_safe_task_id(&req.task_id) || req.offset < 0 || req.token.len() > 16_384 {
+            return Err(Status::invalid_argument(
+                "invalid hcode artifact chunk request",
+            ));
+        }
+        general_compute_runtime::validate_artifact_id(&req.artifact_id)
+            .map_err(Status::invalid_argument)?;
+        let verifier = hivemind_auth::worker_execution::WorkerExecutionVerifier::from_pem(
+            &self.state.worker_execution_public_key_pem,
+        )
+        .map_err(|_| Status::internal("Worker execution public key is invalid"))?;
+        let claims = verifier
+            .decode_execution_claims(&req.token)
+            .map_err(|_| Status::unauthenticated("Invalid worker execution token"))?;
+        if claims.claims.role.as_deref() != Some("worker-execution")
+            || claims.claims.task_id.as_deref() != Some(req.task_id.as_str())
+        {
+            return Err(Status::permission_denied(
+                "artifact access is not bound to this task",
+            ));
+        }
+        let bytes = self
+            .state
+            .scheduler
+            .hcode_artifact_chunk_for_replica(&claims, &req.artifact_id, req.offset)
+            .await
+            .map_err(|error| Status::internal(error.to_string()))?
+            .ok_or_else(|| {
+                Status::permission_denied("artifact or active replica assignment is unavailable")
+            })?;
+        Ok(Response::new(
+            hivemind_proto::HcodeArtifactChunkDownloadResponse { bytes },
+        ))
+    }
+
     async fn upload_chunk(
         &self,
         request: Request<GeneralComputeArtifactChunkUpload>,
@@ -2038,10 +2081,12 @@ impl GeneralComputeArtifactService for GrpcGeneralComputeArtifactService {
                 "task is not accepting artifact chunks",
             ));
         }
-        if task.runtime.as_deref() != Some(general_compute_runtime::GENERAL_COMPUTE_RUNTIME_VERSION)
-        {
+        if !matches!(
+            task.runtime.as_deref(),
+            Some("general-compute-v1alpha1" | "hcode")
+        ) {
             return Err(Status::failed_precondition(
-                "task is not a general-compute task",
+                "task does not accept input artifacts",
             ));
         }
 
@@ -4751,6 +4796,8 @@ async fn request_worker_stop(
 }
 #[cfg(test)]
 mod tests {
+    include!("hcode_artifact_tests.rs");
+
     use super::*;
     use chrono::Utc;
     use hivemind_config::HivemindConfig;

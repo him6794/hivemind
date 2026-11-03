@@ -89,6 +89,20 @@ fn resource_sample_is_fresh(
 pub struct ExecutionAttemptContext {
     pub worker_id: Option<String>,
     pub transfer_generation: Option<i64>,
+    pub hcode_artifact_access: Option<HcodeArtifactAccess>,
+}
+
+#[derive(Clone)]
+pub struct HcodeArtifactAccess {
+    pub token: String,
+    pub authority: Arc<dyn grpc_server::TransferLeaseAuthority>,
+}
+
+impl std::fmt::Debug for HcodeArtifactAccess {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HcodeArtifactAccess")
+            .finish_non_exhaustive()
+    }
 }
 
 pub struct WorkerExecutor {
@@ -178,7 +192,7 @@ impl WorkerExecutor {
             latest_resource_sample: Arc::new(std::sync::RwLock::new(None)),
             resource_refresh_lock: Arc::new(Mutex::new(())),
             task_runner: Arc::new(
-                move |task, cancellation, _consensus_request, _execution_context| {
+                move |task, cancellation, _consensus_request, execution_context| {
                     let config = runner_config.clone();
                     let reference_executor = reference_executor.clone();
                     let cas_store = cas_store.clone();
@@ -187,6 +201,10 @@ impl WorkerExecutor {
                     let capability_matrix = capability_matrix.clone();
                     let trusted_registration = trusted_registration.clone();
                     Box::pin(async move {
+                        if let Some(access) = execution_context.hcode_artifact_access {
+                            return executor::run_hcode_artifact_task(task, cancellation, access)
+                                .await;
+                        }
                         executor::run_task_with_cancel_and_backends_and_trusted_registration_and_managed_gpu_with_context(
                         &task,
                         &config,

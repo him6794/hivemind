@@ -14,6 +14,7 @@ pub mod differential;
 pub mod execution;
 pub mod gpu;
 pub mod gpu_tensor;
+pub mod hcode_artifacts;
 pub mod managed_gpu;
 pub mod monte_carlo;
 pub mod numeric;

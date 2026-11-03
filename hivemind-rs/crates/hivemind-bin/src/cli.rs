@@ -2,6 +2,9 @@ use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
+#[path = "cli_artifacts.rs"]
+mod artifacts;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CliCommand {
     Service(String),
@@ -17,6 +20,7 @@ pub struct SubmitCommand {
     pub password: String,
     pub source_path: String,
     pub input: String,
+    pub artifacts: Vec<(String, String)>,
     pub task_id: String,
     pub cpu_score: Option<i32>,
     pub memory_gb: Option<i32>,
@@ -56,7 +60,7 @@ pub fn parse_cli_args(args: &[String]) -> Result<CliCommand> {
         .get(2)
         .ok_or_else(|| {
             anyhow!(
-                "Usage: hivemind submit <function-source> --username <user> --password <pass> [--input <json>] [--task-id <id>]"
+                "Usage: hivemind submit <function-source> --username <user> --password <pass> [--input <json>] [--artifact <name=path.safetensors>] [--task-id <id>]"
             )
         })?
         .clone();
@@ -68,6 +72,7 @@ pub fn parse_cli_args(args: &[String]) -> Result<CliCommand> {
         task_id: derive_task_id(&source_path)?,
         source_path,
         input: String::new(),
+        artifacts: Vec::new(),
         cpu_score: None,
         memory_gb: None,
         gpu_score: None,
@@ -89,6 +94,7 @@ pub fn parse_cli_args(args: &[String]) -> Result<CliCommand> {
             "--password" => submit.password = value.clone(),
             "--task-id" => submit.task_id = parse_task_id_flag(value)?,
             "--input" => submit.input = value.clone(),
+            "--artifact" => submit.artifacts.push(artifacts::parse_spec(value)?),
             "--cpu-score" => submit.cpu_score = Some(parse_i32_flag(flag, value)?),
             "--memory-gb" => submit.memory_gb = Some(parse_i32_flag(flag, value)?),
             "--gpu-score" => submit.gpu_score = Some(parse_i32_flag(flag, value)?),
@@ -279,6 +285,7 @@ pub async fn run_submit(submit: SubmitCommand) -> Result<()> {
     if task_source.trim().is_empty() {
         return Err(anyhow!("{} is empty", submit.source_path));
     }
+    let prepared = artifacts::PreparedArtifacts::prepare(&submit.input, &submit.artifacts).await?;
 
     let client = reqwest::Client::new();
     let token = login(
@@ -291,7 +298,9 @@ pub async fn run_submit(submit: SubmitCommand) -> Result<()> {
 
     // hcode tasks carry their JSON input in the `torrent` field;
     // Nodepool stores it verbatim as the task input reference.
-    let input = if submit.input.trim().is_empty() {
+    let input = if let Some(prepared) = &prepared {
+        Some(prepared.input_json.clone())
+    } else if submit.input.trim().is_empty() {
         None
     } else {
         Some(submit.input.clone())
@@ -329,7 +338,7 @@ pub async fn run_submit(submit: SubmitCommand) -> Result<()> {
     let create_url = format!("{}/api/tasks", submit.api_base);
     let created = client
         .post(&create_url)
-        .bearer_auth(token)
+        .bearer_auth(&token)
         .json(&body)
         .send()
         .await
@@ -348,6 +357,11 @@ pub async fn run_submit(submit: SubmitCommand) -> Result<()> {
         ));
     }
 
+    if let Some(prepared) = prepared {
+        prepared
+            .upload(&client, &submit.api_base, &token, &submit.task_id)
+            .await?;
+    }
     if let Some(task) = task_response.task {
         println!("Submitted task {} ({})", task.task_id, task.status);
     } else {

@@ -1,0 +1,2 @@
+let weights = load_tensor_slice("model", "weights", 299996, [2, 2]);
+return tolist(matmul(weights, tensor(input)));

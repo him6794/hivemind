@@ -233,10 +233,84 @@ fn failed_managed_task_result(
     })
 }
 
+pub(crate) async fn run_hcode_artifact_task(
+    task: Task,
+    mut cancel_rx: watch::Receiver<bool>,
+    access: crate::HcodeArtifactAccess,
+) -> Result<super::TaskResult> {
+    if !is_managed_function_task(&task) {
+        anyhow::bail!("tensor artifacts require hcode");
+    }
+    let start = Instant::now();
+    let envelope = general_compute_runtime::hcode_artifacts::parse_input(
+        task.torrent_source.as_deref().unwrap_or("null"),
+    )
+    .map_err(anyhow::Error::msg)?
+    .ok_or_else(|| anyhow::anyhow!("tensor input envelope is missing"))?;
+    let download = async {
+        let mut inputs = managed_function_runtime::TensorArtifacts::default();
+        for artifact in &envelope.artifacts {
+            let mut bytes = Vec::with_capacity(artifact.size_bytes as usize);
+            for chunk in &artifact.chunks {
+                let payload = access
+                    .authority
+                    .download_hcode_chunk(
+                        &access.token,
+                        &task.task_id,
+                        &artifact.artifact_id,
+                        chunk.offset,
+                    )
+                    .await
+                    .map_err(|error| {
+                        anyhow::anyhow!("tensor artifact download failed: {error:?}")
+                    })?;
+                if payload.len() as u64 != chunk.size_bytes
+                    || general_compute_runtime::sha256_digest(&payload) != chunk.sha256
+                {
+                    anyhow::bail!("tensor artifact chunk does not match the task manifest");
+                }
+                bytes.extend_from_slice(&payload);
+            }
+            inputs.insert(artifact.artifact_id.clone(), bytes, &artifact.sha256)?;
+        }
+        Ok::<_, anyhow::Error>(inputs)
+    };
+    let inputs = tokio::select! {
+        result = download => result?,
+        _ = wait_for_cancellation(&mut cancel_rx) => anyhow::bail!("Task execution stopped during tensor transfer"),
+    };
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let execution_cancelled = cancelled.clone();
+    let mut execution = tokio::task::spawn_blocking(move || {
+        execute_managed_function_task_with_artifacts(
+            &task,
+            start,
+            &execution_cancelled,
+            Some(&inputs),
+        )
+    });
+    tokio::select! {
+        result = &mut execution => result.map_err(anyhow::Error::from)?,
+        _ = wait_for_cancellation(&mut cancel_rx) => {
+            cancelled.store(true, Ordering::Release);
+            execution.await.map_err(anyhow::Error::from)?
+        }
+    }
+}
+
 fn execute_managed_function_task(
     task: &Task,
     start: Instant,
     cancelled: &AtomicBool,
+) -> Result<super::TaskResult> {
+    execute_managed_function_task_with_artifacts(task, start, cancelled, None)
+}
+
+fn execute_managed_function_task_with_artifacts(
+    task: &Task,
+    start: Instant,
+    cancelled: &AtomicBool,
+    artifacts: Option<&managed_function_runtime::TensorArtifacts>,
 ) -> Result<super::TaskResult> {
     let runtime = MANAGED_DSL_V1_RUNTIME_VERSION;
     let source = task
@@ -249,27 +323,49 @@ fn execute_managed_function_task(
         .as_deref()
         .filter(|input| !input.trim().is_empty())
         .unwrap_or("null");
+    let envelope =
+        general_compute_runtime::hcode_artifacts::parse_input(input).map_err(anyhow::Error::msg)?;
+    let decoded_input;
+    let input = if let Some(envelope) = envelope {
+        if artifacts.is_none() {
+            anyhow::bail!("task tensor artifacts were not prepared");
+        }
+        decoded_input = serde_json::to_string(&envelope.input)?;
+        decoded_input.as_str()
+    } else {
+        input
+    };
     let limits = managed_function_limits(task)?;
     let max_output_bytes = limits.max_output_bytes;
-    let execution =
-        match ManagedExecutor.execute_json_input_with_cancel(source, limits, input, cancelled) {
-            Ok(execution) => execution,
-            Err(error) => {
-                let error_message = if error.code() == "cancelled" {
-                    "Task execution stopped".to_string()
-                } else {
-                    error.to_string()
-                };
-                return failed_managed_task_result(
-                    task,
-                    start,
-                    error.code(),
-                    error_message,
-                    error.partial_receipt(),
-                    managed_function_receipt_metadata(),
-                );
-            }
-        };
+    let evaluated = if let Some(artifacts) = artifacts {
+        ManagedExecutor.execute_json_input_with_artifacts(
+            source,
+            limits,
+            input,
+            artifacts,
+            Some(cancelled),
+        )
+    } else {
+        ManagedExecutor.execute_json_input_with_cancel(source, limits, input, cancelled)
+    };
+    let execution = match evaluated {
+        Ok(execution) => execution,
+        Err(error) => {
+            let error_message = if error.code() == "cancelled" {
+                "Task execution stopped".to_string()
+            } else {
+                error.to_string()
+            };
+            return failed_managed_task_result(
+                task,
+                start,
+                error.code(),
+                error_message,
+                error.partial_receipt(),
+                managed_function_receipt_metadata(),
+            );
+        }
+    };
     let output = if execution.output.is_empty() {
         match render_output_bounded(&execution.value, max_output_bytes) {
             Ok(output) => output,
@@ -1794,6 +1890,8 @@ mod tests {
     use serde_json::Value;
     use tempfile::TempDir;
     use uuid::Uuid;
+
+    include!("hcode_artifact_tests.rs");
 
     #[test]
     fn failed_production_result_retains_diagnostic_detail() {

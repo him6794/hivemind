@@ -43,6 +43,18 @@ pub enum TransferLeaseAuthorityError {
 
 #[tonic::async_trait]
 pub trait TransferLeaseAuthority: Send + Sync {
+    async fn download_hcode_chunk(
+        &self,
+        _token: &str,
+        _task_id: &str,
+        _artifact_id: &str,
+        _offset: u64,
+    ) -> Result<Vec<u8>, TransferLeaseAuthorityError> {
+        Err(TransferLeaseAuthorityError::Denied(
+            "hcode artifact source is unavailable".into(),
+        ))
+    }
+
     #[allow(clippy::too_many_arguments)]
     async fn validate(
         &self,
@@ -90,6 +102,52 @@ impl NodepoolTransferLeaseAuthority {
 
 #[tonic::async_trait]
 impl TransferLeaseAuthority for NodepoolTransferLeaseAuthority {
+    async fn download_hcode_chunk(
+        &self,
+        token: &str,
+        task_id: &str,
+        artifact_id: &str,
+        offset: u64,
+    ) -> Result<Vec<u8>, TransferLeaseAuthorityError> {
+        let configured = self
+            .endpoint
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone();
+        let endpoint = if self.require_external_overlay {
+            hivemind_client_runtime::external_overlay_endpoint(
+                hivemind_client_runtime::ClientRole::Worker,
+                &configured,
+            )
+            .await
+            .map_err(|error| TransferLeaseAuthorityError::Unavailable(error.to_string()))?
+        } else {
+            configured
+        };
+        if endpoint.trim().is_empty() {
+            return Err(TransferLeaseAuthorityError::Unavailable(
+                "Nodepool endpoint is not ready".into(),
+            ));
+        }
+        let offset = i64::try_from(offset)
+            .map_err(|_| TransferLeaseAuthorityError::Denied("invalid artifact offset".into()))?;
+        let request = hivemind_proto::HcodeArtifactChunkDownload {
+            token: token.to_owned(),
+            task_id: task_id.to_owned(),
+            artifact_id: artifact_id.to_owned(),
+            offset,
+        };
+        let response = tokio::time::timeout(Duration::from_secs(30), async {
+            let mut client = hivemind_proto::general_compute_artifact_service_client::GeneralComputeArtifactServiceClient::connect(
+                crate::nodepool_client::nodepool_endpoint(&endpoint),
+            ).await.map_err(|error| error.to_string())?
+                .max_decoding_message_size(general_compute_runtime::hcode_artifacts::CHUNK_BYTES + 1024);
+            client.download_hcode_chunk(request).await.map_err(|error| error.to_string())
+        }).await.map_err(|_| TransferLeaseAuthorityError::Unavailable("artifact download timed out".into()))?
+            .map_err(TransferLeaseAuthorityError::Unavailable)?;
+        Ok(response.into_inner().bytes)
+    }
+
     async fn validate(
         &self,
         token: &str,
@@ -1339,6 +1397,27 @@ impl WorkerNodeService for GrpcWorkerNodeService {
                 ));
             }
         }
+        let hcode_artifact_access = if req.runtime.trim() == "hcode"
+            && general_compute_runtime::hcode_artifacts::parse_input(&req.torrent)
+                .map_err(Status::invalid_argument)?
+                .is_some()
+        {
+            let authority = self
+                .state
+                .transfer_lease_authority
+                .lock()
+                .map_err(|_| Status::internal("artifact authority store poisoned"))?
+                .clone()
+                .ok_or_else(|| {
+                    Status::failed_precondition("Nodepool artifact authority is unavailable")
+                })?;
+            Some(crate::HcodeArtifactAccess {
+                token: req.token.clone(),
+                authority,
+            })
+        } else {
+            None
+        };
         if let crate::runtime_admission::RuntimeRoute::GeneralComputeV1Alpha1(request) = admitted {
             request_identity.execution_id = request.execution_id.clone();
             request_identity.attempt_id = request.attempt_id.clone();
@@ -1387,6 +1466,7 @@ impl WorkerNodeService for GrpcWorkerNodeService {
         let execution_context = ExecutionAttemptContext {
             worker_id: claims.worker_id.clone(),
             transfer_generation: transfer_generation_for_execution,
+            hcode_artifact_access,
         };
         let limits = req.resource_limits.unwrap_or_default();
         let task = Task {

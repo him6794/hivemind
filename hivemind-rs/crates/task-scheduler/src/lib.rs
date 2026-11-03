@@ -119,6 +119,17 @@ impl TaskScheduler {
             .await
     }
 
+    pub async fn hcode_artifact_chunk_for_replica(
+        &self,
+        claims: &hivemind_auth::worker_execution::WorkerExecutionClaims,
+        artifact_id: &str,
+        offset: i64,
+    ) -> Result<Option<Vec<u8>>> {
+        self.repo
+            .hcode_artifact_chunk_for_replica(claims, artifact_id, offset)
+            .await
+    }
+
     pub async fn list_user_tasks(&self, owner: &str) -> Result<Vec<Task>> {
         self.repo.find_by_owner(owner).await
     }

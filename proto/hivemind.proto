@@ -625,6 +625,18 @@ message GeneralComputeArtifactChunkUploadResponse {
     int64 accepted_chunks = 3;
 }
 
+// Worker -> Nodepool: only a live hcode replica may read its task's inputs.
+message HcodeArtifactChunkDownload {
+    string token = 1; // Nodepool-issued, attempt-bound execution token
+    string task_id = 2;
+    string artifact_id = 3;
+    int64 offset = 4;
+}
+
+message HcodeArtifactChunkDownloadResponse {
+    bytes bytes = 1; // bounded to 1 MiB; Worker verifies chunk and complete digests
+}
+
 // Nodepool -> Worker: authenticated admission/readiness for a
 // general-compute attempt.  Chunk uploads must happen only after this
 // request has established the assignment and immutable request identity.
@@ -1239,6 +1251,7 @@ service GeneralComputeChunkService {
 // manifest-bound bytes owned by the task account.
 service GeneralComputeArtifactService {
     rpc UploadChunk(GeneralComputeArtifactChunkUpload) returns (GeneralComputeArtifactChunkUploadResponse);
+    rpc DownloadHcodeChunk(HcodeArtifactChunkDownload) returns (HcodeArtifactChunkDownloadResponse);
 }
 
 service BatchRuntimeService {

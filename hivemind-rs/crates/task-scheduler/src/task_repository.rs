@@ -2331,6 +2331,9 @@ impl TaskRepository {
                 "managed consensus assignments require Worker endpoint and provider identities"
             );
         }
+        if !self.hcode_artifacts_ready(task).await? {
+            return Ok(None);
+        }
         let stable_task = task.id.simple().to_string();
         let execution_id = format!("managed-execution-v1:{stable_task}");
         let round_id = format!(
@@ -4987,7 +4990,64 @@ impl TaskRepository {
             anyhow::bail!("max_retries must not be negative");
         }
 
+        let hcode_inputs = if runtime == Some("hcode") {
+            general_compute_runtime::hcode_artifacts::parse_input(
+                task.torrent_source.as_deref().unwrap_or("null"),
+            )
+            .map_err(anyhow::Error::msg)?
+        } else {
+            None
+        };
+        let artifact_deadline = hcode_inputs
+            .as_ref()
+            .map(|_| {
+                let maximum = Utc::now() + chrono::Duration::hours(24);
+                task.deadline
+                    .map_or(maximum, |deadline| deadline.min(maximum))
+            })
+            .or(task.deadline);
         let mut tx = self.pool.begin().await?;
+        if let Some(inputs) = &hcode_inputs {
+            // Serialize storage reservations for this owner, including concurrent
+            // submissions, without trusting the Master's advertised resources.
+            sqlx::query("SELECT username FROM users WHERE username = $1 FOR UPDATE")
+                .bind(&task.owner)
+                .fetch_one(&mut *tx)
+                .await?;
+            for statement in [
+                "DELETE FROM general_compute_artifact_chunks c USING general_compute_artifacts a, tasks t
+                 WHERE c.task_id = a.task_id AND c.artifact_id = a.artifact_id
+                   AND t.task_id = a.task_id AND t.owner = $1 AND t.runtime = 'hcode'
+                   AND a.expires_at <= NOW()",
+                "DELETE FROM general_compute_artifact_sources c USING general_compute_artifacts a, tasks t
+                 WHERE c.task_id = a.task_id AND c.artifact_id = a.artifact_id
+                   AND t.task_id = a.task_id AND t.owner = $1 AND t.runtime = 'hcode'
+                   AND a.expires_at <= NOW()",
+            ] {
+                sqlx::query(statement)
+                .bind(&task.owner)
+                .execute(&mut *tx)
+                .await?;
+            }
+            let reserved: i64 = sqlx::query_scalar(
+                "SELECT COALESCE(SUM(a.size_bytes), 0)::BIGINT
+                 FROM general_compute_artifacts a JOIN tasks t ON t.task_id = a.task_id
+                 WHERE t.owner = $1 AND (a.expires_at IS NULL OR a.expires_at > NOW())",
+            )
+            .bind(&task.owner)
+            .fetch_one(&mut *tx)
+            .await?;
+            let requested = inputs
+                .artifacts
+                .iter()
+                .map(|a| a.size_bytes as i64)
+                .sum::<i64>();
+            if reserved.saturating_add(requested)
+                > general_compute_runtime::hcode_artifacts::OWNER_STORAGE_QUOTA_BYTES
+            {
+                anyhow::bail!("hcode artifact owner storage quota exceeded");
+            }
+        }
         if runtime == Some("production_sandboxed_dsl")
             && (task
                 .managed_dsl_backend_id
@@ -5014,13 +5074,15 @@ impl TaskRepository {
         .bind(&task.managed_dsl_semantics_manifest_sha256)
         .bind(&task.expected_btih)
         .bind(task.req_cpu_score).bind(task.req_gpu_score)
-        .bind(task.req_memory_gb).bind(task.req_gpu_memory_gb)
+        .bind(task.req_memory_gb.max(i32::from(hcode_inputs.is_some()))).bind(task.req_gpu_memory_gb)
         .bind(task.req_storage_gb)
         .bind(task.host_count).bind(task.max_cpt).bind(task.max_retries)
-        .bind(task.deadline).bind(task.deterministic).bind(task.side_effects).bind(task.priority)
+        .bind(artifact_deadline).bind(task.deterministic).bind(task.side_effects).bind(task.priority)
         .fetch_one(&mut *tx).await?;
 
-        if runtime == Some(general_compute_runtime::GENERAL_COMPUTE_RUNTIME_VERSION) {
+        let persisted_artifacts = if runtime
+            == Some(general_compute_runtime::GENERAL_COMPUTE_RUNTIME_VERSION)
+        {
             let manifest = task
                 .general_compute_manifest_json
                 .as_deref()
@@ -5030,9 +5092,14 @@ impl TaskRepository {
             request.validate().map_err(|error| {
                 anyhow::anyhow!("general-compute request manifest is invalid: {error:?}")
             })?;
-            for artifact in
-                std::iter::once(&request.source_artifact).chain(request.input_artifacts.iter())
-            {
+            std::iter::once(request.source_artifact)
+                .chain(request.input_artifacts)
+                .collect::<Vec<_>>()
+        } else {
+            hcode_inputs.map_or_else(Vec::new, |inputs| inputs.artifacts)
+        };
+        {
+            for artifact in &persisted_artifacts {
                 let artifact_size = i64::try_from(artifact.size_bytes).map_err(|_| {
                     anyhow::anyhow!("general-compute artifact size exceeds database range")
                 })?;
@@ -5056,7 +5123,7 @@ impl TaskRepository {
                     "pending"
                 })
                 .bind(artifact.inline_bytes.is_some())
-                .bind(task.deadline)
+                .bind(artifact_deadline)
                 .execute(&mut *tx)
                 .await?;
                 for chunk in &artifact.chunks {
@@ -5090,7 +5157,7 @@ impl TaskRepository {
                 .bind(&artifact.sha256)
                 .bind(artifact_size)
                 .bind(bytes)
-                .bind(task.deadline)
+                .bind(artifact_deadline)
                 .execute(&mut *tx)
                 .await?;
                 for chunk in &artifact.chunks {
@@ -5132,6 +5199,91 @@ impl TaskRepository {
             crate::dispatcher::DISPATCH_WAKEUP.notify_one();
         }
         Ok(created)
+    }
+
+    /// No execution hold or replica assignment is created until all declared
+    /// tensor inputs are complete and still match the task-bound identities.
+    pub async fn hcode_artifacts_ready(&self, task: &Task) -> Result<bool> {
+        if task.runtime.as_deref() != Some("hcode") {
+            return Ok(true);
+        }
+        let Some(inputs) = general_compute_runtime::hcode_artifacts::parse_input(
+            task.torrent_source.as_deref().unwrap_or("null"),
+        )
+        .map_err(anyhow::Error::msg)?
+        else {
+            return Ok(true);
+        };
+        for artifact in inputs.artifacts {
+            if !self
+                .general_compute_artifact_coordinates_match(
+                    &task.task_id,
+                    &artifact.artifact_id,
+                    artifact.size_bytes,
+                    &artifact.sha256,
+                    &artifact.chunks,
+                )
+                .await?
+            {
+                return Ok(false);
+            }
+            if !self
+                .general_compute_artifact_state(&task.task_id, &artifact.artifact_id)
+                .await?
+                .is_some_and(|state| state.complete && state.availability_status == "available")
+            {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
+    /// Read only a persisted chunk for a live, authenticated replica. Callers
+    /// must verify the Nodepool execution signature before passing these claims.
+    pub async fn hcode_artifact_chunk_for_replica(
+        &self,
+        claims: &hivemind_auth::worker_execution::WorkerExecutionClaims,
+        artifact_id: &str,
+        offset: i64,
+    ) -> Result<Option<Vec<u8>>> {
+        if claims.claims.role.as_deref() != Some("worker-execution") || offset < 0 {
+            return Ok(None);
+        }
+        let row: Option<(Vec<u8>, String, i64)> = sqlx::query_as(
+            "SELECT c.content, m.sha256, m.size_bytes
+             FROM tasks t
+             JOIN managed_consensus_attempts a ON a.id = t.managed_consensus_attempt_id
+             JOIN managed_consensus_replicas r ON r.attempt_id = a.id AND r.task_id = t.task_id
+             JOIN general_compute_artifacts f ON f.task_id = t.task_id
+             JOIN general_compute_artifact_manifest_chunks m
+               ON m.task_id = f.task_id AND m.artifact_id = f.artifact_id
+             JOIN general_compute_artifact_chunks c
+               ON c.task_id = m.task_id AND c.artifact_id = m.artifact_id AND c.offset_bytes = m.offset_bytes
+             WHERE t.task_id = $1 AND t.owner = $2 AND t.runtime = 'hcode'
+               AND t.status IN ('ASSIGNED', 'RUNNING')
+               AND a.state IN ('dispatching', 'running') AND a.deadline > NOW()
+               AND r.state IN ('assigned', 'running') AND r.worker_id = $3
+               AND a.execution_id = $4 AND r.execution_id = $4
+               AND r.worker_attempt_id = $5 AND a.request_digest = $6 AND r.request_digest = $6
+               AND $7 = 'managed-consensus-v1:' || replace(t.id::text, '-', '')
+               AND f.artifact_id = $8 AND m.offset_bytes = $9
+               AND a.round_id = $10 AND r.replica_id = $11 AND $12 = 1
+               AND f.complete AND f.availability_status = 'available' AND f.expires_at > NOW()
+               AND m.size_bytes <= 1048576 AND octet_length(c.content) = m.size_bytes"
+        )
+        .bind(&claims.claims.task_id).bind(&claims.claims.sub).bind(&claims.claims.worker_id)
+        .bind(&claims.execution_id).bind(&claims.attempt_id).bind(&claims.request_digest)
+        .bind(&claims.idempotency_key).bind(artifact_id).bind(offset)
+        .bind(&claims.consensus_round_id).bind(&claims.replica_id)
+        .bind(claims.consensus_protocol_version.map(i32::from))
+        .fetch_optional(&self.pool).await?;
+        let Some((bytes, sha256, size)) = row else {
+            return Ok(None);
+        };
+        if bytes.len() as i64 != size || general_compute_runtime::sha256_digest(&bytes) != sha256 {
+            anyhow::bail!("persisted hcode artifact chunk digest mismatch");
+        }
+        Ok(Some(bytes))
     }
 
     /// Read a Nodepool-owned inline artifact source only when its immutable
@@ -5989,9 +6141,30 @@ impl TaskRepository {
     }
 
     pub async fn find_pending(&self) -> Result<Vec<Task>> {
+        // Unstarted uploads must not wait forever after their pinned bytes expire.
+        // In-flight replicas and held balances remain on the normal stop/settlement path.
+        sqlx::query(
+            "UPDATE tasks t SET status = 'FAILED', status_message = 'hcode tensor inputs expired',
+                    completed_at = NOW(), last_update = NOW(), billing_settled = true
+             WHERE t.runtime = 'hcode' AND t.status IN ('PENDING', 'QUEUED')
+               AND EXISTS (SELECT 1 FROM general_compute_artifacts a
+                           WHERE a.task_id = t.task_id AND a.expires_at <= NOW())
+               AND NOT EXISTS (SELECT 1 FROM managed_consensus_usage_holds h
+                               WHERE h.task_id = t.task_id AND h.state = 'held')
+               AND NOT EXISTS (SELECT 1 FROM managed_consensus_worker_reservations r
+                               JOIN managed_consensus_attempts m ON m.id = r.attempt_id
+                               WHERE m.task_id = t.task_id AND r.state = 'active')",
+        )
+        .execute(&self.pool)
+        .await?;
         sqlx::query_as::<_, Task>(
             "SELECT * FROM tasks
              WHERE status IN ('PENDING', 'QUEUED')
+               AND NOT EXISTS (
+                   SELECT 1 FROM general_compute_artifacts a
+                   WHERE a.task_id = tasks.task_id AND tasks.runtime = 'hcode'
+                     AND (NOT a.complete OR a.availability_status <> 'available' OR a.expires_at <= NOW())
+               )
                AND retry_count >= 0
                AND max_retries >= 0
                AND retry_count <= max_retries
@@ -10282,6 +10455,8 @@ mod tests {
     };
     use hivemind_database::postgres::IsolatedTestPool;
     use hivemind_managed_consensus::ConsensusObservation;
+
+    include!("hcode_artifact_tests.rs");
 
     // Ledger row shape: (kind, payer_user, provider_worker_id, provider_user, amount_cpt, status)
     type LedgerRow = (String, String, Option<String>, Option<String>, i64, String);
