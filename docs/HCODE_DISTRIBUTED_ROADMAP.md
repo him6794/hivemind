@@ -26,6 +26,7 @@
 
 - [x] 盤點並確定既有 peer／lease／CAS 的接線契約與遷移方式。
 - [x] 不讀取內容的 chunk 授權：共用當前副本檢查，供快取與 P2P 使用。
+- [x] P2P 專用短效讀取權杖：用途隔離、來源／租約／chunk 綁定，不攜帶 Worker 執行權限。
 - [ ] hcode 檔案來源登錄與 Nodepool 授權；來源位置可變，但檔案與 chunk 身分不可變。
 - [ ] Master／CLI 受控提供來源，Worker 依任務租約直接下載與驗證，不經 Nodepool 搬運大檔。
 - [ ] Worker 內容快取、容量限制、淘汰、到期與損壞隔離；快取命中仍檢查當次授權。
@@ -74,11 +75,17 @@
 
 Worker 的 execution token 只傳給 Nodepool，不轉交來源 peer。P2P 使用另外簽發、只准讀取資料的短效 capability，綁定來源、任務、當前副本和 immutable chunk 坐標；它不得用於回報執行結果、註冊節點或變更帳戶。來源每次讀取前回 Nodepool 驗當前狀態，不能以本機 CAS 或簽章尚未過期取代撤銷檢查。
 
+`auth::artifact_read` 的權杖格式使用 Ed25519、固定 `typ`／`purpose`、來源 UUID audience、租約 UUID、task／artifact ID、檔案與 chunk 雜湊、大小及 offset。效期不超過 60 秒且不設寬限，權杖最多 4 KiB，每次只允許一個最多 1 MiB 的 chunk。簽發上限取 live lease、assignment、artifact 期限的最小值；缺少欄位、額外權限欄位、錯誤來源、非法路徑、非標準雜湊和越界範圍都必須拒絕。
+
+這個 codec 不建立或撤銷租約，也不啟用 peer 傳輸。後續來源登錄必須把 `lease_id` 持久化綁定至當前 Worker、attempt、round、generation、來源與 manifest；Nodepool 每次重新檢查完整綁定，不能把合法簽章當作 live lease。分離 payload 而不是轉交 execution token，是為了讓來源即使取得讀取權杖，也無法拿它回報結果或操作帳戶。
+
 ### 可用性不是內容授權
 
 初始拆分保留已存在的 `complete`、`available` 和期限條件，確保舊任務和進行中副本不因遷移中斷。來源登錄接上後，改以有期限的來源狀態決定派工候選，內容完整性仍以 immutable manifest 為錨；不得只因 peer 自稱有檔案就將任務永久標記為已備妥。排程不得在已知無來源時建立執行 hold，來源消失時也不得直接清除進行中的 hold 或跳過正常停止與結算。
 
 來源端點必須經受控的位址和身分驗證；不接受任意 URL、重導向或未驗證 DNS 作為 Worker 下載目標。優先走既有 overlay，獨立本機測試使用顯式隔離配置，不放寬正式路徑。舊 Nodepool 內容僅作既有任務相容讀取，不作新 P2P 任務失敗時的隱藏中央 fallback。
+
+現有 `vpn_peers.virtual_ip` 可由客戶端狀態回報更新，Master 的 VPN client label 也未綁定 `client_identities.identity_id`；兩者都不能直接作為來源端點的可信證據。來源登錄須由 Nodepool 核對已簽發的 enrollment／VPN 身分與 Headscale 控制面中的實際節點及位址，配合受控資料服務埠。未完成綁定的來源維持 pending，不向 Worker 發布；`online=true`、自報 IP 或知道 identity UUID 都不能取代此檢查。
 
 ### CAS 與恢復
 

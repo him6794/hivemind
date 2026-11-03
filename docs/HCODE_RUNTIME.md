@@ -474,6 +474,23 @@ The existing complete/available metadata and expiry checks remain in effect.
 This control-plane API prepares for P2P and authorized cache reads; the current
 CLI upload and Worker download path still transfers bytes through Nodepool.
 
+`hivemind_auth::artifact_read` provides the separate P2P read-token codec. Tokens
+use Ed25519, `typ=hcode-artifact-read+jwt` and `purpose=hcode-artifact-read-v1`,
+with a source UUID audience, lease UUID, task/artifact IDs, whole-file and chunk
+SHA-256 digests, sizes, and chunk offset. Their lifetime is at most 60 seconds,
+with no expiry grace, and their encoded size is at most 4 KiB. Signing must use
+the earliest live assignment, artifact and lease deadline. Account and execution
+claims are deliberately absent; account, enrollment and execution credentials
+are not interchangeable with these tokens. Each capability covers at most
+1 MiB, including a potentially shorter final chunk.
+
+This codec authenticates claims only. It does not issue leases or enable peer
+transfers yet. The source registry must persist the lease's current Worker,
+attempt, round, generation and immutable scope. Every peer read must recheck that
+lease with Nodepool, including on a local cache hit; signature validity alone is
+not authorization to serve content. The Worker execution token stays on the
+Worker-to-Nodepool control path and must never be forwarded to a source peer.
+
 Assigned Workers necessarily receive the input and model bytes. Authentication
 limits access to assigned replicas; it does not make public-network Workers
 confidential or prevent them from retaining bytes they received. Do not submit
