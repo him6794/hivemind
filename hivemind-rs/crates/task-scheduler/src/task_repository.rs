@@ -35,6 +35,64 @@ pub struct ManagedConsensusPolicy {
     pub mode: String,
 }
 
+/// Nodepool-issued, metadata-only authorization for one hcode artifact chunk.
+/// It is computed live from the active replica assignment and the immutable
+/// manifest identity. It is not a lease: it carries no bytes, no other
+/// identities, and must not be treated as reusable once the assignment moves.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HcodeArtifactChunkAuthorization {
+    pub artifact_sha256: String,
+    pub artifact_size_bytes: i64,
+    pub chunk_sha256: String,
+    pub chunk_size_bytes: i64,
+}
+
+enum HcodeChunkRead {
+    Bytes,
+    Metadata,
+}
+
+/// Both paths check the current assignment in the same statement as the read.
+/// Only static query fragments are interpolated; caller values are SQL binds.
+fn hcode_artifact_chunk_sql(mode: HcodeChunkRead) -> String {
+    let (select, chunk_join, chunk_gate) = match mode {
+        HcodeChunkRead::Bytes => (
+            "SELECT c.content, m.sha256, m.size_bytes",
+            "JOIN general_compute_artifact_chunks c
+               ON c.task_id = m.task_id AND c.artifact_id = m.artifact_id AND c.offset_bytes = m.offset_bytes",
+            " AND octet_length(c.content) = m.size_bytes",
+        ),
+        HcodeChunkRead::Metadata => (
+            "SELECT f.sha256, f.size_bytes, m.sha256, m.size_bytes",
+            "",
+            "",
+        ),
+    };
+    let chunk_limit = general_compute_runtime::hcode_artifacts::CHUNK_BYTES;
+    format!(
+        "{select}
+         FROM tasks t
+         JOIN managed_consensus_attempts a ON a.id = t.managed_consensus_attempt_id
+         JOIN managed_consensus_replicas r ON r.attempt_id = a.id AND r.task_id = t.task_id
+         JOIN general_compute_artifacts f ON f.task_id = t.task_id
+         JOIN general_compute_artifact_manifest_chunks m
+           ON m.task_id = f.task_id AND m.artifact_id = f.artifact_id
+         {chunk_join}
+         WHERE t.task_id = $1 AND t.owner = $2 AND t.runtime = 'hcode'
+           AND t.status IN ('ASSIGNED', 'RUNNING')
+           AND a.state IN ('dispatching', 'running') AND a.deadline > NOW()
+           AND r.state IN ('assigned', 'running') AND r.worker_id = $3
+           AND a.execution_id = $4 AND r.execution_id = $4
+           AND r.worker_attempt_id = $5 AND a.request_digest = $6 AND r.request_digest = $6
+           AND $7 = 'managed-consensus-v1:' || replace(t.id::text, '-', '')
+           AND f.artifact_id = $8 AND m.offset_bytes = $9
+           AND a.round_id = $10 AND r.replica_id = $11 AND $12 = 1
+           AND $13::bigint = 1
+           AND f.complete AND f.availability_status = 'available' AND f.expires_at > NOW()
+           AND m.size_bytes <= {chunk_limit}{chunk_gate}"
+    )
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, FromRow)]
 pub struct ManagedConsensusAttempt {
     pub id: Uuid,
@@ -5249,34 +5307,24 @@ impl TaskRepository {
         if claims.claims.role.as_deref() != Some("worker-execution") || offset < 0 {
             return Ok(None);
         }
-        let row: Option<(Vec<u8>, String, i64)> = sqlx::query_as(
-            "SELECT c.content, m.sha256, m.size_bytes
-             FROM tasks t
-             JOIN managed_consensus_attempts a ON a.id = t.managed_consensus_attempt_id
-             JOIN managed_consensus_replicas r ON r.attempt_id = a.id AND r.task_id = t.task_id
-             JOIN general_compute_artifacts f ON f.task_id = t.task_id
-             JOIN general_compute_artifact_manifest_chunks m
-               ON m.task_id = f.task_id AND m.artifact_id = f.artifact_id
-             JOIN general_compute_artifact_chunks c
-               ON c.task_id = m.task_id AND c.artifact_id = m.artifact_id AND c.offset_bytes = m.offset_bytes
-             WHERE t.task_id = $1 AND t.owner = $2 AND t.runtime = 'hcode'
-               AND t.status IN ('ASSIGNED', 'RUNNING')
-               AND a.state IN ('dispatching', 'running') AND a.deadline > NOW()
-               AND r.state IN ('assigned', 'running') AND r.worker_id = $3
-               AND a.execution_id = $4 AND r.execution_id = $4
-               AND r.worker_attempt_id = $5 AND a.request_digest = $6 AND r.request_digest = $6
-               AND $7 = 'managed-consensus-v1:' || replace(t.id::text, '-', '')
-               AND f.artifact_id = $8 AND m.offset_bytes = $9
-               AND a.round_id = $10 AND r.replica_id = $11 AND $12 = 1
-               AND f.complete AND f.availability_status = 'available' AND f.expires_at > NOW()
-               AND m.size_bytes <= 1048576 AND octet_length(c.content) = m.size_bytes"
-        )
-        .bind(&claims.claims.task_id).bind(&claims.claims.sub).bind(&claims.claims.worker_id)
-        .bind(&claims.execution_id).bind(&claims.attempt_id).bind(&claims.request_digest)
-        .bind(&claims.idempotency_key).bind(artifact_id).bind(offset)
-        .bind(&claims.consensus_round_id).bind(&claims.replica_id)
+        let row: Option<(Vec<u8>, String, i64)> = sqlx::query_as(sqlx::AssertSqlSafe(
+            hcode_artifact_chunk_sql(HcodeChunkRead::Bytes),
+        ))
+        .bind(&claims.claims.task_id)
+        .bind(&claims.claims.sub)
+        .bind(&claims.claims.worker_id)
+        .bind(&claims.execution_id)
+        .bind(&claims.attempt_id)
+        .bind(&claims.request_digest)
+        .bind(&claims.idempotency_key)
+        .bind(artifact_id)
+        .bind(offset)
+        .bind(&claims.consensus_round_id)
+        .bind(&claims.replica_id)
         .bind(claims.consensus_protocol_version.map(i32::from))
-        .fetch_optional(&self.pool).await?;
+        .bind(claims.transfer_generation)
+        .fetch_optional(&self.pool)
+        .await?;
         let Some((bytes, sha256, size)) = row else {
             return Ok(None);
         };
@@ -5284,6 +5332,51 @@ impl TaskRepository {
             anyhow::bail!("persisted hcode artifact chunk digest mismatch");
         }
         Ok(Some(bytes))
+    }
+
+    /// Authorize one hcode artifact chunk with metadata only. This re-runs the
+    /// exact same live assignment gates as the byte download through the shared
+    /// `hcode_artifact_chunk_sql` body, but reads only the immutable manifest
+    /// identity, never chunk content rows. A successful reply is not an
+    /// offline-reusable lease: the later download passes its own live gate.
+    pub async fn authorize_hcode_artifact_chunk(
+        &self,
+        claims: &hivemind_auth::worker_execution::WorkerExecutionClaims,
+        artifact_id: &str,
+        offset: i64,
+    ) -> Result<Option<HcodeArtifactChunkAuthorization>> {
+        if claims.claims.role.as_deref() != Some("worker-execution") || offset < 0 {
+            return Ok(None);
+        }
+        let row: Option<(String, i64, String, i64)> = sqlx::query_as(sqlx::AssertSqlSafe(
+            hcode_artifact_chunk_sql(HcodeChunkRead::Metadata),
+        ))
+        .bind(&claims.claims.task_id)
+        .bind(&claims.claims.sub)
+        .bind(&claims.claims.worker_id)
+        .bind(&claims.execution_id)
+        .bind(&claims.attempt_id)
+        .bind(&claims.request_digest)
+        .bind(&claims.idempotency_key)
+        .bind(artifact_id)
+        .bind(offset)
+        .bind(&claims.consensus_round_id)
+        .bind(&claims.replica_id)
+        .bind(claims.consensus_protocol_version.map(i32::from))
+        .bind(claims.transfer_generation)
+        .fetch_optional(&self.pool)
+        .await?;
+        let authorization = row.map(
+            |(artifact_sha256, artifact_size_bytes, chunk_sha256, chunk_size_bytes)| {
+                HcodeArtifactChunkAuthorization {
+                    artifact_sha256,
+                    artifact_size_bytes,
+                    chunk_sha256,
+                    chunk_size_bytes,
+                }
+            },
+        );
+        Ok(authorization)
     }
 
     /// Read a Nodepool-owned inline artifact source only when its immutable

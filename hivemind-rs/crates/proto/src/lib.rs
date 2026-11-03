@@ -68,6 +68,11 @@ pub const WORKER_EXECUTION_TOKEN_MAX_BYTES: usize = 8 * 1024;
 /// identity fields. This matches the persistent control-plane identifiers.
 pub const GENERAL_COMPUTE_TRANSFER_ID_MAX_BYTES: usize = 255;
 
+/// Maximum byte length accepted for an hcode artifact execution token in a
+/// chunk request. Execution tokens are Nodepool-signed JWTs well under this
+/// cap; the bound rejects unbounded identity fields before authorization.
+pub const HCODE_ARTIFACT_EXECUTION_TOKEN_MAX_BYTES: usize = 16 * 1024;
+
 pub const OBSERVATION_PROTOCOL_VERSION: u32 = 1;
 pub const OBSERVATION_ENVELOPE_MAX_BYTES: usize = 64 * 1024;
 
@@ -612,14 +617,15 @@ mod tests {
         ExecuteTaskResponse, GeneralComputeArtifactChunkUpload, GeneralComputeChunkDescriptor,
         GeneralComputeChunkResumeRequest, GeneralComputeChunkResumeResponse,
         GeneralComputeChunkUpload, GeneralComputeChunkUploadResponse, GeneralComputePrepareRequest,
-        GeneralComputePrepareResponse, ManagedConsensusResult, UploadTaskRequest,
-        ValidateGeneralComputeTransferLeaseRequest, ValidateGeneralComputeTransferLeaseResponse,
-        WorkerCapabilityReport, WorkerSessionCancelAck, WorkerSessionClientFrame,
-        WorkerSessionHello, WorkerSessionServerFrame, WorkerSessionTask,
-        GENERAL_COMPUTE_CHUNK_RPC_MESSAGE_MAX_BYTES, GENERAL_COMPUTE_CHUNK_UPLOAD_MAX_BYTES,
-        GENERAL_COMPUTE_MANIFEST_MAX_BYTES, GENERAL_COMPUTE_RESULT_MAX_BYTES,
-        GENERAL_COMPUTE_TRANSFER_ID_MAX_BYTES,
-        GENERAL_COMPUTE_TRANSFER_LEASE_RPC_MESSAGE_MAX_BYTES, LEGACY_MANAGED_RECEIPT_MAX_BYTES,
+        GeneralComputePrepareResponse, HcodeArtifactChunkAuthorization, HcodeArtifactChunkDownload,
+        ManagedConsensusResult, UploadTaskRequest, ValidateGeneralComputeTransferLeaseRequest,
+        ValidateGeneralComputeTransferLeaseResponse, WorkerCapabilityReport,
+        WorkerSessionCancelAck, WorkerSessionClientFrame, WorkerSessionHello,
+        WorkerSessionServerFrame, WorkerSessionTask, GENERAL_COMPUTE_CHUNK_RPC_MESSAGE_MAX_BYTES,
+        GENERAL_COMPUTE_CHUNK_UPLOAD_MAX_BYTES, GENERAL_COMPUTE_MANIFEST_MAX_BYTES,
+        GENERAL_COMPUTE_RESULT_MAX_BYTES, GENERAL_COMPUTE_TRANSFER_ID_MAX_BYTES,
+        GENERAL_COMPUTE_TRANSFER_LEASE_RPC_MESSAGE_MAX_BYTES,
+        HCODE_ARTIFACT_EXECUTION_TOKEN_MAX_BYTES, LEGACY_MANAGED_RECEIPT_MAX_BYTES,
         MANAGED_BUDGET_MAX_USAGE_UNITS, MANAGED_CONSENSUS_RESULT_MAX_BYTES,
         MANAGED_GPU_MANIFEST_MAX_BYTES, MANAGED_GPU_RESULT_MAX_BYTES, MANAGED_JSON_INPUT_MAX_BYTES,
         MANAGED_TASK_SOURCE_MAX_BYTES, MANAGED_V1_BUDGET_MAX_USAGE_UNITS, TASK_ID_MAX_BYTES,
@@ -647,6 +653,36 @@ mod tests {
             GENERAL_COMPUTE_TRANSFER_LEASE_RPC_MESSAGE_MAX_BYTES,
             16 * 1024
         );
+        assert_eq!(HCODE_ARTIFACT_EXECUTION_TOKEN_MAX_BYTES, 16 * 1024);
+    }
+
+    #[test]
+    fn hcode_artifact_authorization_carries_manifest_metadata_without_bytes() {
+        let request = HcodeArtifactChunkDownload {
+            token: "nodepool-execution-token".into(),
+            task_id: "tensor-task".into(),
+            artifact_id: "model".into(),
+            offset: 0,
+        };
+        let authorization = HcodeArtifactChunkAuthorization {
+            artifact_sha256:
+                "sha256:0000000000000000000000000000000000000000000000000000000000000000".into(),
+            artifact_size_bytes: 4096,
+            chunk_sha256: "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+                .into(),
+            chunk_size_bytes: 4096,
+        };
+        // The request is the same envelope as the byte download, so a single
+        // wire contract covers both RPCs; the response is bounded metadata and
+        // deliberately has no bytes field.
+        let decoded_request =
+            HcodeArtifactChunkDownload::decode(request.encode_to_vec().as_slice()).unwrap();
+        assert_eq!(decoded_request, request);
+        let decoded =
+            HcodeArtifactChunkAuthorization::decode(authorization.encode_to_vec().as_slice())
+                .unwrap();
+        assert_eq!(decoded, authorization);
+        assert!(authorization.encoded_len() < 256);
     }
 
     #[test]

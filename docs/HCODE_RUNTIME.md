@@ -464,6 +464,16 @@ whole-file digest and validates safetensors layout before execution. Cancellatio
 also stops an outstanding download. This transport adds no network or filesystem
 capability to hcode itself.
 
+`GeneralComputeArtifactService.AuthorizeHcodeChunk` performs the same live
+assignment checks without reading or returning chunk bytes. It returns the
+pinned whole-file and chunk SHA-256 digests and sizes. The current consensus
+transfer generation must be `1`; missing or different generations are rejected
+by both authorization and download. This response is a point-in-time access
+check, not an offline capability or proof that any peer still has the content.
+The existing complete/available metadata and expiry checks remain in effect.
+This control-plane API prepares for P2P and authorized cache reads; the current
+CLI upload and Worker download path still transfers bytes through Nodepool.
+
 Assigned Workers necessarily receive the input and model bytes. Authentication
 limits access to assigned replicas; it does not make public-network Workers
 confidential or prevent them from retaining bytes they received. Do not submit

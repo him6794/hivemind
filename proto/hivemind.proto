@@ -637,6 +637,19 @@ message HcodeArtifactChunkDownloadResponse {
     bytes bytes = 1; // bounded to 1 MiB; Worker verifies chunk and complete digests
 }
 
+// Nodepool reply for AuthorizeHcodeChunk: metadata-only authorization for one
+// bounded chunk of a live hcode replica's task inputs. The request reuses
+// HcodeArtifactChunkDownload, so the exact same live-assignment predicate
+// authorizes both the metadata and the later byte download. The reply never
+// carries bytes; the requester must still prove each downloaded chunk against
+// these digests, and the authorization is not reusable offline.
+message HcodeArtifactChunkAuthorization {
+    string artifact_sha256 = 1; // immutable manifest identity for the whole artifact
+    int64 artifact_size_bytes = 2;
+    string chunk_sha256 = 3; // immutable manifest identity for the requested offset
+    int64 chunk_size_bytes = 4;
+}
+
 // Nodepool -> Worker: authenticated admission/readiness for a
 // general-compute attempt.  Chunk uploads must happen only after this
 // request has established the assignment and immutable request identity.
@@ -1252,6 +1265,7 @@ service GeneralComputeChunkService {
 service GeneralComputeArtifactService {
     rpc UploadChunk(GeneralComputeArtifactChunkUpload) returns (GeneralComputeArtifactChunkUploadResponse);
     rpc DownloadHcodeChunk(HcodeArtifactChunkDownload) returns (HcodeArtifactChunkDownloadResponse);
+    rpc AuthorizeHcodeChunk(HcodeArtifactChunkDownload) returns (HcodeArtifactChunkAuthorization);
 }
 
 service BatchRuntimeService {

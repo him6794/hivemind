@@ -1987,12 +1987,9 @@ pub struct GrpcBatchRuntimeService {
     state: Arc<NodepoolState>,
 }
 
-/// Nodepool-owned source artifact persistence for general-compute tasks.
-///
-/// This service accepts the user's Nodepool JWT, never a Worker execution
-/// token. It writes only chunks whose coordinates are already present in the
-/// task's persisted manifest, so the scheduler can later source bytes without
-/// trusting a Worker or an arbitrary path/URL.
+/// Nodepool artifact control plane and compatibility byte storage.
+/// Uploads require an owner/admin session and immutable manifest coordinates;
+/// hcode reads require an execution token and the current replica assignment.
 pub struct GrpcGeneralComputeArtifactService {
     state: Arc<NodepoolState>,
 }
@@ -2001,16 +1998,18 @@ impl GrpcGeneralComputeArtifactService {
     pub fn new(state: Arc<NodepoolState>) -> Self {
         Self { state }
     }
-}
 
-#[tonic::async_trait]
-impl GeneralComputeArtifactService for GrpcGeneralComputeArtifactService {
-    async fn download_hcode_chunk(
+    /// Verify the Nodepool-issued execution token against the public key and
+    /// its task binding. Shared by the byte download and the metadata-only
+    /// authorization so neither can accept a token the other would reject.
+    fn hcode_artifact_execution_claims(
         &self,
-        request: Request<hivemind_proto::HcodeArtifactChunkDownload>,
-    ) -> Result<Response<hivemind_proto::HcodeArtifactChunkDownloadResponse>, Status> {
-        let req = request.into_inner();
-        if !is_safe_task_id(&req.task_id) || req.offset < 0 || req.token.len() > 16_384 {
+        req: &hivemind_proto::HcodeArtifactChunkDownload,
+    ) -> Result<hivemind_auth::worker_execution::WorkerExecutionClaims, Status> {
+        if !is_safe_task_id(&req.task_id)
+            || req.offset < 0
+            || req.token.len() > hivemind_proto::HCODE_ARTIFACT_EXECUTION_TOKEN_MAX_BYTES
+        {
             return Err(Status::invalid_argument(
                 "invalid hcode artifact chunk request",
             ));
@@ -2031,6 +2030,18 @@ impl GeneralComputeArtifactService for GrpcGeneralComputeArtifactService {
                 "artifact access is not bound to this task",
             ));
         }
+        Ok(claims)
+    }
+}
+
+#[tonic::async_trait]
+impl GeneralComputeArtifactService for GrpcGeneralComputeArtifactService {
+    async fn download_hcode_chunk(
+        &self,
+        request: Request<hivemind_proto::HcodeArtifactChunkDownload>,
+    ) -> Result<Response<hivemind_proto::HcodeArtifactChunkDownloadResponse>, Status> {
+        let req = request.into_inner();
+        let claims = self.hcode_artifact_execution_claims(&req)?;
         let bytes = self
             .state
             .scheduler
@@ -2042,6 +2053,36 @@ impl GeneralComputeArtifactService for GrpcGeneralComputeArtifactService {
             })?;
         Ok(Response::new(
             hivemind_proto::HcodeArtifactChunkDownloadResponse { bytes },
+        ))
+    }
+
+    /// Metadata-only authorization for one hcode artifact chunk. It re-runs
+    /// the same live assignment gates as `DownloadHcodeChunk` through the
+    /// shared repository predicate, but returns only immutable manifest
+    /// metadata and no bytes. The reply is not a lease: each later P2P or CAS
+    /// fetch must still pass the live gates on its own.
+    async fn authorize_hcode_chunk(
+        &self,
+        request: Request<hivemind_proto::HcodeArtifactChunkDownload>,
+    ) -> Result<Response<hivemind_proto::HcodeArtifactChunkAuthorization>, Status> {
+        let req = request.into_inner();
+        let claims = self.hcode_artifact_execution_claims(&req)?;
+        let authorization = self
+            .state
+            .scheduler
+            .authorize_hcode_artifact_chunk(&claims, &req.artifact_id, req.offset)
+            .await
+            .map_err(|error| Status::internal(error.to_string()))?
+            .ok_or_else(|| {
+                Status::permission_denied("artifact or active replica assignment is unavailable")
+            })?;
+        Ok(Response::new(
+            hivemind_proto::HcodeArtifactChunkAuthorization {
+                artifact_sha256: authorization.artifact_sha256,
+                artifact_size_bytes: authorization.artifact_size_bytes,
+                chunk_sha256: authorization.chunk_sha256,
+                chunk_size_bytes: authorization.chunk_size_bytes,
+            },
         ))
     }
 

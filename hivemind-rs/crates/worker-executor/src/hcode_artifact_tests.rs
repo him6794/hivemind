@@ -171,6 +171,13 @@ mod tensor_artifact_execution {
                 hivemind_proto::HcodeArtifactChunkDownloadResponse { bytes },
             ))
         }
+        async fn authorize_hcode_chunk(
+            &self,
+            _: tonic::Request<hivemind_proto::HcodeArtifactChunkDownload>,
+        ) -> Result<tonic::Response<hivemind_proto::HcodeArtifactChunkAuthorization>, tonic::Status>
+        {
+            Err(tonic::Status::unimplemented("download-only test source"))
+        }
     }
 
     #[tokio::test]

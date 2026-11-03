@@ -130,6 +130,17 @@ impl TaskScheduler {
             .await
     }
 
+    pub async fn authorize_hcode_artifact_chunk(
+        &self,
+        claims: &hivemind_auth::worker_execution::WorkerExecutionClaims,
+        artifact_id: &str,
+        offset: i64,
+    ) -> Result<Option<task_repository::HcodeArtifactChunkAuthorization>> {
+        self.repo
+            .authorize_hcode_artifact_chunk(claims, artifact_id, offset)
+            .await
+    }
+
     pub async fn list_user_tasks(&self, owner: &str) -> Result<Vec<Task>> {
         self.repo.find_by_owner(owner).await
     }
