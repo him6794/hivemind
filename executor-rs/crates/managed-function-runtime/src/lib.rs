@@ -21,7 +21,7 @@ pub const V1_SEMANTICS_MANIFEST_JSON: &str = include_str!("../hcode-semantics.js
 /// SHA-256 of the canonical JSON bytes in [`V1_SEMANTICS_MANIFEST_JSON`],
 /// excluding the file's trailing newline.
 pub const V1_SEMANTICS_MANIFEST_SHA256: &str =
-    "51edac96795664e5dcef2d0fc8d7751805211328795550904ea40bec50b21264";
+    "f9caa00e035d46e9fa74e81aaa6d7f43471a57af5a751173175c8e5deadad823";
 
 /// Versioned metering identity committed by the v1 semantics manifest.
 pub const V1_COST_MODEL_ID: &str = "hcode-execution-cpt-v1";
@@ -1894,6 +1894,7 @@ const HCODE_BUILTIN_NAMES: &[&str] = &[
     "relu",
     "gelu",
     "softmax",
+    "freivalds_check",
 ];
 
 struct Evaluator<'a> {
@@ -2630,7 +2631,7 @@ impl<'a> Evaluator<'a> {
                 self.eval_numeric_conversion(name, args).map(Some)
             }
             "tensor" | "zeros" | "shape" | "reshape" | "transpose" | "tolist" | "cast" | "sum"
-            | "dot" | "matmul" | "relu" | "gelu" | "softmax"
+            | "dot" | "matmul" | "relu" | "gelu" | "softmax" | "freivalds_check"
                 if self.surface.hcode_extensions() =>
             {
                 self.eval_tensor_builtin(name, args).map(Some)
@@ -2872,6 +2873,7 @@ impl<'a> Evaluator<'a> {
     /// and only then computes the result.
     fn eval_tensor_builtin(&mut self, name: &str, args: &[Expr]) -> Result<Value, RuntimeError> {
         let arity = match name {
+            "freivalds_check" => 5,
             "zeros" | "reshape" | "cast" | "dot" | "matmul" => 2,
             _ => 1,
         };
@@ -2944,6 +2946,20 @@ impl<'a> Evaluator<'a> {
             ("gelu", [Value::Tensor(tensor)]) => {
                 self.charge(tensor::element_units(tensor) * tensor::GELU_UNITS_PER_ELEMENT)?;
                 Value::Tensor(tensor::gelu(tensor)?)
+            }
+            (
+                "freivalds_check",
+                [
+                    Value::Tensor(a),
+                    Value::Tensor(b),
+                    Value::Tensor(c),
+                    Value::Int(seed),
+                    Value::Int(rounds),
+                ],
+            ) => {
+                let plan = tensor::freivalds_plan(a, b, c, *rounds)?;
+                self.charge(plan.units())?;
+                Value::Bool(tensor::freivalds_check(a, b, c, *seed, plan.rounds())?)
             }
             ("softmax", [Value::Tensor(tensor)]) => {
                 self.charge(tensor::element_units(tensor) * tensor::SOFTMAX_UNITS_PER_ELEMENT)?;
@@ -4254,6 +4270,85 @@ mod tests {
             execution.output,
             "{\"data\":[1,2],\"dtype\":\"i64\",\"shape\":[2]}\n"
         );
+    }
+
+    #[test]
+    fn freivalds_check_accepts_the_product_and_rejects_a_wrong_claim() {
+        let product = "tensor([[1, 2], [3, 4]]), tensor([[5, 6], [7, 8]])";
+        for seed in [1, 7, -3, 1_000_003] {
+            assert_eq!(
+                eval_hcode(&format!(
+                    "return freivalds_check({product}, tensor([[19, 22], [43, 50]]), {seed}, 20);"
+                ))
+                .unwrap(),
+                "true",
+                "seed {seed}"
+            );
+            assert_eq!(
+                eval_hcode(&format!(
+                    "return freivalds_check({product}, tensor([[19, 22], [43, 51]]), {seed}, 20);"
+                ))
+                .unwrap(),
+                "false",
+                "seed {seed}"
+            );
+        }
+        // Rectangular shapes: a is 2 by 3, b is 3 by 1, and c is 2 by 1.
+        assert_eq!(
+            eval_hcode(
+                "return freivalds_check(tensor([[1, 2, 3], [4, 5, 6]]), tensor([[1], [0], [2]]), tensor([[7], [16]]), 5, 8);"
+            )
+            .unwrap(),
+            "true"
+        );
+    }
+
+    #[test]
+    fn freivalds_check_rejects_unsupported_inputs() {
+        let operands =
+            "tensor([[1, 2], [3, 4]]), tensor([[5, 6], [7, 8]]), tensor([[19, 22], [43, 50]])";
+        assert_eq!(
+            hcode_error_code(&format!("return freivalds_check({operands}, 1);")),
+            "arity_error"
+        );
+        assert_eq!(
+            hcode_error_code(&format!("return freivalds_check({operands}, 1, 0);")),
+            "runtime_error"
+        );
+        assert_eq!(
+            hcode_error_code(&format!("return freivalds_check({operands}, 1, 65);")),
+            "runtime_error"
+        );
+        assert_eq!(
+            hcode_error_code(
+                "return freivalds_check(tensor([[1.0, 2.0], [3.0, 4.0]]), tensor([[5, 6], [7, 8]]), tensor([[19, 22], [43, 50]]), 1, 4);"
+            ),
+            "type_error"
+        );
+        assert_eq!(
+            hcode_error_code(
+                "return freivalds_check(tensor([[1, 2], [3, 4]]), tensor([[5, 6], [7, 8]]), tensor([[19, 22]]), 1, 4);"
+            ),
+            "type_error"
+        );
+        assert_eq!(
+            hcode_error_code(
+                "return freivalds_check(tensor([[3000000000, 2], [3, 4]]), tensor([[5, 6], [7, 8]]), tensor([[19, 22], [43, 50]]), 1, 4);"
+            ),
+            "type_error"
+        );
+        // The three literals and two integer arguments cost 60 units before the
+        // check. Four rounds of 2 by 2 products cost 4 * (4 + 4 + 4) = 48 more,
+        // so a budget of 107 stops inside the check and 108 completes it.
+        let source = format!("return freivalds_check({operands}, 1, 4);");
+        assert_eq!(
+            eval_hcode_with_budget(&source, 107)
+                .unwrap_err()
+                .split(':')
+                .next(),
+            Some("budget_exhausted")
+        );
+        assert_eq!(eval_hcode_with_budget(&source, 108).unwrap(), "true");
     }
 
     #[test]

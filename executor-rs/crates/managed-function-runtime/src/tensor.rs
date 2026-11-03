@@ -913,6 +913,174 @@ pub(crate) fn canonical_string(tensor: &Tensor) -> Result<String, RuntimeError> 
     Ok(output.into_inner())
 }
 
+/// Largest absolute entry accepted by `freivalds_check`. With this bound every
+/// intermediate sum of the verifier stays exact in `i128`, for any shape that
+/// the element limit allows.
+const FREIVALDS_ENTRY_LIMIT: i64 = i32::MAX as i64;
+/// Largest number of random rounds, which bounds the work of one call.
+const FREIVALDS_MAX_ROUNDS: i64 = 64;
+
+/// Validated inputs and metered cost of one `freivalds_check` call.
+pub(crate) struct FreivaldsPlan {
+    rounds: u32,
+    units: u64,
+}
+
+impl FreivaldsPlan {
+    pub(crate) fn rounds(&self) -> u32 {
+        self.rounds
+    }
+
+    /// Charged units: one per multiply-add in each round's three
+    /// matrix-vector products.
+    pub(crate) fn units(&self) -> u64 {
+        self.units
+    }
+}
+
+/// Checks `lhs` (rows by inner), `rhs` (inner by cols), and `claimed` (rows by
+/// cols), and plans the call.
+pub(crate) fn freivalds_plan(
+    lhs: &Tensor,
+    rhs: &Tensor,
+    claimed: &Tensor,
+    rounds: i64,
+) -> Result<FreivaldsPlan, RuntimeError> {
+    let [rows, inner] = lhs.shape.as_slice() else {
+        return Err(RuntimeError::new(
+            "type_error",
+            "freivalds_check expects a rank-2 matrix a",
+        ));
+    };
+    let [rhs_inner, cols] = rhs.shape.as_slice() else {
+        return Err(RuntimeError::new(
+            "type_error",
+            "freivalds_check expects a rank-2 matrix b",
+        ));
+    };
+    if claimed.shape.as_slice() != [*rows, *cols] || inner != rhs_inner {
+        return Err(RuntimeError::new(
+            "type_error",
+            "freivalds_check expects a of shape m by k, b of shape k by n, and c of shape m by n",
+        ));
+    }
+    for tensor in [lhs, rhs, claimed] {
+        integer_entries_within_limit(tensor)?;
+    }
+    if !(1..=FREIVALDS_MAX_ROUNDS).contains(&rounds) {
+        return Err(RuntimeError::new(
+            "runtime_error",
+            "freivalds_check rounds must be between 1 and 64",
+        ));
+    }
+    let per_round = inner
+        .checked_mul(*cols)
+        .and_then(|total| total.checked_add(rows.checked_mul(*inner)?))
+        .and_then(|total| total.checked_add(rows.checked_mul(*cols)?))
+        .ok_or_else(value_limit_error)?;
+    let units = u64::try_from(per_round)
+        .ok()
+        .and_then(|per_round| per_round.checked_mul(u64::try_from(rounds).ok()?))
+        .ok_or_else(value_limit_error)?;
+    Ok(FreivaldsPlan {
+        // The range check above keeps `rounds` in 1..=64.
+        rounds: u32::try_from(rounds).unwrap_or(1),
+        units,
+    })
+}
+
+fn integer_entries_within_limit(tensor: &Tensor) -> Result<(), RuntimeError> {
+    let Elements::I64(values) = &tensor.elements else {
+        return Err(RuntimeError::new(
+            "type_error",
+            "freivalds_check requires i64 matrices",
+        ));
+    };
+    if values
+        .iter()
+        .all(|value| value.unsigned_abs() <= FREIVALDS_ENTRY_LIMIT.unsigned_abs())
+    {
+        Ok(())
+    } else {
+        Err(RuntimeError::new(
+            "type_error",
+            "freivalds_check entries must lie within the i32 range",
+        ))
+    }
+}
+
+fn splitmix64(state: &mut u64) -> u64 {
+    *state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+    let mut value = *state;
+    value = (value ^ (value >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    value = (value ^ (value >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    value ^ (value >> 31)
+}
+
+/// Freivalds' test for `lhs * rhs == claimed`: each round draws a 0/1 vector
+/// `r` and checks `lhs * (rhs * r) == claimed * r` exactly. A correct product
+/// always passes. Calls validated by [`freivalds_plan`] cannot overflow `i128`.
+pub(crate) fn freivalds_check(
+    lhs: &Tensor,
+    rhs: &Tensor,
+    claimed: &Tensor,
+    seed: i64,
+    rounds: u32,
+) -> Result<bool, RuntimeError> {
+    let (rows, inner) = match lhs.shape.as_slice() {
+        [rows, inner] => (*rows, *inner),
+        _ => {
+            return Err(RuntimeError::new(
+                "type_error",
+                "freivalds_check expects matrices",
+            ));
+        }
+    };
+    let cols = rhs.shape.get(1).copied().unwrap_or(0);
+    let (Elements::I64(lhs_values), Elements::I64(rhs_values), Elements::I64(claimed_values)) =
+        (&lhs.elements, &rhs.elements, &claimed.elements)
+    else {
+        return Err(RuntimeError::new(
+            "type_error",
+            "freivalds_check requires i64 matrices",
+        ));
+    };
+    let mut state = seed.cast_unsigned();
+    for _ in 0..rounds {
+        let mut vector = vec![0_i128; cols];
+        let mut word = 0_u64;
+        let mut bits_left = 0_u32;
+        for slot in &mut vector {
+            if bits_left == 0 {
+                word = splitmix64(&mut state);
+                bits_left = 64;
+            }
+            *slot = i128::from(word & 1);
+            word >>= 1;
+            bits_left -= 1;
+        }
+        let rhs_product: Vec<i128> = (0..inner)
+            .map(|index| {
+                (0..cols)
+                    .map(|col| i128::from(rhs_values[index * cols + col]) * vector[col])
+                    .sum::<i128>()
+            })
+            .collect();
+        for row in 0..rows {
+            let left: i128 = (0..inner)
+                .map(|index| i128::from(lhs_values[row * inner + index]) * rhs_product[index])
+                .sum();
+            let right: i128 = (0..cols)
+                .map(|col| i128::from(claimed_values[row * cols + col]) * vector[col])
+                .sum();
+            if left != right {
+                return Ok(false);
+            }
+        }
+    }
+    Ok(true)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{Tensor, canonical_string, from_nested, metrics, to_nested};

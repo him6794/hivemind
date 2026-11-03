@@ -82,7 +82,7 @@ closed interpreter. Its runtime, backend, cost-model, and semantics identities
 are pinned by
 [`executor-rs/crates/managed-function-runtime/hcode-semantics.json`](../executor-rs/crates/managed-function-runtime/hcode-semantics.json)
 and digest
-`51edac96795664e5dcef2d0fc8d7751805211328795550904ea40bec50b21264`.
+`f9caa00e035d46e9fa74e81aaa6d7f43471a57af5a751173175c8e5deadad823`.
 
 - Each managed task is assigned to three distinct Workers by default, with a
   two-replica quorum; at most seven replicas may be configured. A single Worker
@@ -299,6 +299,13 @@ Rules:
   runs: one operation per element for elementwise, reshape, transpose, cast, sum,
   and conversion work; one per multiply-add for `matmul` and `dot`; 24 per element
   for `gelu`; and 20 per element for `softmax`.
+- `freivalds_check(a, b, c, seed, rounds)` verifies a claimed integer product
+  `a * b == c` without recomputing it. `a`, `b`, and `c` are `i64` matrices with
+  entries in the i32 range, and `rounds` is 1 through 64. Each round costs
+  `k*n + m*k + m*n` operations. A correct product always returns `true`. A wrong
+  product passes all rounds with probability at most `2^-rounds`, but only when
+  `seed` was chosen before `c` was computed and is unknown to the party that
+  produced `c`. A seed chosen after the claim gives no bound.
 - CPU hcode reserves every builtin name above: a `fn` with one of those names is
   rejected before execution, because builtins resolve first and the user function
   would never run. The frozen v0 language keeps its previous behavior.
