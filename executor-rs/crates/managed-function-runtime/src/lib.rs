@@ -49,16 +49,37 @@ use std::{
     sync::atomic::{AtomicBool, Ordering},
 };
 
+/// Language surface selected for one execution.
+///
+/// The frozen v0 surface never gains syntax or builtins. CPU hcode and
+/// hcode-gpu are separate surfaces, so a change to one cannot silently change
+/// the other's consensus results.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum NumericMode {
-    IntegersOnly,
-    FloatEnabled,
+enum Surface {
+    /// The frozen `managed-function-v0` language, evaluated unchecked.
+    ManagedV0,
+    /// CPU `hcode`, evaluated with checked arithmetic.
+    Hcode,
+    /// `hcode-gpu`, reached only through [`ManagedGpuExecutor`].
+    HcodeGpu,
 }
 
-impl NumericMode {
+impl Surface {
+    /// Select the CPU surface from the execution profile. Only the budgeted
+    /// hcode profile enables checked arithmetic, so the frozen v0 profile is
+    /// identified by its unchecked limits.
+    #[must_use]
+    const fn for_cpu_limits(limits: &ExecutionLimits) -> Self {
+        if limits.checked_integer_arithmetic {
+            Self::Hcode
+        } else {
+            Self::ManagedV0
+        }
+    }
+
     #[must_use]
     const fn floats_enabled(self) -> bool {
-        matches!(self, Self::FloatEnabled)
+        matches!(self, Self::HcodeGpu)
     }
 }
 
@@ -443,7 +464,7 @@ impl<'a> ManagedGpuExecutor<'a> {
         source: &str,
         limits: ExecutionLimits,
     ) -> Result<ExecutionResult, RuntimeError> {
-        let tokens = Lexer::with_numeric_mode(source, NumericMode::FloatEnabled).tokenize()?;
+        let tokens = Lexer::with_surface(source, Surface::HcodeGpu).tokenize()?;
         let program = Parser::new(tokens).parse_program()?;
         Evaluator::with_gpu(limits, self.backend, None).eval_program(&program)
     }
@@ -464,8 +485,8 @@ impl<'a> ManagedGpuExecutor<'a> {
         input_json: &str,
         cancelled: Option<&AtomicBool>,
     ) -> Result<ExecutionResult, RuntimeError> {
-        let input = Value::from_json_str_with_mode(input_json, NumericMode::FloatEnabled)?;
-        let tokens = Lexer::with_numeric_mode(source, NumericMode::FloatEnabled).tokenize()?;
+        let input = Value::from_json_str_with_surface(input_json, Surface::HcodeGpu)?;
+        let tokens = Lexer::with_surface(source, Surface::HcodeGpu).tokenize()?;
         let program = Parser::new(tokens).parse_program()?;
         let mut evaluator = Evaluator::with_gpu(limits, self.backend, cancelled);
         evaluator.validate_external_value(&input)?;
@@ -484,9 +505,10 @@ impl ManagedExecutor {
         source: &str,
         limits: ExecutionLimits,
     ) -> Result<ExecutionResult, RuntimeError> {
-        let tokens = Lexer::new(source).tokenize()?;
+        let surface = Surface::for_cpu_limits(&limits);
+        let tokens = Lexer::with_surface(source, surface).tokenize()?;
         let program = Parser::new(tokens).parse_program()?;
-        Evaluator::new(limits).eval_program(&program)
+        Evaluator::new(limits, surface).eval_program(&program)
     }
 
     pub fn execute_json_input(
@@ -495,10 +517,11 @@ impl ManagedExecutor {
         limits: ExecutionLimits,
         input_json: &str,
     ) -> Result<ExecutionResult, RuntimeError> {
-        let input = Value::from_json_str(input_json)?;
-        let tokens = Lexer::new(source).tokenize()?;
+        let surface = Surface::for_cpu_limits(&limits);
+        let input = Value::from_json_str_with_surface(input_json, surface)?;
+        let tokens = Lexer::with_surface(source, surface).tokenize()?;
         let program = Parser::new(tokens).parse_program()?;
-        let mut evaluator = Evaluator::new(limits);
+        let mut evaluator = Evaluator::new(limits, surface);
         evaluator.validate_external_value(&input)?;
         evaluator.current_scope().insert("input".to_string(), input);
         evaluator.eval_program(&program)
@@ -511,10 +534,11 @@ impl ManagedExecutor {
         input_json: &str,
         cancelled: &AtomicBool,
     ) -> Result<ExecutionResult, RuntimeError> {
-        let input = Value::from_json_str(input_json)?;
-        let tokens = Lexer::new(source).tokenize()?;
+        let surface = Surface::for_cpu_limits(&limits);
+        let input = Value::from_json_str_with_surface(input_json, surface)?;
+        let tokens = Lexer::with_surface(source, surface).tokenize()?;
         let program = Parser::new(tokens).parse_program()?;
-        let mut evaluator = Evaluator::with_cancellation(limits, cancelled);
+        let mut evaluator = Evaluator::with_cancellation(limits, surface, cancelled);
         evaluator.validate_external_value(&input)?;
         evaluator.current_scope().insert("input".to_string(), input);
         evaluator.eval_program(&program)
@@ -523,22 +547,16 @@ impl ManagedExecutor {
 
 impl Value {
     pub fn from_json_str(input: &str) -> Result<Self, RuntimeError> {
-        Self::from_json_str_with_mode(input, NumericMode::IntegersOnly)
+        Self::from_json_str_with_surface(input, Surface::ManagedV0)
     }
 
-    fn from_json_str_with_mode(
-        input: &str,
-        numeric_mode: NumericMode,
-    ) -> Result<Self, RuntimeError> {
+    fn from_json_str_with_surface(input: &str, surface: Surface) -> Result<Self, RuntimeError> {
         let value = serde_json::from_str::<serde_json::Value>(input)
             .map_err(|e| RuntimeError::new("input_error", format!("invalid JSON input: {e}")))?;
-        Self::from_json_value(&value, numeric_mode)
+        Self::from_json_value(&value, surface)
     }
 
-    fn from_json_value(
-        value: &serde_json::Value,
-        numeric_mode: NumericMode,
-    ) -> Result<Self, RuntimeError> {
+    fn from_json_value(value: &serde_json::Value, surface: Surface) -> Result<Self, RuntimeError> {
         match value {
             serde_json::Value::Null => Ok(Self::Null),
             serde_json::Value::Bool(value) => Ok(Self::Bool(*value)),
@@ -546,7 +564,7 @@ impl Value {
                 if let Some(int_value) = value.as_i64() {
                     return Ok(Self::Int(int_value));
                 }
-                if numeric_mode.floats_enabled() {
+                if surface.floats_enabled() {
                     // JSON floats arrive as f64. Non-finite values cannot exist
                     // in conforming JSON, but reject any non-finite conversion
                     // rather than allowing an unrenderable managed value.
@@ -569,12 +587,12 @@ impl Value {
             serde_json::Value::String(value) => Ok(Self::String(value.clone())),
             serde_json::Value::Array(values) => values
                 .iter()
-                .map(|value| Self::from_json_value(value, numeric_mode))
+                .map(|value| Self::from_json_value(value, surface))
                 .collect::<Result<Vec<_>, _>>()
                 .map(Self::List),
             serde_json::Value::Object(values) => values
                 .iter()
-                .map(|(key, value)| Ok((key.clone(), Self::from_json_value(value, numeric_mode)?)))
+                .map(|(key, value)| Ok((key.clone(), Self::from_json_value(value, surface)?)))
                 .collect::<Result<BTreeMap<_, _>, _>>()
                 .map(Self::Dict),
         }
@@ -841,21 +859,17 @@ struct Lexer<'a> {
     pos: usize,
     line: usize,
     column: usize,
-    numeric_mode: NumericMode,
+    surface: Surface,
 }
 
 impl<'a> Lexer<'a> {
-    fn new(source: &'a str) -> Self {
-        Self::with_numeric_mode(source, NumericMode::IntegersOnly)
-    }
-
-    fn with_numeric_mode(source: &'a str, numeric_mode: NumericMode) -> Self {
+    fn with_surface(source: &'a str, surface: Surface) -> Self {
         Self {
             bytes: source.as_bytes(),
             pos: 0,
             line: 1,
             column: 1,
-            numeric_mode,
+            surface,
         }
     }
 
@@ -1046,7 +1060,7 @@ impl<'a> Lexer<'a> {
         // A digit run becomes a float literal when followed by a fractional
         // part (`1.5`) or an exponent (`1e3`, `1E-3`). `1.` alone is rejected:
         // JSON and most C-family grammars require a fraction digit.
-        let is_float = self.numeric_mode.floats_enabled()
+        let is_float = self.surface.floats_enabled()
             && match self.peek() {
                 Some(b'.') => matches!(self.byte_at(self.pos + 1), Some(b'0'..=b'9')),
                 Some(b'e' | b'E') => true,
@@ -1665,12 +1679,12 @@ struct Evaluator<'a> {
     materialized_value_bytes: u64,
     cancelled: Option<&'a AtomicBool>,
     gpu_backend: Option<&'a mut dyn GpuBackend>,
-    numeric_mode: NumericMode,
+    surface: Surface,
     checked_integer_arithmetic: bool,
 }
 
 impl<'a> Evaluator<'a> {
-    fn new(limits: ExecutionLimits) -> Self {
+    fn new(limits: ExecutionLimits, surface: Surface) -> Self {
         let checked_integer_arithmetic = limits.checked_integer_arithmetic;
         Self {
             limits,
@@ -1682,7 +1696,7 @@ impl<'a> Evaluator<'a> {
             materialized_value_bytes: 0,
             cancelled: None,
             gpu_backend: None,
-            numeric_mode: NumericMode::IntegersOnly,
+            surface,
             checked_integer_arithmetic,
         }
     }
@@ -1695,15 +1709,18 @@ impl<'a> Evaluator<'a> {
         Self {
             gpu_backend: Some(gpu_backend),
             cancelled,
-            numeric_mode: NumericMode::FloatEnabled,
-            ..Self::new(limits)
+            ..Self::new(limits, Surface::HcodeGpu)
         }
     }
 
-    fn with_cancellation(limits: ExecutionLimits, cancelled: &'a AtomicBool) -> Self {
+    fn with_cancellation(
+        limits: ExecutionLimits,
+        surface: Surface,
+        cancelled: &'a AtomicBool,
+    ) -> Self {
         Self {
             cancelled: Some(cancelled),
-            ..Self::new(limits)
+            ..Self::new(limits, surface)
         }
     }
 
@@ -1847,12 +1864,7 @@ impl<'a> Evaluator<'a> {
             }
             Expr::Unary { op, expr } => {
                 let value = self.eval_expr(expr)?;
-                eval_unary(
-                    *op,
-                    &value,
-                    self.numeric_mode,
-                    self.checked_integer_arithmetic,
-                )
+                eval_unary(*op, &value, self.surface, self.checked_integer_arithmetic)
             }
             Expr::Logical { left, op, right } => {
                 let left = self.eval_expr(left)?;
@@ -2013,40 +2025,38 @@ impl<'a> Evaluator<'a> {
         op: BinaryOp,
         right: Value,
     ) -> Result<Value, RuntimeError> {
-        match self.numeric_mode {
-            NumericMode::IntegersOnly => match (op, left, right) {
+        if !self.surface.floats_enabled() {
+            return match (op, left, right) {
                 (BinaryOp::Add, Value::String(left), Value::String(right)) => {
                     self.concat_strings(&left, &right)
                 }
                 (op, left, right) => {
                     eval_binary_integer(left, op, right, self.checked_integer_arithmetic)
                 }
-            },
-            NumericMode::FloatEnabled => {
-                // Mixed int/float arithmetic promotes to f64 with the same
-                // IEEE-754 semantics on every GPU-v1 host.
-                let mixed = matches!(
-                    (&left, &right),
-                    (Value::Int(_), Value::Float(_)) | (Value::Float(_), Value::Int(_))
-                );
-                if mixed {
-                    let left_float = numeric_value(&left, "arithmetic")?;
-                    let right_float = numeric_value(&right, "arithmetic")?;
-                    return eval_binary_float(
-                        Value::Float(left_float),
-                        op,
-                        Value::Float(right_float),
-                        self.checked_integer_arithmetic,
-                    );
-                }
-                match (op, left, right) {
-                    (BinaryOp::Add, Value::String(left), Value::String(right)) => {
-                        self.concat_strings(&left, &right)
-                    }
-                    (op, left, right) => {
-                        eval_binary_float(left, op, right, self.checked_integer_arithmetic)
-                    }
-                }
+            };
+        }
+        // Mixed int/float arithmetic promotes to f64 with the same
+        // IEEE-754 semantics on every GPU-v1 host.
+        let mixed = matches!(
+            (&left, &right),
+            (Value::Int(_), Value::Float(_)) | (Value::Float(_), Value::Int(_))
+        );
+        if mixed {
+            let left_float = numeric_value(&left, "arithmetic")?;
+            let right_float = numeric_value(&right, "arithmetic")?;
+            return eval_binary_float(
+                Value::Float(left_float),
+                op,
+                Value::Float(right_float),
+                self.checked_integer_arithmetic,
+            );
+        }
+        match (op, left, right) {
+            (BinaryOp::Add, Value::String(left), Value::String(right)) => {
+                self.concat_strings(&left, &right)
+            }
+            (op, left, right) => {
+                eval_binary_float(left, op, right, self.checked_integer_arithmetic)
             }
         }
     }
@@ -2283,7 +2293,7 @@ impl<'a> Evaluator<'a> {
                 };
                 Ok(Some(Value::Bool(value)))
             }
-            "abs" if self.numeric_mode.floats_enabled() => {
+            "abs" if self.surface.floats_enabled() => {
                 let [arg] = args else {
                     return Err(RuntimeError::new("arity_error", "abs expects 1 argument"));
                 };
@@ -2293,7 +2303,7 @@ impl<'a> Evaluator<'a> {
                     _ => Err(RuntimeError::new("type_error", "abs expects a number")),
                 }
             }
-            "min" | "max" if self.numeric_mode.floats_enabled() => {
+            "min" | "max" if self.surface.floats_enabled() => {
                 let [left_arg, right_arg] = args else {
                     return Err(RuntimeError::new(
                         "arity_error",
@@ -2336,9 +2346,7 @@ impl<'a> Evaluator<'a> {
                 };
                 Ok(Some(result))
             }
-            "sqrt" | "floor" | "ceil" | "round" | "exp" | "ln"
-                if self.numeric_mode.floats_enabled() =>
-            {
+            "sqrt" | "floor" | "ceil" | "round" | "exp" | "ln" if self.surface.floats_enabled() => {
                 let [arg] = args else {
                     return Err(RuntimeError::new(
                         "arity_error",
@@ -2373,7 +2381,7 @@ impl<'a> Evaluator<'a> {
                 };
                 Ok(Some(Value::Float(result)))
             }
-            "pow" if self.numeric_mode.floats_enabled() => {
+            "pow" if self.surface.floats_enabled() => {
                 let [base_arg, exponent_arg] = args else {
                     return Err(RuntimeError::new("arity_error", "pow expects 2 arguments"));
                 };
@@ -2780,40 +2788,35 @@ fn numeric_compare(
 fn eval_unary(
     op: UnaryOp,
     value: &Value,
-    numeric_mode: NumericMode,
+    surface: Surface,
     checked_integer_arithmetic: bool,
 ) -> Result<Value, RuntimeError> {
-    match numeric_mode {
-        NumericMode::IntegersOnly => match op {
-            UnaryOp::Neg => match value {
-                Value::Int(value) => apply_integer_negation(*value, checked_integer_arithmetic),
-                _ => Err(RuntimeError::new("type_error", "unary - expects an int")),
+    let floats = surface.floats_enabled();
+    match (op, value) {
+        (UnaryOp::Neg, Value::Int(value)) => {
+            apply_integer_negation(*value, checked_integer_arithmetic)
+        }
+        (UnaryOp::Neg, Value::Float(value)) if floats => Ok(Value::Float(-value)),
+        (UnaryOp::Pos, Value::Int(value)) => Ok(Value::Int(*value)),
+        (UnaryOp::Pos, Value::Float(value)) if floats => Ok(Value::Float(*value)),
+        (UnaryOp::Not, Value::Bool(value)) => Ok(Value::Bool(!value)),
+        (UnaryOp::Neg, _) => Err(RuntimeError::new(
+            "type_error",
+            if floats {
+                "unary - expects a number"
+            } else {
+                "unary - expects an int"
             },
-            UnaryOp::Pos => match value {
-                Value::Int(value) => Ok(Value::Int(*value)),
-                _ => Err(RuntimeError::new("type_error", "unary + expects an int")),
+        )),
+        (UnaryOp::Pos, _) => Err(RuntimeError::new(
+            "type_error",
+            if floats {
+                "unary + expects a number"
+            } else {
+                "unary + expects an int"
             },
-            UnaryOp::Not => match value {
-                Value::Bool(value) => Ok(Value::Bool(!value)),
-                _ => Err(RuntimeError::new("type_error", "not expects a bool")),
-            },
-        },
-        NumericMode::FloatEnabled => match op {
-            UnaryOp::Neg => match value {
-                Value::Int(value) => apply_integer_negation(*value, checked_integer_arithmetic),
-                Value::Float(value) => Ok(Value::Float(-value)),
-                _ => Err(RuntimeError::new("type_error", "unary - expects a number")),
-            },
-            UnaryOp::Pos => match value {
-                Value::Int(value) => Ok(Value::Int(*value)),
-                Value::Float(value) => Ok(Value::Float(*value)),
-                _ => Err(RuntimeError::new("type_error", "unary + expects a number")),
-            },
-            UnaryOp::Not => match value {
-                Value::Bool(value) => Ok(Value::Bool(!value)),
-                _ => Err(RuntimeError::new("type_error", "not expects a bool")),
-            },
-        },
+        )),
+        (UnaryOp::Not, _) => Err(RuntimeError::new("type_error", "not expects a bool")),
     }
 }
 
