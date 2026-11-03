@@ -1349,6 +1349,23 @@ async fn run_migrations_inner(pool: &PgPool) -> Result<()> {
     .execute(&mut *tx)
     .await?;
 
+    // Only newly authenticated issuance creates a binding. Legacy VPN rows and
+    // caller-reported addresses must never be backfilled as verified identities.
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS vpn_peer_enrollments (
+            enrollment_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            peer_id UUID NOT NULL UNIQUE REFERENCES vpn_peers(id) ON DELETE CASCADE,
+            user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            controller_url TEXT NOT NULL CHECK (octet_length(controller_url) BETWEEN 1 AND 4096),
+            namespace VARCHAR(255) NOT NULL CHECK (length(namespace) > 0),
+            headscale_key_id BIGINT NOT NULL CHECK (headscale_key_id > 0),
+            issued_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            UNIQUE (controller_url, headscale_key_id)
+        );",
+    )
+    .execute(&mut *tx)
+    .await?;
+
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS ledger_entries (
             id UUID PRIMARY KEY DEFAULT gen_random_uuid(),

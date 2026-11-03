@@ -511,7 +511,7 @@ async fn run_service_inner(
         let scheduler = TaskScheduler::new(db.clone(), auth.clone());
 
         let node_mgr = Arc::new(NodeManager::new(&config, db.clone()));
-        let vpn = Arc::new(VpnService::new(config.clone(), db.clone()));
+        let vpn = Arc::new(VpnService::new(config.clone(), db.clone())?);
 
         // Background loops
         let hb_handler = Arc::new(HeartbeatHandler::new(node_mgr.clone(), 30));

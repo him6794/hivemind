@@ -1,6 +1,7 @@
 //! Tailscale-based self-hosted VPN with NAT hole-punching.
 //! Uses a Headscale coordination server for peer discovery.
 
+pub mod enrollment;
 pub mod grpc_server;
 pub mod headscale_client;
 pub mod peer_manager;
@@ -97,17 +98,35 @@ fn sanitize_client_label(raw: &str) -> Result<String> {
 
 pub struct VpnService {
     client: headscale_client::HeadscaleClient,
+    peer_verifier: Option<peer_verifier::HeadscalePeerVerifier>,
+    headscale_user: String,
     db: DatabaseManager,
     config: HivemindConfig,
 }
 
 impl VpnService {
-    pub fn new(config: HivemindConfig, db: DatabaseManager) -> Self {
+    pub fn new(config: HivemindConfig, db: DatabaseManager) -> Result<Self> {
         let client = headscale_client::HeadscaleClient::new(
             &config.vpn.headscale_url,
             &config.vpn.headscale_api_key,
-        );
-        Self { client, db, config }
+        )?;
+        let headscale_user = shared_headscale_client_user();
+        let peer_verifier = if config.vpn.headscale_api_key.trim().is_empty() {
+            None
+        } else {
+            Some(peer_verifier::HeadscalePeerVerifier::new(
+                &config.vpn.headscale_url,
+                &config.vpn.headscale_api_key,
+                &headscale_user,
+            )?)
+        };
+        Ok(Self {
+            client,
+            peer_verifier,
+            headscale_user,
+            db,
+            config,
+        })
     }
 
     async fn load_online_peers(&self) -> Result<Vec<VpnPeer>> {
@@ -159,18 +178,28 @@ impl VpnService {
             last_seen: chrono::Utc::now(),
             created_at: chrono::Utc::now(),
         };
-        sqlx::query(
+        let mut tx = self.db.pool.begin().await?;
+        let peer_id: uuid::Uuid = sqlx::query_scalar(
             "INSERT INTO vpn_peers (worker_id, hostname, virtual_ip, auth_key, online, last_seen)
              VALUES ($1, $2, $3, $4, false, NOW())
              ON CONFLICT (worker_id) DO UPDATE SET
-                 hostname = $2, virtual_ip = $3, auth_key = $4, last_seen = NOW()",
+                 hostname = $2, virtual_ip = $3, auth_key = $4,
+                 online = false, last_seen = NOW()
+             RETURNING id",
         )
         .bind(&peer.worker_id)
         .bind(&peer.hostname)
         .bind(&peer.virtual_ip)
         .bind(&peer.auth_key)
-        .execute(&self.db.pool)
+        .fetch_one(&mut *tx)
         .await?;
+        // The legacy worker join has no owner-bound controller key ID. Replacing
+        // a peer through it must invalidate any previous identified enrollment.
+        sqlx::query("DELETE FROM vpn_peer_enrollments WHERE peer_id = $1")
+            .bind(peer_id)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
         tracing::info!(
             "VPN join: worker={} hostname={} ip={}",
             worker_id,
@@ -264,12 +293,8 @@ impl VpnService {
         client_name: &str,
         auth_token: &str,
     ) -> Result<UserVpnConfig> {
-        let claims = JwtService::new(
-            &self.config.auth.jwt_secret,
-            self.config.auth.token_expiry_hours,
-        )
-        .validate(auth_token)?;
-        if claims.sub != username {
+        let owner = self.authenticate_vpn_owner(auth_token).await?;
+        if owner.username != username {
             anyhow::bail!("VPN token is not authorized for user");
         }
 
@@ -285,26 +310,17 @@ impl VpnService {
         };
         let client_id = format!("user:{}:{}", username, client_label);
 
-        let exists: bool = sqlx::query_scalar(
-            "SELECT EXISTS(SELECT 1 FROM users WHERE username = $1 AND is_active = true)",
-        )
-        .bind(username)
-        .fetch_one(&self.db.pool)
-        .await?;
-        if !exists {
-            anyhow::bail!("user not found");
-        }
-
         // Clients must join the shared platform Headscale namespace so they can
         // reach the nodepool sidecar. Per-account Headscale users isolate the
         // mesh and make nodepool access fail even after a successful tailscale up.
         // Application identity remains the Hivemind JWT/user DB.
-        let headscale_user = shared_headscale_client_user();
-        let _ = self.client.ensure_user(&headscale_user).await;
-        let auth_key = self
+        let headscale_user = &self.headscale_user;
+        self.client.ensure_user(headscale_user).await?;
+        let issued = self
             .client
-            .create_preauth_key_for_user(&headscale_user, false, false)
+            .create_identified_user_key(headscale_user)
             .await?;
+        let auth_key = issued.key().to_string();
         let virtual_ip = peer_manager::allocate_ip(&self.db, &self.config).await?;
         let expires_at = chrono::Utc::now() + chrono::Duration::hours(24);
         let login_server = {
@@ -368,20 +384,13 @@ impl VpnService {
         ]
         .join("\n");
 
-        sqlx::query(
-            "INSERT INTO vpn_peers (worker_id, hostname, virtual_ip, auth_key, online, last_seen)
-             VALUES ($1, $2, $3, $4, false, NOW())
-             ON CONFLICT (worker_id) DO UPDATE SET
-                 hostname = EXCLUDED.hostname,
-                 virtual_ip = EXCLUDED.virtual_ip,
-                 auth_key = EXCLUDED.auth_key,
-                 last_seen = NOW()",
+        self.persist_user_vpn_enrollment(
+            &owner,
+            &client_id,
+            &format!("{username}-{client_label}"),
+            &virtual_ip,
+            &issued,
         )
-        .bind(&client_id)
-        .bind(format!("{username}-{client_label}"))
-        .bind(&virtual_ip)
-        .bind(&auth_key)
-        .execute(&self.db.pool)
         .await?;
 
         tracing::info!(
@@ -442,7 +451,7 @@ mod tests {
         let db = DatabaseManager {
             pool: fixture.pool.clone(),
         };
-        Some((VpnService::new(config, db), fixture))
+        Some((VpnService::new(config, db).unwrap(), fixture))
     }
 
     fn token_for(secret: &str, subject: &str) -> String {
