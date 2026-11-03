@@ -152,6 +152,14 @@ impl Tensor {
         Ok(Self { shape, elements })
     }
 
+    pub(crate) fn from_i64(shape: Vec<usize>, values: Vec<i64>) -> Result<Self, RuntimeError> {
+        Self::new(shape, Elements::I64(values))
+    }
+
+    pub(crate) fn from_f64(shape: Vec<usize>, values: Vec<f64>) -> Result<Self, RuntimeError> {
+        Self::new(shape, Elements::F64(values))
+    }
+
     fn element_value(&self, index: usize) -> Value {
         match &self.elements {
             Elements::I64(values) => Value::Int(values[index]),

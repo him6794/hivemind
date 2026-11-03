@@ -21,7 +21,7 @@ pub const V1_SEMANTICS_MANIFEST_JSON: &str = include_str!("../hcode-semantics.js
 /// SHA-256 of the canonical JSON bytes in [`V1_SEMANTICS_MANIFEST_JSON`],
 /// excluding the file's trailing newline.
 pub const V1_SEMANTICS_MANIFEST_SHA256: &str =
-    "d51220e1607cf6a40f9ec9193da503b7ef366b4424a33787bc46ebdff0684f02";
+    "d82fb2679d7fe4247571206a28614cfaf7449091c49d131f67e08a74766658c0";
 
 /// Versioned metering identity committed by the v1 semantics manifest.
 pub const V1_COST_MODEL_ID: &str = "hcode-execution-cpt-v1";
@@ -32,10 +32,12 @@ pub const GPU_SEMANTICS_MANIFEST_JSON: &str = include_str!("../hcode-gpu-semanti
 pub const GPU_SEMANTICS_MANIFEST_SHA256: &str =
     "0fea0cfea0d2c68bbca7cccb951af6afa71b89fa9fd58e4c4d45944f1cdcd441";
 
+pub mod artifacts;
 mod deterministic_math;
 mod gpu;
 mod tensor;
 
+pub use artifacts::TensorArtifacts;
 pub use tensor::{DType, Tensor};
 
 #[cfg(all(feature = "cuda", target_os = "linux"))]
@@ -612,6 +614,38 @@ impl ManagedExecutor {
         let tokens = Lexer::with_surface(source, surface).tokenize()?;
         let program = Parser::new(tokens).parse_program()?;
         let mut evaluator = Evaluator::with_cancellation(limits, surface, cancelled);
+        evaluator.validate_external_value(&input)?;
+        evaluator.current_scope().insert("input".to_string(), input);
+        evaluator.eval_program(&program)
+    }
+}
+
+impl ManagedExecutor {
+    /// Executes CPU hcode with execution-local, digest-verified tensor inputs.
+    /// The language receives no path, network, or filesystem capability.
+    pub fn execute_json_input_with_artifacts(
+        &self,
+        source: &str,
+        limits: ExecutionLimits,
+        input_json: &str,
+        artifacts: &TensorArtifacts,
+        cancelled: Option<&AtomicBool>,
+    ) -> Result<ExecutionResult, RuntimeError> {
+        let surface = Surface::for_cpu_limits(&limits);
+        if surface != Surface::Hcode {
+            return Err(RuntimeError::new(
+                "artifact_error",
+                "tensor artifacts require CPU hcode",
+            ));
+        }
+        let input = Value::from_json_str_with_surface(input_json, surface)?;
+        let tokens = Lexer::with_surface(source, surface).tokenize()?;
+        let program = Parser::new(tokens).parse_program()?;
+        let mut evaluator = Evaluator {
+            artifacts: Some(artifacts),
+            cancelled,
+            ..Evaluator::new(limits, surface)
+        };
         evaluator.validate_external_value(&input)?;
         evaluator.current_scope().insert("input".to_string(), input);
         evaluator.eval_program(&program)
@@ -1895,6 +1929,9 @@ const HCODE_BUILTIN_NAMES: &[&str] = &[
     "gelu",
     "softmax",
     "freivalds_check",
+    "load_tensor",
+    "load_tensor_slice",
+    "tensor_info",
 ];
 
 struct Evaluator<'a> {
@@ -1907,6 +1944,7 @@ struct Evaluator<'a> {
     materialized_value_bytes: u64,
     cancelled: Option<&'a AtomicBool>,
     gpu_backend: Option<&'a mut dyn GpuBackend>,
+    artifacts: Option<&'a TensorArtifacts>,
     surface: Surface,
     checked_integer_arithmetic: bool,
 }
@@ -1924,6 +1962,7 @@ impl<'a> Evaluator<'a> {
             materialized_value_bytes: 0,
             cancelled: None,
             gpu_backend: None,
+            artifacts: None,
             surface,
             checked_integer_arithmetic,
         }
@@ -2633,6 +2672,11 @@ impl<'a> Evaluator<'a> {
             "float" | "int" if self.surface.hcode_extensions() => {
                 self.eval_numeric_conversion(name, args).map(Some)
             }
+            "load_tensor" | "load_tensor_slice" | "tensor_info"
+                if self.surface.hcode_extensions() =>
+            {
+                self.eval_artifact_builtin(name, args).map(Some)
+            }
             "tensor" | "zeros" | "shape" | "reshape" | "transpose" | "tolist" | "cast" | "sum"
             | "dot" | "matmul" | "relu" | "gelu" | "softmax" | "freivalds_check"
                 if self.surface.hcode_extensions() =>
@@ -2990,6 +3034,55 @@ impl<'a> Evaluator<'a> {
                     format!("{name} expects tensor arguments"),
                 ));
             }
+        };
+        self.materialize_owned_value(result)
+    }
+
+    fn eval_artifact_builtin(&mut self, name: &str, args: &[Expr]) -> Result<Value, RuntimeError> {
+        let arity = if name == "load_tensor_slice" { 4 } else { 2 };
+        if args.len() != arity {
+            return Err(RuntimeError::new(
+                "arity_error",
+                format!("{name} expects {arity} arguments"),
+            ));
+        }
+        let values = args
+            .iter()
+            .map(|arg| self.eval_expr(arg))
+            .collect::<Result<Vec<_>, _>>()?;
+        let (Value::String(artifact), Value::String(key)) = (&values[0], &values[1]) else {
+            return Err(RuntimeError::new(
+                "type_error",
+                "artifact and tensor names must be strings",
+            ));
+        };
+        let artifacts = self
+            .artifacts
+            .ok_or_else(|| RuntimeError::new("artifact_error", "no tensor artifacts supplied"))?;
+        let input = artifacts.get(artifact, key)?;
+        let result = if name == "tensor_info" {
+            self.charge(u64::try_from(input.shape().len()).unwrap_or(u64::MAX))?;
+            input.info()
+        } else {
+            let (offset, shape) = if name == "load_tensor_slice" {
+                let Value::Int(offset) = values[2] else {
+                    return Err(RuntimeError::new(
+                        "type_error",
+                        "tensor slice offset must be a non-negative integer",
+                    ));
+                };
+                let offset = usize::try_from(offset).map_err(|_| {
+                    RuntimeError::new("type_error", "tensor slice offset must be non-negative")
+                })?;
+                (offset, tensor::shape_from_value(&values[3])?)
+            } else {
+                (0, input.shape().to_vec())
+            };
+            tensor::shape_count(&shape)?;
+            let positions = tensor::walk_count(&shape)?;
+            self.check_element_limit(positions)?;
+            self.charge(positions)?;
+            Value::Tensor(input.decode(offset, shape)?)
         };
         self.materialize_owned_value(result)
     }

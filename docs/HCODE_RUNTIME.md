@@ -82,7 +82,7 @@ closed interpreter. Its runtime, backend, cost-model, and semantics identities
 are pinned by
 [`executor-rs/crates/managed-function-runtime/hcode-semantics.json`](../executor-rs/crates/managed-function-runtime/hcode-semantics.json)
 and digest
-`d51220e1607cf6a40f9ec9193da503b7ef366b4424a33787bc46ebdff0684f02`.
+`d82fb2679d7fe4247571206a28614cfaf7449091c49d131f67e08a74766658c0`.
 
 - Each managed task is assigned to three distinct Workers by default, with a
   two-replica quorum; at most seven replicas may be configured. A single Worker
@@ -349,6 +349,55 @@ Forbidden in hcode (and in the frozen v0 language):
 - arbitrary host functions
 - unbounded recursion
 - unbounded loops
+
+## Tensor artifact inputs (CPU hcode)
+
+The embedding API accepts immutable safetensors bytes through `TensorArtifacts`.
+The host calls `insert(name, bytes, expected_sha256)` and then
+`ManagedExecutor::execute_json_input_with_artifacts`. Insertion verifies the full
+file's SHA-256 and layout before exposing any tensor. The digest is 64 lowercase
+hex digits, optionally prefixed with `sha256:`. Names are exact lookup keys, not
+paths or URLs; hcode still has no filesystem or network access.
+
+| Builtin | Result |
+| --- | --- |
+| `load_tensor(artifact, name)` | Decode the entire named tensor with its stored shape. |
+| `load_tensor_slice(artifact, name, offset, shape)` | Decode a contiguous row-major slice, starting at a zero-based **element** offset, into the requested shape. This is not strided or axis slicing. |
+| `tensor_info(artifact, name)` | Return `{"dtype":"F32","shape":[2,2]}` (the original storage dtype and shape), without decoding elements. |
+
+For a supplied artifact named `model` with an F32 tensor `weights = [[1,2],[3,4]]`:
+
+```hcode
+let w = load_tensor("model", "weights");
+return tolist(matmul(w, tensor([1.0, 2.0]))); // [5.0,11.0]
+```
+
+Storage types `I8`, `U8`, `I16`, `I32`, and `I64` decode to exact i64 values;
+`F16`, `BF16`, `F32`, and `F64` decode to finite f64. Negative zero normalizes to
+positive zero. A non-finite value fails when its slice is decoded. All tensors
+have rank 1–8; rank-zero scalars and other storage dtypes are rejected.
+
+Limits apply independently of the 1 MiB JSON input cap:
+
+- At most 16 artifacts, 64 MiB per complete file, and 256 MiB total per execution.
+- At most 1 MiB of header JSON and 4,096 tensors per file. Artifact and tensor
+  names must be nonempty and at most 255 UTF-8 bytes.
+- Headers must have unique tensor names and valid shapes; data ranges must match
+  dtype sizes and cover the payload without overlaps, gaps, or trailing bytes.
+- Decoded slices retain the existing 100,000-position, 1 MiB value, 16 MiB
+  cumulative materialization, and 1 MiB output limits. A large stored tensor
+  must be read in bounded slices; loading it does not bypass value limits.
+
+Loading charges one usage unit per selected position **before** decoding, in
+addition to normal expression/call costs. As with other tensor operations,
+zero dimensions count as one for the work bound. `tensor_info` charges one unit
+per dimension. Header parsing and digest verification are bounded host admission
+work, not interpreter `executed_ops`.
+
+This API does not expose artifact outputs, arbitrary model code, ONNX/GGUF
+execution, GPU loading, or an automatic large-language-model inference engine.
+At this layer the host supplies the bytes; network upload and task transport are
+separate platform integration responsibilities.
 
 ## hcode-gpu extension
 
