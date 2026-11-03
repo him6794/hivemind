@@ -82,7 +82,7 @@ closed interpreter. Its runtime, backend, cost-model, and semantics identities
 are pinned by
 [`executor-rs/crates/managed-function-runtime/hcode-semantics.json`](../executor-rs/crates/managed-function-runtime/hcode-semantics.json)
 and digest
-`f9caa00e035d46e9fa74e81aaa6d7f43471a57af5a751173175c8e5deadad823`.
+`315dba05f1b51f3d2e9cd085e8b1762ad708a028d4c1318f57d32d35893a9262`.
 
 - Each managed task is assigned to three distinct Workers by default, with a
   two-replica quorum; at most seven replicas may be configured. A single Worker
@@ -294,18 +294,26 @@ Rules:
   They have no ordering operators, no index assignment, and no `for` iteration.
 - A tensor's canonical output is the object
   `{"data":[...],"dtype":"f64","shape":[...]}`. `tolist` converts to nested lists,
-  which lose the shape when a dimension is zero. Element counts are bounded by
-  `max_collection_items` before allocation, and each operation is charged before it
-  runs: one operation per element for elementwise, reshape, transpose, cast, sum,
-  and conversion work; one per multiply-add for `matmul` and `dot`; 24 per element
-  for `gelu`; and 20 per element for `softmax`.
+  which lose the shape when a dimension is zero. Every shape must satisfy
+  `walk_count <= max_collection_items`, where `walk_count` is the product of its
+  dimensions with each zero dimension counted as one. The check runs before any
+  storage is reserved, so a zero-size tensor cannot hide a large dimension.
+  Each operation is charged before it runs, per position it visits (`walk_count`
+  of its operand): one unit for elementwise, reshape, transpose, cast, sum, and
+  conversion work; `m + m*n + m*k*n` for `matmul` (one per output row, one per
+  output position, and one per multiply-add); one per multiply-add for `dot`; 24
+  per position for `gelu`; and 20 per position for `softmax`.
 - `freivalds_check(a, b, c, seed, rounds)` verifies a claimed integer product
   `a * b == c` without recomputing it. `a`, `b`, and `c` are `i64` matrices with
-  entries in the i32 range, and `rounds` is 1 through 64. Each round costs
-  `k*n + m*k + m*n` operations. A correct product always returns `true`. A wrong
-  product passes all rounds with probability at most `2^-rounds`, but only when
-  `seed` was chosen before `c` was computed and is unknown to the party that
-  produced `c`. A seed chosen after the claim gives no bound.
+  entries in the i32 range, and `rounds` is 1 through 64. Each round is charged
+  `cols + inner*(cols+1) + rows*(1+inner+cols)` positions, where `a` is `rows` by
+  `inner`, `b` is `inner` by `cols`, and `c` is `rows` by `cols`. A correct product
+  always returns `true`. A wrong product passes one round with probability at most
+  1/2 when the round vector is uniformly random, so it passes all rounds with
+  probability at most `2^-rounds` under that idealization. The generator is
+  splitmix64, a pseudorandom stream, so the bound holds only when `seed` was chosen
+  before `c` was computed and is unknown to the party that produced `c`. A seed
+  chosen after the claim gives no bound.
 - CPU hcode reserves every builtin name above: a `fn` with one of those names is
   rejected before execution, because builtins resolve first and the user function
   would never run. The frozen v0 language keeps its previous behavior.

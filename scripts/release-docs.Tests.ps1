@@ -118,7 +118,7 @@ $hcodeTutorial = Get-Content -LiteralPath $hcodeTutorialPath -Raw -Encoding UTF8
 Assert-Contains -DocumentName "docs/HCODE_RUNTIME.md" -DocumentText $hcodeRuntime -ExpectedValues @(
     'hcode-semantics.json',
     'managed-function-v0-semantics.json',
-    'f9caa00e035d46e9fa74e81aaa6d7f43471a57af5a751173175c8e5deadad823',
+    '315dba05f1b51f3d2e9cd085e8b1762ad708a028d4c1318f57d32d35893a9262',
     'Coordinated upgrade',
     'hard wire rename',
     'hcode-tutorial.zh-TW.md'

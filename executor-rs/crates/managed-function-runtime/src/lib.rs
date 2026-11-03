@@ -21,7 +21,7 @@ pub const V1_SEMANTICS_MANIFEST_JSON: &str = include_str!("../hcode-semantics.js
 /// SHA-256 of the canonical JSON bytes in [`V1_SEMANTICS_MANIFEST_JSON`],
 /// excluding the file's trailing newline.
 pub const V1_SEMANTICS_MANIFEST_SHA256: &str =
-    "f9caa00e035d46e9fa74e81aaa6d7f43471a57af5a751173175c8e5deadad823";
+    "315dba05f1b51f3d2e9cd085e8b1762ad708a028d4c1318f57d32d35893a9262";
 
 /// Versioned metering identity committed by the v1 semantics manifest.
 pub const V1_COST_MODEL_ID: &str = "hcode-execution-cpt-v1";
@@ -2504,10 +2504,13 @@ impl<'a> Evaluator<'a> {
                     Value::Dict(value) => value.len(),
                     Value::Tensor(value) => value.shape()[0],
                     _ => {
-                        return Err(RuntimeError::new(
-                            "type_error",
-                            "len expects string, list, dict, or tensor",
-                        ));
+                        // The frozen surfaces keep their original message.
+                        let message = if self.surface.hcode_extensions() {
+                            "len expects string, list, dict, or tensor"
+                        } else {
+                            "len expects string, list, or dict"
+                        };
+                        return Err(RuntimeError::new("type_error", message));
                     }
                 };
                 Ok(Some(Value::Int(i64::try_from(len).map_err(|_| {
@@ -2858,10 +2861,18 @@ impl<'a> Evaluator<'a> {
         }
     }
 
-    /// Fails before any allocation when a tensor would exceed the element limit.
-    fn check_element_limit(&self, count: usize) -> Result<(), RuntimeError> {
-        let within =
-            u64::try_from(count).is_ok_and(|count| count <= self.limits.max_collection_items);
+    /// Charges `per_position` units for each position a tensor operation visits.
+    fn charge_positions(&mut self, tensor: &Tensor, per_position: u64) -> Result<(), RuntimeError> {
+        let units = tensor::position_units(tensor)
+            .checked_mul(per_position)
+            .ok_or_else(value_limit_error)?;
+        self.charge(units)
+    }
+
+    /// Fails before any allocation or charge when a tensor shape would walk more
+    /// positions than the element limit allows.
+    fn check_element_limit(&self, positions: u64) -> Result<(), RuntimeError> {
+        let within = positions <= self.limits.max_collection_items;
         if within {
             Ok(())
         } else {
@@ -2890,16 +2901,16 @@ impl<'a> Evaluator<'a> {
         let checked = self.checked_integer_arithmetic;
         let result = match (name, values.as_slice()) {
             ("tensor", [nested]) => {
-                let tensor = tensor::from_nested(nested)?;
-                self.charge(tensor::element_units(&tensor))?;
+                let tensor = tensor::from_nested(nested, self.limits.max_collection_items)?;
+                self.charge(tensor::position_units(&tensor))?;
                 Value::Tensor(tensor)
             }
             ("zeros", [shape, dtype]) => {
                 let shape = tensor::shape_from_value(shape)?;
                 let dtype = tensor::dtype_from_value(dtype)?;
-                let count = tensor::shape_count(&shape)?;
-                self.check_element_limit(count)?;
-                self.charge(u64::try_from(count).unwrap_or(u64::MAX))?;
+                let positions = tensor::walk_count(&shape)?;
+                self.check_element_limit(positions)?;
+                self.charge(positions)?;
                 Value::Tensor(tensor::zeros(shape, dtype)?)
             }
             ("shape", [Value::Tensor(tensor)]) => {
@@ -2908,24 +2919,27 @@ impl<'a> Evaluator<'a> {
             }
             ("reshape", [Value::Tensor(tensor), shape]) => {
                 let shape = tensor::shape_from_value(shape)?;
-                self.charge(tensor::element_units(tensor))?;
+                // The new shape can walk more positions than the old one when it
+                // moves zero dimensions, so it is limited on its own.
+                self.check_element_limit(tensor::walk_count(&shape)?)?;
+                self.charge(tensor::position_units(tensor))?;
                 Value::Tensor(tensor::reshape(tensor, shape)?)
             }
             ("transpose", [Value::Tensor(tensor)]) => {
-                self.charge(tensor::element_units(tensor))?;
+                self.charge(tensor::position_units(tensor))?;
                 Value::Tensor(tensor::transpose(tensor)?)
             }
             ("tolist", [Value::Tensor(tensor)]) => {
-                self.charge(tensor::element_units(tensor))?;
+                self.charge(tensor::position_units(tensor))?;
                 tensor::to_nested(tensor)
             }
             ("cast", [Value::Tensor(tensor), dtype]) => {
                 let dtype = tensor::dtype_from_value(dtype)?;
-                self.charge(tensor::element_units(tensor))?;
+                self.charge(tensor::position_units(tensor))?;
                 Value::Tensor(tensor::cast(tensor, dtype)?)
             }
             ("sum", [Value::Tensor(tensor)]) => {
-                self.charge(tensor::element_units(tensor))?;
+                self.charge(tensor::position_units(tensor))?;
                 tensor::sum(tensor, checked)?
             }
             ("dot", [Value::Tensor(left), Value::Tensor(right)]) => {
@@ -2935,16 +2949,16 @@ impl<'a> Evaluator<'a> {
             }
             ("matmul", [Value::Tensor(left), Value::Tensor(right)]) => {
                 let plan = tensor::matmul_plan(left, right)?;
-                self.check_element_limit(plan.output_count()?)?;
+                self.check_element_limit(plan.output_positions()?)?;
                 self.charge(plan.units())?;
                 Value::Tensor(tensor::matmul(left, right, &plan, checked)?)
             }
             ("relu", [Value::Tensor(tensor)]) => {
-                self.charge(tensor::element_units(tensor) * tensor::RELU_UNITS_PER_ELEMENT)?;
+                self.charge_positions(tensor, tensor::RELU_UNITS_PER_ELEMENT)?;
                 Value::Tensor(tensor::relu(tensor)?)
             }
             ("gelu", [Value::Tensor(tensor)]) => {
-                self.charge(tensor::element_units(tensor) * tensor::GELU_UNITS_PER_ELEMENT)?;
+                self.charge_positions(tensor, tensor::GELU_UNITS_PER_ELEMENT)?;
                 Value::Tensor(tensor::gelu(tensor)?)
             }
             (
@@ -2962,7 +2976,7 @@ impl<'a> Evaluator<'a> {
                 Value::Bool(tensor::freivalds_check(a, b, c, *seed, plan.rounds())?)
             }
             ("softmax", [Value::Tensor(tensor)]) => {
-                self.charge(tensor::element_units(tensor) * tensor::SOFTMAX_UNITS_PER_ELEMENT)?;
+                self.charge_positions(tensor, tensor::SOFTMAX_UNITS_PER_ELEMENT)?;
                 Value::Tensor(tensor::softmax(tensor)?)
             }
             _ => {
@@ -4338,17 +4352,61 @@ mod tests {
             "type_error"
         );
         // The three literals and two integer arguments cost 60 units before the
-        // check. Four rounds of 2 by 2 products cost 4 * (4 + 4 + 4) = 48 more,
-        // so a budget of 107 stops inside the check and 108 completes it.
+        // check. Each round visits cols + inner * (cols + 1) + rows * (1 + inner +
+        // cols) = 2 + 6 + 10 = 18 positions, so four rounds cost 72 more. A budget
+        // of 131 stops inside the check and 132 completes it.
         let source = format!("return freivalds_check({operands}, 1, 4);");
         assert_eq!(
-            eval_hcode_with_budget(&source, 107)
+            eval_hcode_with_budget(&source, 131)
                 .unwrap_err()
                 .split(':')
                 .next(),
             Some("budget_exhausted")
         );
-        assert_eq!(eval_hcode_with_budget(&source, 108).unwrap(), "true");
+        assert_eq!(eval_hcode_with_budget(&source, 132).unwrap(), "true");
+    }
+
+    #[test]
+    fn tensor_literal_with_a_ragged_first_element_chain_fails_before_allocation() {
+        // Every level's first element is the next level, so the inferred shape is
+        // 40 by 40 by ... (eight levels, about 6.5e12 elements) while the literal
+        // has only a few hundred elements. The element limit must reject it before
+        // any storage is reserved.
+        let mut nested = format!("[{}]", vec!["1"; 40].join(","));
+        for _ in 0..7 {
+            nested = format!("[{nested},{}]", vec!["[]"; 39].join(","));
+        }
+        assert_eq!(
+            hcode_error_code(&format!("return tensor({nested});")),
+            "value_limit_exceeded"
+        );
+    }
+
+    #[test]
+    fn zero_size_tensors_cannot_hide_large_dimensions() {
+        // A zero-size tensor costs nothing, so a large dimension next to a zero
+        // would let tolist, transpose, matmul, or freivalds_check walk billions
+        // of empty positions for no charge. The shape check must refuse it.
+        assert_eq!(
+            hcode_error_code("return tolist(zeros([1099511627776, 0], \"i64\"));"),
+            "value_limit_exceeded"
+        );
+        assert_eq!(
+            hcode_error_code("return transpose(zeros([0, 1099511627776], \"i64\"));"),
+            "value_limit_exceeded"
+        );
+        assert_eq!(
+            hcode_error_code(
+                "return matmul(zeros([2, 0], \"i64\"), zeros([0, 1099511627776], \"i64\"));"
+            ),
+            "value_limit_exceeded"
+        );
+        assert_eq!(
+            hcode_error_code(
+                "return freivalds_check(zeros([0, 0], \"i64\"), zeros([0, 1099511627776], \"i64\"), zeros([0, 1099511627776], \"i64\"), 1, 4);"
+            ),
+            "value_limit_exceeded"
+        );
     }
 
     #[test]

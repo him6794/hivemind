@@ -216,7 +216,7 @@ fn managed_function_v1_manifest_is_canonical_and_hash_pinned() {
 #[test]
 fn managed_function_v1_manifest_matches_budget_profile_and_cost_vectors() {
     let manifest: Value = serde_json::from_str(V1_SEMANTICS_MANIFEST_JSON).unwrap();
-    let limits = ExecutionLimits::for_managed_function_budget(100);
+    let limits = ExecutionLimits::for_managed_function_budget(1_000);
     let frozen = &manifest["default_execution_limits"];
 
     assert_eq!(frozen["max_ops"].as_u64(), Some(u64::MAX));
@@ -276,4 +276,4 @@ fn managed_function_v1_manifest_matches_budget_profile_and_cost_vectors() {
 }
 
 const EXPECTED_V1_MANIFEST_SHA256: &str =
-    "f9caa00e035d46e9fa74e81aaa6d7f43471a57af5a751173175c8e5deadad823";
+    "315dba05f1b51f3d2e9cd085e8b1762ad708a028d4c1318f57d32d35893a9262";

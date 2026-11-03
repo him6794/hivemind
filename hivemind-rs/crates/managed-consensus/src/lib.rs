@@ -18,7 +18,7 @@ pub const MANAGED_DSL_DEFAULT_SEMANTICS_DIGEST: &str =
 /// Canonical semantic identity for the built-in usage-settled v1 route.
 pub const MANAGED_DSL_V1_DEFAULT_BACKEND_ID: &str = "hcode";
 pub const MANAGED_DSL_V1_DEFAULT_SEMANTICS_DIGEST: &str =
-    "sha256:f9caa00e035d46e9fa74e81aaa6d7f43471a57af5a751173175c8e5deadad823";
+    "sha256:315dba05f1b51f3d2e9cd085e8b1762ad708a028d4c1318f57d32d35893a9262";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ConsensusBinding {

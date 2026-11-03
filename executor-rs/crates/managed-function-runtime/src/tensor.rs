@@ -178,9 +178,24 @@ pub(crate) fn shape_count(shape: &[usize]) -> Result<usize, RuntimeError> {
         .ok_or_else(value_limit_error)
 }
 
-/// Element count as a logical `u64`, for charging and limit checks.
-pub(crate) fn element_units(tensor: &Tensor) -> u64 {
-    u64::try_from(tensor.element_count()).unwrap_or(u64::MAX)
+/// The number of positions a walk over `shape` visits: the product of the
+/// dimensions with each zero dimension counted as one. A zero-size tensor still
+/// has its dimensions walked by nested conversion, transposition, and products,
+/// so this count, not the element count, bounds that work.
+pub(crate) fn walk_count(shape: &[usize]) -> Result<u64, RuntimeError> {
+    shape
+        .iter()
+        .try_fold(1_u64, |total, dim| {
+            let dim = u64::try_from((*dim).max(1)).ok()?;
+            total.checked_mul(dim)
+        })
+        .ok_or_else(value_limit_error)
+}
+
+/// Positions visited by a tensor, as a logical `u64`, for charging and limit
+/// checks. Every tensor is stored with `walk_count(shape) <= max_collection_items`.
+pub(crate) fn position_units(tensor: &Tensor) -> u64 {
+    walk_count(&tensor.shape).unwrap_or(u64::MAX)
 }
 
 /// Reads a shape literal: a list of non-negative ints.
@@ -230,9 +245,16 @@ pub(crate) fn shape_value(tensor: &Tensor) -> Value {
 
 /// Builds a tensor from a rectangular nested list of ints and floats. Any float
 /// makes the result `f64`; otherwise it is `i64`.
-pub(crate) fn from_nested(value: &Value) -> Result<Tensor, RuntimeError> {
+///
+/// The shape is inferred from the first elements, so it is checked against
+/// `max_positions` before any storage is reserved. A ragged literal then fails
+/// in `collect_leaves`, which only pushes leaves that the inferred shape allows.
+pub(crate) fn from_nested(value: &Value, max_positions: u64) -> Result<Tensor, RuntimeError> {
     let shape = infer_shape(value)?;
-    let mut leaves = Vec::with_capacity(shape_count(&shape)?);
+    if walk_count(&shape)? > max_positions {
+        return Err(value_limit_error());
+    }
+    let mut leaves = Vec::new();
     collect_leaves(value, &shape, &mut leaves)?;
     let elements = if leaves.iter().any(|leaf| matches!(leaf, Leaf::Float(_))) {
         Elements::F64(leaves.iter().map(|leaf| leaf.as_f64()).collect())
@@ -348,12 +370,12 @@ pub(crate) fn index(tensor: &Tensor, position: usize) -> Value {
     })
 }
 
-/// Number of elements `index` produces for `tensor`, for charging.
+/// Positions of the value `index` produces for `tensor`, for charging.
 pub(crate) fn index_units(tensor: &Tensor) -> u64 {
     if tensor.shape.len() == 1 {
         1
     } else {
-        u64::try_from(tensor.shape[1..].iter().product::<usize>()).unwrap_or(u64::MAX)
+        walk_count(&tensor.shape[1..]).unwrap_or(u64::MAX)
     }
 }
 
@@ -392,12 +414,12 @@ pub(crate) fn binary(
     Ok(Value::Tensor(tensor))
 }
 
-/// Element count charged for an elementwise operation on these operands.
+/// Positions charged for an elementwise operation on these operands.
 pub(crate) fn elementwise_units(left: &Value, right: &Value) -> u64 {
     [left, right]
         .into_iter()
         .filter_map(|value| match value {
-            Value::Tensor(tensor) => Some(element_units(tensor)),
+            Value::Tensor(tensor) => Some(position_units(tensor)),
             _ => None,
         })
         .max()
@@ -569,12 +591,13 @@ pub(crate) struct MatmulPlan {
 }
 
 impl MatmulPlan {
-    /// Number of output elements.
-    pub(crate) fn output_count(&self) -> Result<usize, RuntimeError> {
-        shape_count(&self.shape)
+    /// Positions of the output, checked against the limit before it is computed.
+    pub(crate) fn output_positions(&self) -> Result<u64, RuntimeError> {
+        walk_count(&self.shape)
     }
 
-    /// Charged units: one per multiply-add.
+    /// Charged units: one per output row, one per output position, and one per
+    /// multiply-add. The loops visit exactly these positions.
     pub(crate) fn units(&self) -> u64 {
         self.units
     }
@@ -599,11 +622,12 @@ pub(crate) fn matmul_plan(left: &Tensor, right: &Tensor) -> Result<MatmulPlan, R
             "matmul inner dimensions must match",
         ));
     }
-    let units = m
-        .checked_mul(k)
-        .and_then(|total| total.checked_mul(n))
-        .and_then(|total| u64::try_from(total).ok())
-        .ok_or_else(value_limit_error)?;
+    let units = (|| {
+        m.checked_add(m.checked_mul(n)?)?
+            .checked_add(m.checked_mul(k)?.checked_mul(n)?)
+    })()
+    .and_then(|total| u64::try_from(total).ok())
+    .ok_or_else(value_limit_error)?;
     Ok(MatmulPlan {
         shape,
         m,
@@ -931,8 +955,8 @@ impl FreivaldsPlan {
         self.rounds
     }
 
-    /// Charged units: one per multiply-add in each round's three
-    /// matrix-vector products.
+    /// Charged units: one per loop position in each round, which covers the
+    /// random vector and the three matrix-vector products.
     pub(crate) fn units(&self) -> u64 {
         self.units
     }
@@ -973,11 +997,17 @@ pub(crate) fn freivalds_plan(
             "freivalds_check rounds must be between 1 and 64",
         ));
     }
-    let per_round = inner
-        .checked_mul(*cols)
-        .and_then(|total| total.checked_add(rows.checked_mul(*inner)?))
-        .and_then(|total| total.checked_add(rows.checked_mul(*cols)?))
-        .ok_or_else(value_limit_error)?;
+    // Positions visited in one round: the `cols` bits of r; the `inner` outer
+    // steps of b * r plus its `inner * cols` multiply-adds; and the `rows` outer
+    // steps of a * (b * r) and c * r plus their `rows * inner` and `rows * cols`
+    // multiply-adds. The loops in `freivalds_check` visit exactly these positions.
+    let per_round = (|| {
+        let draw = *cols;
+        let product = inner.checked_mul(cols.checked_add(1)?)?;
+        let check = rows.checked_mul(1_usize.checked_add(*inner)?.checked_add(*cols)?)?;
+        draw.checked_add(product)?.checked_add(check)
+    })()
+    .ok_or_else(value_limit_error)?;
     let units = u64::try_from(per_round)
         .ok()
         .and_then(|per_round| per_round.checked_mul(u64::try_from(rounds).ok()?))
@@ -1087,7 +1117,7 @@ mod tests {
     use crate::{Value, render_output};
 
     fn tensor(source: &Value) -> Tensor {
-        from_nested(source).expect("a rectangular literal")
+        from_nested(source, u64::MAX).expect("a rectangular literal")
     }
 
     #[test]
@@ -1133,8 +1163,8 @@ mod tests {
             Value::List(vec![Value::Int(1)]),
             Value::List(vec![Value::Int(2), Value::Int(3)]),
         ]);
-        assert!(from_nested(&ragged).is_err());
-        assert!(from_nested(&Value::List(vec![Value::Bool(true)])).is_err());
-        assert!(from_nested(&Value::Int(5)).is_err());
+        assert!(from_nested(&ragged, u64::MAX).is_err());
+        assert!(from_nested(&Value::List(vec![Value::Bool(true)]), u64::MAX).is_err());
+        assert!(from_nested(&Value::Int(5), u64::MAX).is_err());
     }
 }
