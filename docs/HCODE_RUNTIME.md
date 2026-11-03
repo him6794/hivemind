@@ -82,7 +82,7 @@ closed interpreter. Its runtime, backend, cost-model, and semantics identities
 are pinned by
 [`executor-rs/crates/managed-function-runtime/hcode-semantics.json`](../executor-rs/crates/managed-function-runtime/hcode-semantics.json)
 and digest
-`315dba05f1b51f3d2e9cd085e8b1762ad708a028d4c1318f57d32d35893a9262`.
+`d51220e1607cf6a40f9ec9193da503b7ef366b4424a33787bc46ebdff0684f02`.
 
 - Each managed task is assigned to three distinct Workers by default, with a
   two-replica quorum; at most seven replicas may be configured. A single Worker
@@ -310,10 +310,13 @@ Rules:
   `inner`, `b` is `inner` by `cols`, and `c` is `rows` by `cols`. A correct product
   always returns `true`. A wrong product passes one round with probability at most
   1/2 when the round vector is uniformly random, so it passes all rounds with
-  probability at most `2^-rounds` under that idealization. The generator is
-  splitmix64, a pseudorandom stream, so the bound holds only when `seed` was chosen
-  before `c` was computed and is unknown to the party that produced `c`. A seed
-  chosen after the claim gives no bound.
+  probability at most `2^-rounds` with independent uniform vectors, independent
+  of the fixed claim. In a verifier protocol, fix the claim first, then choose
+  an independent unpredictable challenge. This builtin instead uses a
+  deterministic splitmix64 stream from a 64-bit seed: it has no proven
+  `2^-rounds` adversarial soundness guarantee, even with a secret seed. It is a
+  reproducible diagnostic check, not Nodepool verification or a replacement for
+  replica consensus.
 - CPU hcode reserves every builtin name above: a `fn` with one of those names is
   rejected before execution, because builtins resolve first and the user function
   would never run. The frozen v0 language keeps its previous behavior.
@@ -454,7 +457,8 @@ imports, reflection, dynamic evaluation, or host callbacks. The Worker only
 returns the typed result and receipt; Nodepool is the sole verification,
 consensus, payment, settlement, and billing authority.
 
-The frozen v0 and active hcode contracts are intentionally versioned. Changes to parser
-semantics, limits, receipt meaning, cost vectors, or settlement inputs require a
-new runtime/cost-model/manifest identity and compatibility tests rather than a
-silent mutation of v0.
+The v0 contract is frozen and must not be mutated. Active hcode revisions
+replace the existing hcode contract in place, without a new runtime name. Every
+semantic or cost-model change updates the canonical manifest and its pinned
+hash, with compatibility and metering tests. Nodepool and Workers must deploy
+matching builds; runtime names alone do not establish semantic compatibility.

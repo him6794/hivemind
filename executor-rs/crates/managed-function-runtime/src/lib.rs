@@ -21,7 +21,7 @@ pub const V1_SEMANTICS_MANIFEST_JSON: &str = include_str!("../hcode-semantics.js
 /// SHA-256 of the canonical JSON bytes in [`V1_SEMANTICS_MANIFEST_JSON`],
 /// excluding the file's trailing newline.
 pub const V1_SEMANTICS_MANIFEST_SHA256: &str =
-    "315dba05f1b51f3d2e9cd085e8b1762ad708a028d4c1318f57d32d35893a9262";
+    "d51220e1607cf6a40f9ec9193da503b7ef366b4424a33787bc46ebdff0684f02";
 
 /// Versioned metering identity committed by the v1 semantics manifest.
 pub const V1_COST_MODEL_ID: &str = "hcode-execution-cpt-v1";
@@ -2901,9 +2901,14 @@ impl<'a> Evaluator<'a> {
         let checked = self.checked_integer_arithmetic;
         let result = match (name, values.as_slice()) {
             ("tensor", [nested]) => {
-                let tensor = tensor::from_nested(nested, self.limits.max_collection_items)?;
-                self.charge(tensor::position_units(&tensor))?;
-                Value::Tensor(tensor)
+                let shape = tensor::infer_shape(nested)?;
+                let positions = tensor::walk_count(&shape)?;
+                self.check_element_limit(positions)?;
+                self.charge(positions)?;
+                Value::Tensor(tensor::from_nested(
+                    nested,
+                    self.limits.max_collection_items,
+                )?)
             }
             ("zeros", [shape, dtype]) => {
                 let shape = tensor::shape_from_value(shape)?;
@@ -4269,6 +4274,19 @@ mod tests {
                 .unwrap_err()
                 .starts_with("name_error")
         );
+    }
+
+    #[test]
+    fn tensor_construction_charges_before_walking_the_leaves() {
+        // Eleven units evaluate the call and its arguments. The two-position
+        // construction charge must fail before detecting the ragged second row.
+        let error = eval_hcode_with_budget("return tensor([[1], 2]);", 11).unwrap_err();
+        assert!(error.starts_with("budget_exhausted"), "{error}");
+    }
+
+    #[test]
+    fn freivalds_accepts_the_full_signed_i32_range() {
+        assert_eq!(eval_hcode("return freivalds_check(tensor([[-2147483648]]), tensor([[0]]), tensor([[0]]), 1, 4);").unwrap(), "true");
     }
 
     #[test]

@@ -165,17 +165,20 @@ fn expm1(y: f64) -> f64 {
 fn integer_power(base: f64, exponent: f64) -> Option<f64> {
     let n = f64_to_i64(exponent);
     let mut remaining = n.unsigned_abs();
-    let mut factor = base;
+    // Invert first: base^|n| can overflow even when base^n is a
+    // representable subnormal (for example 1e155^-2).
+    let mut factor = if n < 0 { 1.0 / base } else { base };
     let mut result = 1.0;
     while remaining > 0 {
         if remaining & 1 == 1 {
             result *= factor;
         }
-        factor *= factor;
         remaining >>= 1;
+        if remaining > 0 {
+            factor *= factor;
+        }
     }
-    let value = if n < 0 { 1.0 / result } else { result };
-    value.is_finite().then_some(value)
+    result.is_finite().then_some(result)
 }
 
 /// Reduces `x` to `r + q * pi/2` with `|r| <= pi/4`, returning `(q mod 4, r)`.
@@ -350,6 +353,21 @@ mod tests {
         assert!(pow(-2.0, 0.5).is_none());
         assert!(pow(10.0, 400.0).is_none());
         assert!(integer_power(2.0, -3.0).unwrap() > 0.0);
+    }
+
+    #[test]
+    fn negative_integer_powers_preserve_representable_subnormals() {
+        let actual = pow(1e155, -2.0).unwrap();
+        assert!(
+            actual > 0.0,
+            "a representable reciprocal must not become zero"
+        );
+        assert!(relative_error(actual, 1e-310) < 1e-12);
+        assert_eq!(
+            pow(2.0, -64.0).unwrap().to_bits(),
+            super::pow2(-64).to_bits()
+        );
+        assert!(pow(1e-310, -1.0).is_none());
     }
 
     #[test]

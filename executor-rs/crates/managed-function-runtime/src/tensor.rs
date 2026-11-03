@@ -272,7 +272,7 @@ pub(crate) fn from_nested(value: &Value, max_positions: u64) -> Result<Tensor, R
     Tensor::new(shape, elements)
 }
 
-fn infer_shape(value: &Value) -> Result<Vec<usize>, RuntimeError> {
+pub(crate) fn infer_shape(value: &Value) -> Result<Vec<usize>, RuntimeError> {
     let mut shape = Vec::new();
     let mut current = value;
     while let Value::List(items) = current {
@@ -937,10 +937,6 @@ pub(crate) fn canonical_string(tensor: &Tensor) -> Result<String, RuntimeError> 
     Ok(output.into_inner())
 }
 
-/// Largest absolute entry accepted by `freivalds_check`. With this bound every
-/// intermediate sum of the verifier stays exact in `i128`, for any shape that
-/// the element limit allows.
-const FREIVALDS_ENTRY_LIMIT: i64 = i32::MAX as i64;
 /// Largest number of random rounds, which bounds the work of one call.
 const FREIVALDS_MAX_ROUNDS: i64 = 64;
 
@@ -1026,10 +1022,9 @@ fn integer_entries_within_limit(tensor: &Tensor) -> Result<(), RuntimeError> {
             "freivalds_check requires i64 matrices",
         ));
     };
-    if values
-        .iter()
-        .all(|value| value.unsigned_abs() <= FREIVALDS_ENTRY_LIMIT.unsigned_abs())
-    {
+    // The full signed i32 range keeps every intermediate exact in i128
+    // under the runtime's tensor position limit.
+    if values.iter().all(|value| i32::try_from(*value).is_ok()) {
         Ok(())
     } else {
         Err(RuntimeError::new(

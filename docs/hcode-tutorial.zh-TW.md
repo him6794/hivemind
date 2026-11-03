@@ -94,7 +94,7 @@ CPU hcode 支援 signed `i64` 整數、有限的 `f64` 浮點數、boolean、str
 | `shape(t)`、`reshape(t, shape)`、`transpose(t)`、`tolist(t)`、`cast(t, "f64")` | 查詢或改變形狀、轉成巢狀 list、改變 dtype。`transpose` 只支援 rank 2 |
 | `sum(t)`、`dot(a, b)`、`matmul(a, b)` | 總和、向量內積，以及矩陣乘法（矩陣×矩陣、矩陣×向量、向量×矩陣）。每次乘加計一次用量 |
 | `relu(t)`、`gelu(t)`、`softmax(t)` | 激活函式。`gelu` 每元素計 24 單位；`softmax` 沿最後一維計算，每元素計 20 單位 |
-| `freivalds_check(a, b, c, seed, rounds)` | 驗證 `a * b == c`（i64 矩陣，元素在 i32 範圍內，`rounds` 為 1 到 64），不必重算乘積。正確乘積必定通過；錯誤乘積只有在 `seed` 先於 `c` 選定時，才在隨機位元理想化假設下以至多 `2^-rounds` 的機率通過 |
+| `freivalds_check(a, b, c, seed, rounds)` | 驗證 `a * b == c`（i64 矩陣，元素在 i32 範圍內，`rounds` 為 1 到 64），不必重算乘積。正確乘積必定通過。理論上的 `2^-rounds` 界需要獨立均勻、與固定聲稱無關的隨機向量；本函式使用固定 seed 的 splitmix64，沒有已證明的對抗性機率保證，不能取代 Nodepool 共識驗證 |
 | `float(x)`、`int(x)` | 整數與浮點數互轉（CPU hcode）；`int` 向零截斷，超出 int64 範圍會失敗 |
 | `sqrt`、`floor`、`ceil`、`round` | 平方根與取整（CPU hcode）；負數開根號會失敗 |
 | `exp`、`ln`、`pow`、`sin`、`cos`、`tanh` | 超越函式（CPU hcode）；使用固定的軟體級數而非主機 libm，每次呼叫另計 16 單位用量。`sin`、`cos` 接受 `\|x\|` 至 1000000；`ln` 需要正數 |
