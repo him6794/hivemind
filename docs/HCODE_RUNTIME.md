@@ -82,7 +82,7 @@ closed interpreter. Its runtime, backend, cost-model, and semantics identities
 are pinned by
 [`executor-rs/crates/managed-function-runtime/hcode-semantics.json`](../executor-rs/crates/managed-function-runtime/hcode-semantics.json)
 and digest
-`424747d9942f83145d923e022b39095f5d6baf7855da2277b23745d0a8f1a27a`.
+`3f2b92a13bcedc25ed3728d36c164db8c4a880eca32c75f7b4000126eb1441cc`.
 
 - Each managed task is assigned to three distinct Workers by default, with a
   two-replica quorum; at most seven replicas may be configured. A single Worker
@@ -207,6 +207,7 @@ Expressions:
 
 ```text
 integer
+float (CPU hcode and hcode-gpu, for example 1.5 or 1e3)
 true
 false
 "string"
@@ -272,16 +273,31 @@ Rules:
   fixtures additionally retain their historical `max_loop_iterations` limit.
 - Built-ins available in both CPU contracts are `len(value)`, `get(target, key)`,
   and `contains(target, value)`. `len(string)` counts UTF-8 bytes; string
-  indexing counts characters. Numeric CPU input is restricted to integers;
-  floating-point operations belong to the GPU contract.
-- CPU hcode also has `abs`, `min`, and `max` over integers; `range(stop)`,
-  `range(start, stop)`, and `range(start, stop, step)`; and `wrapping_add`,
-  `wrapping_sub`, and `wrapping_mul`. `range` builds a list of ints, charges one
-  operation per element before building it, and fails above
-  `max_collection_items`. `range` requires a non-zero step.
+  indexing counts characters. Frozen v0 input and syntax remain integer-only.
+- CPU hcode also has `abs`, `min`, and `max`; `range(stop)`,
+  `range(start, stop)`, and `range(start, stop, step)`; `wrapping_add`,
+  `wrapping_sub`, and `wrapping_mul`; `float(x)` and `int(x)`; and the float
+  math functions `sqrt`, `floor`, `ceil`, `round`, `exp`, `ln`, `pow`, `sin`,
+  `cos`, and `tanh`. `range` builds a list of ints, charges one operation per
+  element before building it, and fails above `max_collection_items`. `range`
+  requires a non-zero step. `int` truncates toward zero and fails outside the
+  int64 range.
 - CPU hcode reserves every builtin name above: a `fn` with one of those names is
   rejected before execution, because builtins resolve first and the user function
   would never run. The frozen v0 language keeps its previous behavior.
+- CPU hcode floats are IEEE-754 binary64 values written as `1.5`, `1e3`, or
+  `2.0`, and JSON numbers with a fraction or exponent are accepted as floats.
+  Every float stays finite: an operation whose result is NaN or infinite fails
+  the execution where it happens, including division by zero and literals such
+  as `1e400`. `-0.0` is folded to `0.0`. Mixed int and float arithmetic
+  promotes the int to float first.
+- `exp`, `ln`, `sin`, `cos`, `tanh`, and `pow` are computed by fixed software
+  series, never by the host math library, so every replica gets the same bits.
+  Each call is charged 16 operations on top of its arguments. `sin` and `cos`
+  accept `|x|` up to 1000000. `ln` requires a positive argument, and `pow` fails
+  for a negative base with a non-integral exponent. Accuracy is a few units in
+  the last place for `exp`, `ln`, `sin`, `cos`, and `tanh`; `pow` can lose more
+  digits when `|exponent * ln(base)|` is large (see `known_limitations`).
 - `if` requires an `else` and one expression per branch. Bare reassignment,
   `while`, `break`, `continue`, member-dot access, and source comments are
   unsupported. Use `let` to rebind a variable.

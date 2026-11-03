@@ -21,7 +21,7 @@ pub const V1_SEMANTICS_MANIFEST_JSON: &str = include_str!("../hcode-semantics.js
 /// SHA-256 of the canonical JSON bytes in [`V1_SEMANTICS_MANIFEST_JSON`],
 /// excluding the file's trailing newline.
 pub const V1_SEMANTICS_MANIFEST_SHA256: &str =
-    "424747d9942f83145d923e022b39095f5d6baf7855da2277b23745d0a8f1a27a";
+    "3f2b92a13bcedc25ed3728d36c164db8c4a880eca32c75f7b4000126eb1441cc";
 
 /// Versioned metering identity committed by the v1 semantics manifest.
 pub const V1_COST_MODEL_ID: &str = "hcode-execution-cpt-v1";
@@ -32,6 +32,7 @@ pub const GPU_SEMANTICS_MANIFEST_JSON: &str = include_str!("../hcode-gpu-semanti
 pub const GPU_SEMANTICS_MANIFEST_SHA256: &str =
     "0fea0cfea0d2c68bbca7cccb951af6afa71b89fa9fd58e4c4d45944f1cdcd441";
 
+mod deterministic_math;
 mod gpu;
 
 #[cfg(all(feature = "cuda", target_os = "linux"))]
@@ -77,9 +78,11 @@ impl Surface {
         }
     }
 
+    /// Floats are available on both hcode surfaces. CPU hcode keeps every float
+    /// finite and evaluates its transcendental builtins without the host libm.
     #[must_use]
     const fn floats_enabled(self) -> bool {
-        matches!(self, Self::HcodeGpu)
+        matches!(self, Self::Hcode | Self::HcodeGpu)
     }
 
     /// CPU hcode extensions: integer remainder, bitwise and shift operators,
@@ -95,6 +98,50 @@ impl Surface {
     const fn numeric_builtins(self) -> bool {
         matches!(self, Self::Hcode | Self::HcodeGpu)
     }
+}
+
+/// Per-call charge for the CPU hcode transcendental builtins (`exp`, `ln`,
+/// `sin`, `cos`, `tanh`, and `pow`), on top of the call overhead and arguments.
+const TRANSCENDENTAL_UNITS: u64 = 16;
+
+/// Applies the CPU hcode float rules to a numeric result. A non-finite float
+/// fails the execution at the operation that produced it, and -0.0 folds into
+/// 0.0 so every float has one canonical spelling. Other values and other
+/// surfaces pass through unchanged.
+fn finish_hcode_numeric(surface: Surface, value: Value) -> Result<Value, RuntimeError> {
+    match value {
+        Value::Float(value) if surface == Surface::Hcode => {
+            if !value.is_finite() {
+                return Err(RuntimeError::new(
+                    "runtime_error",
+                    "float result is not finite",
+                ));
+            }
+            Ok(Value::Float(if value.abs().to_bits() == 0 {
+                0.0
+            } else {
+                value
+            }))
+        }
+        other => Ok(other),
+    }
+}
+
+fn is_zero_number(value: &Value) -> bool {
+    match value {
+        Value::Int(value) => *value == 0,
+        Value::Float(value) => value.abs().to_bits() == 0,
+        _ => false,
+    }
+}
+
+/// Truncates a finite float that the caller has checked lies in the i64 range.
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "the caller checks the i64 range before truncating"
+)]
+fn truncate_to_i64(value: f64) -> i64 {
+    value.trunc() as i64
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -586,6 +633,7 @@ impl Value {
                         .as_f64()
                         .filter(|value| value.is_finite())
                         .map(Self::Float)
+                        .and_then(|value| finish_hcode_numeric(surface, value).ok())
                         .ok_or_else(|| {
                             RuntimeError::new(
                                 "input_error",
@@ -1145,6 +1193,14 @@ impl<'a> Lexer<'a> {
         let value = text
             .parse::<f64>()
             .map_err(|_| RuntimeError::new("parse_error", "float literal is out of range"))?;
+        // Rust parses an overflowing literal such as `1e400` to infinity. CPU
+        // hcode keeps every float finite, so the literal is rejected here.
+        if self.surface.hcode_extensions() && !value.is_finite() {
+            return Err(RuntimeError::new(
+                "parse_error",
+                "float literal is out of range",
+            ));
+        }
         Ok(Token::Float(value))
     }
 
@@ -1800,6 +1856,18 @@ const HCODE_BUILTIN_NAMES: &[&str] = &[
     "wrapping_add",
     "wrapping_sub",
     "wrapping_mul",
+    "sqrt",
+    "floor",
+    "ceil",
+    "round",
+    "exp",
+    "ln",
+    "pow",
+    "sin",
+    "cos",
+    "tanh",
+    "float",
+    "int",
 ];
 
 struct Evaluator<'a> {
@@ -2181,30 +2249,38 @@ impl<'a> Evaluator<'a> {
                 }
             };
         }
+        // CPU hcode rejects a zero divisor before dispatch, so int and float
+        // division by zero fail the same way.
+        if self.surface.hcode_extensions() && matches!(op, BinaryOp::Div) && is_zero_number(&right)
+        {
+            return Err(RuntimeError::new("runtime_error", "division by zero"));
+        }
         // Mixed int/float arithmetic promotes to f64 with the same
         // IEEE-754 semantics on every GPU-v1 host.
         let mixed = matches!(
             (&left, &right),
             (Value::Int(_), Value::Float(_)) | (Value::Float(_), Value::Int(_))
         );
-        if mixed {
+        let value = if mixed {
             let left_float = numeric_value(&left, "arithmetic")?;
             let right_float = numeric_value(&right, "arithmetic")?;
-            return eval_binary_float(
+            eval_binary_float(
                 Value::Float(left_float),
                 op,
                 Value::Float(right_float),
                 self.checked_integer_arithmetic,
-            );
-        }
-        match (op, left, right) {
-            (BinaryOp::Add, Value::String(left), Value::String(right)) => {
-                self.concat_strings(&left, &right)
+            )?
+        } else {
+            match (op, left, right) {
+                (BinaryOp::Add, Value::String(left), Value::String(right)) => {
+                    return self.concat_strings(&left, &right);
+                }
+                (op, left, right) => {
+                    eval_binary_float(left, op, right, self.checked_integer_arithmetic)?
+                }
             }
-            (op, left, right) => {
-                eval_binary_float(left, op, right, self.checked_integer_arithmetic)
-            }
-        }
+        };
+        finish_hcode_numeric(self.surface, value)
     }
 
     fn concat_strings(&mut self, left: &str, right: &str) -> Result<Value, RuntimeError> {
@@ -2497,7 +2573,13 @@ impl<'a> Evaluator<'a> {
                     // selected operand was originally an integer.
                     Value::Float(if take_left { left_float } else { right_float })
                 };
-                Ok(Some(result))
+                finish_hcode_numeric(self.surface, result).map(Some)
+            }
+            "exp" | "ln" | "pow" | "sin" | "cos" | "tanh" if self.surface.hcode_extensions() => {
+                self.eval_cpu_math(name, args).map(Some)
+            }
+            "float" | "int" if self.surface.hcode_extensions() => {
+                self.eval_numeric_conversion(name, args).map(Some)
             }
             "sqrt" | "floor" | "ceil" | "round" | "exp" | "ln" if self.surface.floats_enabled() => {
                 let [arg] = args else {
@@ -2532,7 +2614,7 @@ impl<'a> Evaluator<'a> {
                     }
                     _ => unreachable!("matched above"),
                 };
-                Ok(Some(Value::Float(result)))
+                finish_hcode_numeric(self.surface, Value::Float(result)).map(Some)
             }
             "pow" if self.surface.floats_enabled() => {
                 let [base_arg, exponent_arg] = args else {
@@ -2616,6 +2698,82 @@ impl<'a> Evaluator<'a> {
             "wrapping_sub" => left.wrapping_sub(right),
             _ => left.wrapping_mul(right),
         }))
+    }
+
+    /// CPU hcode `exp`, `ln`, `pow`, `sin`, `cos`, and `tanh`. They run the
+    /// pinned software series in `deterministic_math`, never the host libm, and
+    /// each call is charged `TRANSCENDENTAL_UNITS` before it is evaluated.
+    fn eval_cpu_math(&mut self, name: &str, args: &[Expr]) -> Result<Value, RuntimeError> {
+        let arity = if name == "pow" { 2 } else { 1 };
+        if args.len() != arity {
+            return Err(RuntimeError::new(
+                "arity_error",
+                format!("{name} expects {arity} argument(s)"),
+            ));
+        }
+        let mut values = Vec::with_capacity(arity);
+        for arg in args {
+            values.push(numeric_value(&self.eval_expr(arg)?, name)?);
+        }
+        self.charge(TRANSCENDENTAL_UNITS)?;
+        let result = match (name, values.as_slice()) {
+            ("exp", [x]) => deterministic_math::exp(*x)
+                .ok_or_else(|| RuntimeError::new("runtime_error", "exp overflows"))?,
+            ("ln", [x]) => deterministic_math::ln(*x).ok_or_else(|| {
+                RuntimeError::new("runtime_error", "ln requires a positive number")
+            })?,
+            ("sin", [x]) => deterministic_math::sin(*x)
+                .ok_or_else(|| RuntimeError::new("runtime_error", "sin requires |x| <= 1000000"))?,
+            ("cos", [x]) => deterministic_math::cos(*x)
+                .ok_or_else(|| RuntimeError::new("runtime_error", "cos requires |x| <= 1000000"))?,
+            ("tanh", [x]) => deterministic_math::tanh(*x),
+            ("pow", [base, exponent]) => {
+                deterministic_math::pow(*base, *exponent).ok_or_else(|| {
+                    RuntimeError::new(
+                        "runtime_error",
+                        "pow is undefined or overflows for these arguments",
+                    )
+                })?
+            }
+            _ => unreachable!("the arity was checked above"),
+        };
+        finish_hcode_numeric(self.surface, Value::Float(result))
+    }
+
+    /// CPU hcode `float(x)` and `int(x)`. `int` truncates toward zero and fails
+    /// when the truncated value is outside the i64 range.
+    fn eval_numeric_conversion(
+        &mut self,
+        name: &str,
+        args: &[Expr],
+    ) -> Result<Value, RuntimeError> {
+        let [arg] = args else {
+            return Err(RuntimeError::new(
+                "arity_error",
+                format!("{name} expects 1 argument"),
+            ));
+        };
+        match (name, self.eval_expr(arg)?) {
+            ("float", Value::Int(value)) => {
+                finish_hcode_numeric(self.surface, Value::Float(value as f64))
+            }
+            ("float", value @ Value::Float(_)) => Ok(value),
+            ("int", Value::Int(value)) => Ok(Value::Int(value)),
+            ("int", Value::Float(value)) => {
+                // 2^63 is exactly representable, so this range is exact.
+                if !(-9_223_372_036_854_775_808.0..9_223_372_036_854_775_808.0).contains(&value) {
+                    return Err(RuntimeError::new(
+                        "runtime_error",
+                        "int argument is outside the int64 range",
+                    ));
+                }
+                Ok(Value::Int(truncate_to_i64(value)))
+            }
+            _ => Err(RuntimeError::new(
+                "type_error",
+                format!("{name} expects a number"),
+            )),
+        }
     }
 
     fn eval_int_arg(&mut self, expr: &Expr, name: &str) -> Result<i64, RuntimeError> {
@@ -3124,7 +3282,9 @@ fn eval_unary(
         (UnaryOp::Neg, Value::Int(value)) => {
             apply_integer_negation(*value, checked_integer_arithmetic)
         }
-        (UnaryOp::Neg, Value::Float(value)) if floats => Ok(Value::Float(-value)),
+        (UnaryOp::Neg, Value::Float(value)) if floats => {
+            finish_hcode_numeric(surface, Value::Float(-value))
+        }
         (UnaryOp::Pos, Value::Int(value)) => Ok(Value::Int(*value)),
         (UnaryOp::Pos, Value::Float(value)) if floats => Ok(Value::Float(*value)),
         (UnaryOp::Not, Value::Bool(value)) => Ok(Value::Bool(!value)),
@@ -3549,6 +3709,135 @@ mod tests {
         assert_eq!(
             eval_hcode("fn twice(n) { return n * 2; } return twice(4);").unwrap(),
             "8"
+        );
+    }
+
+    fn eval_hcode_json(source: &str, input: &str) -> Result<String, String> {
+        let max_output_bytes = ExecutionLimits::default().max_output_bytes;
+        let execution = ManagedExecutor
+            .execute_json_input(
+                source,
+                ExecutionLimits::for_managed_function_budget(u64::MAX),
+                input,
+            )
+            .map_err(|error| error.to_string())?;
+        render_output_bounded(&execution.value, max_output_bytes).map_err(|error| error.to_string())
+    }
+
+    fn parse_output(text: &str) -> f64 {
+        text.parse::<f64>().expect("a canonical float output")
+    }
+
+    #[test]
+    fn hcode_float_arithmetic_and_literals_round_trip() {
+        assert_eq!(eval_hcode("return 1.5;").unwrap(), "1.5");
+        assert_eq!(eval_hcode("return 1.5 + 2.25;").unwrap(), "3.75");
+        assert_eq!(eval_hcode("return 1e3;").unwrap(), "1000.0");
+        assert_eq!(eval_hcode("return 2 * 0.5;").unwrap(), "1.0");
+        assert_eq!(eval_hcode("return 10 / 4.0;").unwrap(), "2.5");
+        assert_eq!(eval_hcode("return 1 == 1.0;").unwrap(), "true");
+        assert_eq!(eval_hcode("return 0.1 < 1;").unwrap(), "true");
+        // Negative zero folds into the one canonical zero.
+        assert_eq!(eval_hcode("return 0.0 * -1.0;").unwrap(), "0.0");
+        assert_eq!(eval_hcode("return -0.0;").unwrap(), "0.0");
+    }
+
+    #[test]
+    fn hcode_json_floats_are_accepted_and_canonicalized() {
+        assert_eq!(
+            eval_hcode_json("return get(input, \"x\") * 2.0;", r#"{"x": 1.25}"#).unwrap(),
+            "2.5"
+        );
+        assert_eq!(
+            eval_hcode_json("return get(input, \"z\");", r#"{"z": -0.0}"#).unwrap(),
+            "0.0"
+        );
+    }
+
+    #[test]
+    fn hcode_non_finite_floats_fail_at_the_operation_that_makes_them() {
+        assert_eq!(hcode_error_code("return 1.0 / 0.0;"), "runtime_error");
+        assert_eq!(hcode_error_code("return 0.0 / 0.0;"), "runtime_error");
+        assert_eq!(hcode_error_code("return 1e308 * 10.0;"), "runtime_error");
+        assert_eq!(hcode_error_code("return sqrt(-1.0);"), "runtime_error");
+        assert_eq!(hcode_error_code("return ln(0.0);"), "runtime_error");
+        assert_eq!(hcode_error_code("return exp(1000.0);"), "runtime_error");
+        assert_eq!(hcode_error_code("return pow(-2.0, 0.5);"), "runtime_error");
+        assert_eq!(hcode_error_code("return 1e400;"), "parse_error");
+        assert_eq!(hcode_error_code("return int(1e19);"), "runtime_error");
+    }
+
+    #[test]
+    fn hcode_transcendental_builtins_match_the_host_within_documented_error() {
+        for x in [0.5_f64, 1.0, 2.5, -3.25, 10.0, -20.0] {
+            let got = parse_output(&eval_hcode(&format!("return exp({x});")).unwrap());
+            assert!((got - x.exp()).abs() <= 1e-14 * x.exp(), "exp({x})");
+        }
+        for x in [0.5_f64, 2.0, 10.0, 0.001, 1.0e6] {
+            let got = parse_output(&eval_hcode(&format!("return ln({x});")).unwrap());
+            assert!((got - x.ln()).abs() <= 1e-14 * x.ln().abs(), "ln({x})");
+        }
+        for x in [0.5_f64, 1.0, 2.5, -3.25, 10.0, 1234.5] {
+            let sin = parse_output(&eval_hcode(&format!("return sin({x});")).unwrap());
+            let cos = parse_output(&eval_hcode(&format!("return cos({x});")).unwrap());
+            assert!((sin - x.sin()).abs() <= 1e-15, "sin({x})");
+            assert!((cos - x.cos()).abs() <= 1e-15, "cos({x})");
+        }
+        for x in [0.5_f64, -1.5, 3.0, 25.0] {
+            let got = parse_output(&eval_hcode(&format!("return tanh({x});")).unwrap());
+            assert!((got - x.tanh()).abs() <= 1e-15, "tanh({x})");
+        }
+        for (base, exponent) in [(2.0_f64, 0.5), (3.7, 2.3), (10.0, -2.0), (0.5, 7.25)] {
+            let got =
+                parse_output(&eval_hcode(&format!("return pow({base}, {exponent});")).unwrap());
+            assert!(
+                (got - base.powf(exponent)).abs() <= 1e-13 * base.powf(exponent),
+                "pow({base}, {exponent})"
+            );
+        }
+    }
+
+    #[test]
+    fn hcode_int_and_float_conversions() {
+        assert_eq!(eval_hcode("return int(2.9);").unwrap(), "2");
+        assert_eq!(eval_hcode("return int(-2.9);").unwrap(), "-2");
+        assert_eq!(eval_hcode("return int(-0.5);").unwrap(), "0");
+        assert_eq!(eval_hcode("return float(3);").unwrap(), "3.0");
+        assert_eq!(eval_hcode("return float(7) / 2;").unwrap(), "3.5");
+    }
+
+    #[test]
+    fn hcode_transcendental_builtins_are_charged_and_arity_checked() {
+        // Return statement 1, call node 1, call overhead 5, argument 1, and
+        // the transcendental charge 16.
+        let execution = ManagedExecutor
+            .execute_json_input(
+                "return exp(0.0);",
+                ExecutionLimits::for_managed_function_budget(1000),
+                "null",
+            )
+            .unwrap();
+        assert_eq!(execution.receipt.usage_units, 24);
+        assert_eq!(hcode_error_code("return exp(1.0, 2.0);"), "arity_error");
+        assert_eq!(hcode_error_code("return pow(2.0);"), "arity_error");
+        assert_eq!(
+            hcode_error_code("fn sin(x) { return x; } return sin(1.0);"),
+            "parse_error"
+        );
+    }
+
+    #[test]
+    fn hcode_gpu_keeps_its_libm_math_and_lacks_the_cpu_only_builtins() {
+        assert_eq!(eval_gpu("return exp(0) + ln(1);", "null").unwrap(), "1.0");
+        assert!(
+            eval_gpu("return sin(1.0);", "null")
+                .unwrap_err()
+                .starts_with("name_error")
+        );
+        assert!(
+            eval_gpu("return float(1);", "null")
+                .unwrap_err()
+                .starts_with("name_error")
         );
     }
 }

@@ -65,11 +65,12 @@ if count > 0 { count } else { 0 };
 
 ### 型別與運算
 
-CPU hcode 支援 signed `i64` 整數、boolean、string、list、string-keyed dict 與 `null`。
+CPU hcode 支援 signed `i64` 整數、有限的 `f64` 浮點數、boolean、string、list、string-keyed dict 與 `null`。
 
 | 寫法 | 說明 |
 | --- | --- |
-| `+ - * /` | 整數算術；超出 i64 範圍或除以零會失敗 |
+| `1.5`、`1e3` | 浮點數常量；`-0.0` 會正規化為 `0.0`，`1e400` 這類超出範圍的常量會被拒絕 |
+| `+ - * /` | 整數與浮點算術；整數超出 i64 範圍、除以零，或任何浮點運算產生 NaN／無限大，都會失敗 |
 | `%` | 整數取餘（CPU hcode）；結果符號與被除數相同，除以零失敗 |
 | `& \| ^ ~ << >>` | 位元運算（CPU hcode）；移位數須在 0 到 63，`>>` 為算術右移 |
 | `== != < <= > >=` | 比較運算，運算元仍須符合型別要求 |
@@ -89,6 +90,9 @@ CPU hcode 支援 signed `i64` 整數、boolean、string、list、string-keyed di
 | `abs(n)`、`min(a, b)`、`max(a, b)` | 整數絕對值、最小值與最大值（CPU hcode）；`abs(i64::MIN)` 會失敗 |
 | `range(stop)`、`range(start, stop)`、`range(start, stop, step)` | 產生 int list（CPU hcode）；每個元素計一次用量，超過 collection 上限會失敗；step 不可為 0 |
 | `wrapping_add`、`wrapping_sub`、`wrapping_mul` | 整數運算保留低 64 位元，不因溢位失敗（CPU hcode） |
+| `float(x)`、`int(x)` | 整數與浮點數互轉（CPU hcode）；`int` 向零截斷，超出 int64 範圍會失敗 |
+| `sqrt`、`floor`、`ceil`、`round` | 平方根與取整（CPU hcode）；負數開根號會失敗 |
+| `exp`、`ln`、`pow`、`sin`、`cos`、`tanh` | 超越函式（CPU hcode）；使用固定的軟體級數而非主機 libm，每次呼叫另計 16 單位用量。`sin`、`cos` 接受 `\|x\|` 至 1000000；`ln` 需要正數 |
 
 `len(string)` 計 bytes，但 `string[index]` 按 characters；不可用前者直接推算後者的有效索引。上表的 builtin 名稱在 hcode 中是保留字，`fn` 不能使用同名。
 
@@ -97,7 +101,6 @@ CPU hcode 支援 signed `i64` 整數、boolean、string、list、string-keyed di
 - `while`、`break`、`continue`、member-dot access（例如 `input.values`）。
 - Source comments：不要在 hcode source 加 `//`、`#` 或 `/* ... */`。
 - 任意 host function、第三方套件、GPU kernel 或使用者 executable。
-- CPU 浮點數，以及 `sqrt`、`floor`、`ceil`、`round`、`exp`、`ln`、`pow` 等 math builtins。
 
 **中文資料放 JSON input，不要直接寫在 source string literals。** Source lexer 的字串是 byte-wise decoding，無法保證 non-ASCII literal 原樣保留，也不接受 `\uXXXX`。可用的 source escapes 是 `\"`、`\\`、`\n`、`\r`、`\t`。JSON input 與輸出支援 UTF-8；例如把 `{"message":"你好"}` 當 input，source 使用 `get(input, "message");`。
 
