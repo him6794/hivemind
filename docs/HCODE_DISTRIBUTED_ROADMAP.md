@@ -27,6 +27,7 @@
 - [x] 盤點並確定既有 peer／lease／CAS 的接線契約與遷移方式。
 - [x] 不讀取內容的 chunk 授權：共用當前副本檢查，供快取與 P2P 使用。
 - [x] P2P 專用短效讀取權杖：用途隔離、來源／租約／chunk 綁定，不攜帶 Worker 執行權限。
+- [x] 來源端點控制面查核：比對 Headscale 節點、單次註冊 key ID、namespace、線上狀態及 overlay IPv4。
 - [ ] hcode 檔案來源登錄與 Nodepool 授權；來源位置可變，但檔案與 chunk 身分不可變。
 - [ ] Master／CLI 受控提供來源，Worker 依任務租約直接下載與驗證，不經 Nodepool 搬運大檔。
 - [ ] Worker 內容快取、容量限制、淘汰、到期與損壞隔離；快取命中仍檢查當次授權。
@@ -86,6 +87,10 @@ Worker 的 execution token 只傳給 Nodepool，不轉交來源 peer。P2P 使�
 來源端點必須經受控的位址和身分驗證；不接受任意 URL、重導向或未驗證 DNS 作為 Worker 下載目標。優先走既有 overlay，獨立本機測試使用顯式隔離配置，不放寬正式路徑。舊 Nodepool 內容僅作既有任務相容讀取，不作新 P2P 任務失敗時的隱藏中央 fallback。
 
 現有 `vpn_peers.virtual_ip` 可由客戶端狀態回報更新，Master 的 VPN client label 也未綁定 `client_identities.identity_id`；兩者都不能直接作為來源端點的可信證據。來源登錄須由 Nodepool 核對已簽發的 enrollment／VPN 身分與 Headscale 控制面中的實際節點及位址，配合受控資料服務埠。未完成綁定的來源維持 pending，不向 Worker 發布；`online=true`、自報 IP 或知道 identity UUID 都不能取代此檢查。
+
+`hivemind_vpn_service::peer_verifier::HeadscalePeerVerifier` 提供有界的控制面查核。只向 operator 設定的 Headscale URL 發出查詢，使用獨立的可重用連線池，不採用環境代理、不跟隨重導向；連線最長 3 秒、整次請求最長 8 秒，回覆最多 64 KiB。節點 ID 只是查詢提示，必須同時符合 Nodepool 已保存的單次 preauth key ID、namespace、線上狀態、節點期限與唯一的 `100.64.0.0/10` IPv4。
+
+新版 Headscale 會遮罩回覆中的 key 文字，因此不能拿它比對原始 secret，也不能接受 peer 自報的 key ID。來源登錄必須先補上簽發時的 key ID 持久化；沒有這個綁定的舊 VPN 紀錄不能直接升格為已驗來源。已消耗的 enrollment key 到期不等於已加入節點到期，節點期限以控制面 `expiry` 為準。這個查核元件尚未接到登錄 RPC；回覆只是一個時間點的身分觀察，不保證資料服務可達或持有任何 chunk。
 
 ### CAS 與恢復
 

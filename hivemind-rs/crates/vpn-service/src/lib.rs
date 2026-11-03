@@ -4,6 +4,7 @@
 pub mod grpc_server;
 pub mod headscale_client;
 pub mod peer_manager;
+pub mod peer_verifier;
 pub mod wireguard_config;
 
 use crate::wireguard_config::{
