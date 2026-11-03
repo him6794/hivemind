@@ -33,6 +33,49 @@ mod hcode_artifacts {
     }
 
     #[tokio::test]
+    async fn tensor_artifact_pins_account_uuid_without_backfilling_recreated_owners() {
+        let (p, fixture) = pool("hcode_artifact_owner_uuid")
+            .await
+            .expect("isolated PostgreSQL required");
+        let repo = TaskRepository::new(p);
+        let owner: Uuid = sqlx::query_scalar("INSERT INTO users (username, password_hash) VALUES ('tensor-owner', 'hash') RETURNING id")
+            .fetch_one(&repo.pool).await.unwrap();
+        let mut task = make_task("owner-pinned-task", "tensor-owner");
+        task.runtime = Some("hcode".into());
+        task.task_source = Some("return input;".into());
+        task.torrent_source = Some(input(b"owner-pinned-tensor"));
+        repo.create(&task).await.unwrap();
+        let saved: Option<Uuid> = sqlx::query_scalar(
+            "SELECT owner_user_id FROM general_compute_artifacts WHERE task_id = $1",
+        )
+        .bind(&task.task_id)
+        .fetch_one(&repo.pool)
+        .await
+        .unwrap();
+        assert_eq!(saved, Some(owner));
+        sqlx::query("DELETE FROM users WHERE id = $1")
+            .bind(owner)
+            .execute(&repo.pool)
+            .await
+            .unwrap();
+        let replacement: Uuid = sqlx::query_scalar("INSERT INTO users (username, password_hash) VALUES ('tensor-owner', 'new-hash') RETURNING id")
+            .fetch_one(&repo.pool).await.unwrap();
+        assert_ne!(replacement, owner);
+        hivemind_database::postgres::run_migrations(&repo.pool)
+            .await
+            .unwrap();
+        let saved: Option<Uuid> = sqlx::query_scalar(
+            "SELECT owner_user_id FROM general_compute_artifacts WHERE task_id = $1",
+        )
+        .bind(&task.task_id)
+        .fetch_one(&repo.pool)
+        .await
+        .unwrap();
+        assert_eq!(saved, None);
+        fixture.cleanup().await.unwrap();
+    }
+
+    #[tokio::test]
     async fn tensor_artifact_storage_and_live_replica_authorization() {
         let Some((p, fixture)) = pool("hcode_artifact_authorization").await else {
             return;

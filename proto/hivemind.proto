@@ -650,6 +650,39 @@ message HcodeArtifactChunkAuthorization {
     int64 chunk_size_bytes = 4;
 }
 
+// Owner -> Nodepool: register metadata for an already enrolled overlay peer.
+// There is intentionally no caller-controlled IP, URL, port, TTL or key ID.
+// Registration does not prove chunk availability or authorize any byte read.
+message RegisterHcodeSourceRequest {
+    string token = 1;
+    string task_id = 2;
+    string artifact_id = 3;
+    string vpn_client_id = 4;
+    uint64 headscale_node_id = 5;
+}
+
+message HcodeSourceRequest {
+    string token = 1;
+    string source_id = 2;
+}
+
+message HcodeSourceRegistration {
+    string source_id = 1;
+    string registration_id = 2; // changes on every renewal; fence future read leases
+    string task_id = 3;
+    string artifact_id = 4;
+    string artifact_sha256 = 5;
+    int64 artifact_size_bytes = 6;
+    string overlay_ipv4 = 7; // observed through the trusted Headscale controller
+    uint32 port = 8; // fixed overlay-only artifact service port
+    int64 expires_at_unix_ms = 9;
+    string state = 10; // registered_pending; never implies content readiness
+}
+
+message RevokeHcodeSourceResponse {
+    bool revoked = 1;
+}
+
 // Nodepool -> Worker: authenticated admission/readiness for a
 // general-compute attempt.  Chunk uploads must happen only after this
 // request has established the assignment and immutable request identity.
@@ -1266,6 +1299,14 @@ service GeneralComputeArtifactService {
     rpc UploadChunk(GeneralComputeArtifactChunkUpload) returns (GeneralComputeArtifactChunkUploadResponse);
     rpc DownloadHcodeChunk(HcodeArtifactChunkDownload) returns (HcodeArtifactChunkDownloadResponse);
     rpc AuthorizeHcodeChunk(HcodeArtifactChunkDownload) returns (HcodeArtifactChunkAuthorization);
+}
+
+// Metadata-only owner control. No byte transfer or Worker discovery is enabled
+// by registering a source; those require separate availability and live leases.
+service HcodeArtifactSourceService {
+    rpc RegisterSource(RegisterHcodeSourceRequest) returns (HcodeSourceRegistration);
+    rpc GetSource(HcodeSourceRequest) returns (HcodeSourceRegistration);
+    rpc RevokeSource(HcodeSourceRequest) returns (RevokeHcodeSourceResponse);
 }
 
 service BatchRuntimeService {

@@ -2214,6 +2214,7 @@ dependencies = [
  "hivemind-models",
  "hivemind-proto",
  "hivemind-task-scheduler",
+ "hivemind-vpn-service",
  "prost",
  "serde_json",
  "sha2 0.10.9",

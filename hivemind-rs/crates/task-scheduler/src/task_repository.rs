@@ -5065,13 +5065,14 @@ impl TaskRepository {
             })
             .or(task.deadline);
         let mut tx = self.pool.begin().await?;
-        if let Some(inputs) = &hcode_inputs {
-            // Serialize storage reservations for this owner, including concurrent
-            // submissions, without trusting the Master's advertised resources.
-            sqlx::query("SELECT username FROM users WHERE username = $1 FOR UPDATE")
-                .bind(&task.owner)
-                .fetch_one(&mut *tx)
-                .await?;
+        let artifact_owner_id = if let Some(inputs) = &hcode_inputs {
+            // Serialize storage reservations and pin the account UUID. A later
+            // account with the same username must not inherit P2P source rights.
+            let owner_id: Uuid =
+                sqlx::query_scalar("SELECT id FROM users WHERE username = $1 FOR UPDATE")
+                    .bind(&task.owner)
+                    .fetch_one(&mut *tx)
+                    .await?;
             for statement in [
                 "DELETE FROM general_compute_artifact_chunks c USING general_compute_artifacts a, tasks t
                  WHERE c.task_id = a.task_id AND c.artifact_id = a.artifact_id
@@ -5105,7 +5106,10 @@ impl TaskRepository {
             {
                 anyhow::bail!("hcode artifact owner storage quota exceeded");
             }
-        }
+            Some(owner_id)
+        } else {
+            None
+        };
         if runtime == Some("production_sandboxed_dsl")
             && (task
                 .managed_dsl_backend_id
@@ -5167,8 +5171,8 @@ impl TaskRepository {
                 sqlx::query(
                     "INSERT INTO general_compute_artifacts
                         (task_id, artifact_id, sha256, size_bytes, expected_chunk_count,
-                         availability_status, complete, expires_at)
-                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+                         availability_status, complete, expires_at, owner_user_id)
+                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
                 )
                 .bind(&task.task_id)
                 .bind(&artifact.artifact_id)
@@ -5182,6 +5186,7 @@ impl TaskRepository {
                 })
                 .bind(artifact.inline_bytes.is_some())
                 .bind(artifact_deadline)
+                .bind(artifact_owner_id)
                 .execute(&mut *tx)
                 .await?;
                 for chunk in &artifact.chunks {

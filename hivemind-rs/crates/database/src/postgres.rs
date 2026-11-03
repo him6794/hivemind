@@ -870,6 +870,15 @@ async fn run_migrations_inner(pool: &PgPool) -> Result<()> {
     .execute(&mut *tx)
     .await?;
 
+    // New hcode admissions pin the account UUID. Legacy metadata cannot be
+    // backfilled from a username that may now belong to a recreated account.
+    sqlx::query(
+        "ALTER TABLE general_compute_artifacts
+         ADD COLUMN IF NOT EXISTS owner_user_id UUID REFERENCES users(id) ON DELETE SET NULL;",
+    )
+    .execute(&mut *tx)
+    .await?;
+
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS managed_gpu_results (
             task_id VARCHAR(255) NOT NULL REFERENCES tasks(task_id) ON DELETE CASCADE,
@@ -1361,6 +1370,32 @@ async fn run_migrations_inner(pool: &PgPool) -> Result<()> {
             headscale_key_id BIGINT NOT NULL CHECK (headscale_key_id > 0),
             issued_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
             UNIQUE (controller_url, headscale_key_id)
+        );",
+    )
+    .execute(&mut *tx)
+    .await?;
+
+    // Enrollment IDs deliberately have no FK: re-issuance replaces the ID.
+    // A source retains the old ID and fails the live equality check instead of
+    // blocking VPN rotation or inheriting the new enrollment through a cascade.
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS hcode_artifact_sources (
+            source_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            registration_id UUID NOT NULL,
+            artifact_row_id UUID NOT NULL REFERENCES general_compute_artifacts(id) ON DELETE CASCADE,
+            owner_user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            peer_id UUID NOT NULL REFERENCES vpn_peers(id) ON DELETE CASCADE,
+            enrollment_id UUID NOT NULL,
+            headscale_node_id BIGINT NOT NULL CHECK (headscale_node_id > 0),
+            overlay_ipv4 VARCHAR(15) NOT NULL
+                CHECK (family(overlay_ipv4::inet) = 4 AND overlay_ipv4::inet <<= '100.64.0.0/10'::inet),
+            observed_at TIMESTAMPTZ NOT NULL,
+            expires_at TIMESTAMPTZ NOT NULL,
+            revoked_at TIMESTAMPTZ,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            UNIQUE (artifact_row_id, peer_id),
+            CHECK (expires_at > observed_at)
         );",
     )
     .execute(&mut *tx)

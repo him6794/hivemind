@@ -62,10 +62,27 @@ impl From<sqlx::Error> for VpnEnrollmentError {
     }
 }
 
-pub(super) struct AuthenticatedOwner {
+/// An active account observed through the Nodepool-issued account token.
+/// This is not a revocable account session or a reusable data-plane grant.
+/// Callers must recheck account state and expiry in their own transaction.
+pub struct AuthenticatedOwner {
     pub(super) id: Uuid,
     pub(super) username: String,
     expires_at: DateTime<Utc>,
+}
+
+impl AuthenticatedOwner {
+    pub fn id(&self) -> Uuid {
+        self.id
+    }
+
+    pub fn username(&self) -> &str {
+        &self.username
+    }
+
+    pub fn expires_at(&self) -> DateTime<Utc> {
+        self.expires_at
+    }
 }
 
 #[derive(Debug)]
@@ -110,7 +127,7 @@ struct EnrollmentSnapshot {
 }
 
 impl VpnService {
-    pub(super) async fn authenticate_vpn_owner(&self, token: &str) -> Result<AuthenticatedOwner> {
+    pub async fn authenticate_vpn_owner(&self, token: &str) -> Result<AuthenticatedOwner> {
         let claims = JwtService::new(
             &self.config.auth.jwt_secret,
             self.config.auth.token_expiry_hours,

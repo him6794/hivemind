@@ -1,4 +1,5 @@
 pub mod grpc;
+pub mod hcode_sources;
 pub mod heartbeat;
 pub mod outbound_session;
 pub mod service;

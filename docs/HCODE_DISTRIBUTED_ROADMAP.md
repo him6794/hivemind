@@ -29,7 +29,8 @@
 - [x] P2P 專用短效讀取權杖：用途隔離、來源／租約／chunk 綁定，不攜帶 Worker 執行權限。
 - [x] 來源端點控制面查核：比對 Headscale 節點、單次註冊 key ID、namespace、線上狀態及 overlay IPv4。
 - [x] 帳號綁定的 VPN 簽發紀錄：持久化控制面 key ID，重新簽發與撤銷使舊查核失效。
-- [ ] hcode 檔案來源登錄與 Nodepool 授權；來源位置可變，但檔案與 chunk 身分不可變。
+- [x] hcode 來源 metadata 登錄、查詢與撤銷：綁定帳號、VPN enrollment、immutable artifact 及短效期限。
+- [ ] 來源可用性驗證、Worker 來源查詢與逐次 live read lease；來源位置可變，但檔案與 chunk 身分不可變。
 - [ ] Master／CLI 受控提供來源，Worker 依任務租約直接下載與驗證，不經 Nodepool 搬運大檔。
 - [ ] Worker 內容快取、容量限制、淘汰、到期與損壞隔離；快取命中仍檢查當次授權。
 - [ ] 連線重用、部分下載恢復與 cancellation；有限重試，不得退回未授權來源。
@@ -99,7 +100,27 @@ Headscale 0.26.1 的 `POST /api/v1/preauthkey` 要求數字 user ID，不接受 
 
 舊 VPN 紀錄不回填可信 key ID，須重新完成已認證的簽發才能走此查核。控制面必須回傳 key ID 並確認 `reusable=false`；缺失時不發布新的 VPN 設定。簽發 JSON 請求不跟隨重導向、回覆限制 64 KiB，錯誤不回傳控制面 body。已消耗的 enrollment key 到期不等於已加入節點到期，節點期限以控制面 `expiry` 為準。
 
-這些方法尚未接到 hcode 來源登錄 RPC，也不建立 artifact read lease。查核回覆只是一個時間點的身分觀察，不保證資料服務可達或持有任何 chunk；來源 RPC 仍須接上可撤銷帳號 session、來源 TTL、受控服務埠及逐次 live lease 檢查。
+VPN 查核回覆只是一個時間點的身分觀察，不保證資料服務可達或持有任何 chunk，也不建立 artifact read lease。
+
+### 來源登錄與撤銷
+
+`HcodeArtifactSourceService` 的 `RegisterSource`、`GetSource`、`RevokeSource` 只提供任務擁有者的 metadata 管理。登錄請求包含帳號 token、task／artifact ID、VPN client label 和 Headscale node ID；不接受 IP、URL、port、TTL、key ID 或新的檔案雜湊。Nodepool 先檢查擁有者，再經 VPN enrollment 查核 overlay 節點，最後在持久化時重驗帳號、任務、artifact、enrollment 及期限。回覆的 IP 來自控制面，資料服務埠固定為 overlay-only `50054`。
+
+`hcode_artifact_sources` 綁定 artifact row、帳號 UUID、VPN peer row 與 enrollment UUID。每次登錄／續租都更換 `registration_id`，供後續 read lease 拒絕舊代際；單次期限最多 60 秒，並取原帳號 token、節點、artifact 和任務期限的最小值。保存時要求節點觀察不超過 15 秒。每個 artifact 最多 8 個來源，使用 artifact row lock 保證並發配額；到期和已撤銷紀錄可在續登錄時清理。重新簽發 VPN 不會被來源表的 FK 阻擋，也不會透過 cascade 把來源改綁到新的 enrollment。
+
+新 hcode artifact 在任務 admission 時保存擁有者 UUID；來源管理要求此 UUID 與有效帳號一致。舊 metadata 不從 username 自動回填，刪除帳號會清空原 UUID 綁定，重新建立同名帳號不繼承舊 artifact 的來源權限。此限制不改寫舊中央下載契約；需要登錄來源的舊任務須重新提交。
+
+目前已提交的帳號 JWT 沒有可撤銷 session，因此這裡採用明確的 **per-source 撤銷與短效期限**，而不是依賴尚未提交的帳號改版。來源查詢每次重驗帳號 active、原登錄期限、artifact／task 狀態及 enrollment UUID；帳號停用、VPN 撤銷／重簽、來源撤銷與到期均會拒絕後續查詢。這不代表帳號登出能撤銷既有 JWT；之後接入正式帳號 session 時，read lease 必須加上該 session 的 live gate。
+
+登錄狀態固定為 `registered_pending`。它不證明資料服務可達或檔案存在，不改變 artifact `complete`／`availability_status`，不建立 execution hold，不向 Worker 發布來源，也不搬運 bytes。後續須獨立接上可用性驗證、Worker discovery、用途隔離讀取權杖及逐次 live lease，才可將 P2P 工作送往該來源；`GetSource` 不是下載授權。
+
+### 首次端到端 P2P 接線
+
+- 節點識別在完成 VPN 加入後解析。簽發 preauth key 時尚無新節點 ID，不能把 key ID 當成 node ID；Nodepool 須依已保存的 enrollment 向控制面確認實際節點。
+- 來源服務放在 CLI、Master 與 Worker 可共用的宿主層，不讓 CLI-only build 依賴 Worker 執行器。Windows userspace overlay 須另接 `50054` inbound forwarding，不能假設系統介面能直接 bind overlay IP。
+- Worker 的執行讀取租約綁定當前 assignment、來源 `registration_id`、enrollment 與 immutable chunk；來源每次服務前回 Nodepool 重驗。原 Worker execution token 不出現在 peer 請求中。
+- 派工前的可用性探測與執行讀取使用不同用途及授權條件，不能偽造 Worker assignment 來解開依賴循環。若以 chunk SHA-256 驗證探測，必須驗完整的 manifest chunk（最多 1 MiB），不能拿部分 bytes 的雜湊與整個 chunk 比對。一次成功探測只形成有期限的可用性觀察，不代表檔案永久完整或所有 chunks 均可取得。
+- 新 P2P 任務明確記錄傳輸模式；來源不可用時等待、重試或失敗，不自動改讀 Nodepool bytes。舊中央儲存路徑仍維持既有任務相容性。
 
 ### CAS 與恢復
 

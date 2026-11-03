@@ -578,6 +578,13 @@ async fn run_service_inner(
                 .max_encoding_message_size(hivemind_proto::WORKER_SESSION_FRAME_MAX_BYTES);
         let batch_svc =
             BatchRuntimeServiceServer::new(GrpcBatchRuntimeService::new(np_state.clone()));
+        let source_svc = hivemind_proto::hcode_artifact_source_service_server::HcodeArtifactSourceServiceServer::new(
+            hivemind_node_manager::hcode_sources::GrpcHcodeArtifactSourceService::new(
+                db.pool.clone(), vpn.clone(),
+            ),
+        )
+        .max_decoding_message_size(hivemind_node_manager::hcode_sources::HCODE_SOURCE_RPC_MAX_BYTES)
+        .max_encoding_message_size(hivemind_node_manager::hcode_sources::HCODE_SOURCE_RPC_MAX_BYTES);
         let vpn_svc = VpnServiceServer::new(GrpcVpnService::new(vpn));
 
         let np_addr = config.server.nodepool_grpc_addr.clone();
@@ -592,6 +599,7 @@ async fn run_service_inner(
                         .max_encoding_message_size(max_msg),
                 )
                 .add_service(artifact_svc)
+                .add_service(source_svc)
                 .add_service(batch_svc)
                 .add_service(session_svc)
                 .add_service(vpn_svc)
