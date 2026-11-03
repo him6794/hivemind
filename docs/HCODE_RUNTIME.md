@@ -82,7 +82,7 @@ closed interpreter. Its runtime, backend, cost-model, and semantics identities
 are pinned by
 [`executor-rs/crates/managed-function-runtime/hcode-semantics.json`](../executor-rs/crates/managed-function-runtime/hcode-semantics.json)
 and digest
-`1fb0e736676b6cc9d7090094b0e57e37f691b2b191eda5b9c7298a848bdc9593`.
+`424747d9942f83145d923e022b39095f5d6baf7855da2277b23745d0a8f1a27a`.
 
 - Each managed task is assigned to three distinct Workers by default, with a
   two-replica quorum; at most seven replicas may be configured. A single Worker
@@ -228,11 +228,34 @@ expression > expression
 expression >= expression
 ```
 
+CPU hcode only. The frozen v0 language rejects these tokens:
+
+```text
+expression % expression
+expression & expression
+expression | expression
+expression ^ expression
+expression << expression
+expression >> expression
+~expression
+```
+
+From lowest to highest precedence: `or`; `and`; `not`; `==` and `!=`; the
+ordering comparisons; `|`; `^`; `&`; `<<` and `>>`; `+` and `-`; `*`, `/`, and
+`%`; then unary `-`, `+`, and `~`. Bitwise operators therefore bind tighter
+than comparisons, as in Python: `6 & 3 == 2` means `(6 & 3) == 2`.
+
 Rules:
 
 - Identifiers are ASCII letters, digits, and `_`, and must not start with a
   digit.
-- Integers are signed 64-bit values.
+- Integers are signed 64-bit values. Overflow fails the execution; use
+  `wrapping_add`, `wrapping_sub`, or `wrapping_mul` where wrap-around is the
+  intent.
+- In CPU hcode, `%` truncates like `/`: the remainder takes the sign of the
+  dividend. A zero divisor fails. `&`, `|`, `^`, and `~` act on two's-complement
+  int64 values. `<<` and `>>` require a count from 0 through 63; `<<` discards
+  bits shifted out of the word, and `>>` is arithmetic.
 - Source strings use double quotes and `\"`, `\\`, `\n`, `\r`, and `\t`
   escapes, without `\uXXXX`. Byte-wise source-literal decoding in both CPU
   contracts does not preserve non-ASCII UTF-8 text. Pass Unicode data through
@@ -247,12 +270,20 @@ Rules:
   deterministically assigned runtime usage budget derived from the task-wide
   `max_cpt`; structural limits and the task deadline remain active. Frozen v0
   fixtures additionally retain their historical `max_loop_iterations` limit.
-- CPU built-ins are `len(value)`, `get(target, key)`, and
-  `contains(target, value)`. `len(string)` counts UTF-8 bytes; string indexing
-  counts characters. Numeric CPU input is restricted to integers;
+- Built-ins available in both CPU contracts are `len(value)`, `get(target, key)`,
+  and `contains(target, value)`. `len(string)` counts UTF-8 bytes; string
+  indexing counts characters. Numeric CPU input is restricted to integers;
   floating-point operations belong to the GPU contract.
+- CPU hcode also has `abs`, `min`, and `max` over integers; `range(stop)`,
+  `range(start, stop)`, and `range(start, stop, step)`; and `wrapping_add`,
+  `wrapping_sub`, and `wrapping_mul`. `range` builds a list of ints, charges one
+  operation per element before building it, and fails above
+  `max_collection_items`. `range` requires a non-zero step.
+- CPU hcode reserves every builtin name above: a `fn` with one of those names is
+  rejected before execution, because builtins resolve first and the user function
+  would never run. The frozen v0 language keeps its previous behavior.
 - `if` requires an `else` and one expression per branch. Bare reassignment,
-  `while`, `break`, `continue`, `%`, member-dot access, and source comments are
+  `while`, `break`, `continue`, member-dot access, and source comments are
   unsupported. Use `let` to rebind a variable.
 
 Forbidden in hcode (and in the frozen v0 language):

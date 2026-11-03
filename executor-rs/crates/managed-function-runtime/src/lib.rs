@@ -21,7 +21,7 @@ pub const V1_SEMANTICS_MANIFEST_JSON: &str = include_str!("../hcode-semantics.js
 /// SHA-256 of the canonical JSON bytes in [`V1_SEMANTICS_MANIFEST_JSON`],
 /// excluding the file's trailing newline.
 pub const V1_SEMANTICS_MANIFEST_SHA256: &str =
-    "1fb0e736676b6cc9d7090094b0e57e37f691b2b191eda5b9c7298a848bdc9593";
+    "424747d9942f83145d923e022b39095f5d6baf7855da2277b23745d0a8f1a27a";
 
 /// Versioned metering identity committed by the v1 semantics manifest.
 pub const V1_COST_MODEL_ID: &str = "hcode-execution-cpt-v1";
@@ -80,6 +80,20 @@ impl Surface {
     #[must_use]
     const fn floats_enabled(self) -> bool {
         matches!(self, Self::HcodeGpu)
+    }
+
+    /// CPU hcode extensions: integer remainder, bitwise and shift operators,
+    /// and the builtins that exist only on the budgeted CPU surface.
+    #[must_use]
+    const fn hcode_extensions(self) -> bool {
+        matches!(self, Self::Hcode)
+    }
+
+    /// `abs`, `min`, and `max` exist on both hcode surfaces. Their float
+    /// behavior is still governed by [`Self::floats_enabled`].
+    #[must_use]
+    const fn numeric_builtins(self) -> bool {
+        matches!(self, Self::Hcode | Self::HcodeGpu)
     }
 }
 
@@ -823,6 +837,13 @@ enum Token {
     Minus,
     Star,
     Slash,
+    Percent,
+    Amp,
+    Pipe,
+    Caret,
+    Tilde,
+    Shl,
+    Shr,
     Eq,
     EqEq,
     BangEq,
@@ -905,6 +926,26 @@ impl<'a> Lexer<'a> {
                     self.bump();
                     Token::Slash
                 }
+                b'%' if self.surface.hcode_extensions() => {
+                    self.bump();
+                    Token::Percent
+                }
+                b'&' if self.surface.hcode_extensions() => {
+                    self.bump();
+                    Token::Amp
+                }
+                b'|' if self.surface.hcode_extensions() => {
+                    self.bump();
+                    Token::Pipe
+                }
+                b'^' if self.surface.hcode_extensions() => {
+                    self.bump();
+                    Token::Caret
+                }
+                b'~' if self.surface.hcode_extensions() => {
+                    self.bump();
+                    Token::Tilde
+                }
                 b'=' => {
                     self.bump();
                     if self.consume_byte(b'=') {
@@ -925,6 +966,8 @@ impl<'a> Lexer<'a> {
                     self.bump();
                     if self.consume_byte(b'=') {
                         Token::LtEq
+                    } else if self.surface.hcode_extensions() && self.consume_byte(b'<') {
+                        Token::Shl
                     } else {
                         Token::Lt
                     }
@@ -933,6 +976,8 @@ impl<'a> Lexer<'a> {
                     self.bump();
                     if self.consume_byte(b'=') {
                         Token::GtEq
+                    } else if self.surface.hcode_extensions() && self.consume_byte(b'>') {
+                        Token::Shr
                     } else {
                         Token::Gt
                     }
@@ -1214,6 +1259,12 @@ enum BinaryOp {
     Sub,
     Mul,
     Div,
+    Rem,
+    BitAnd,
+    BitOr,
+    BitXor,
+    Shl,
+    Shr,
     Eq,
     NotEq,
     Lt,
@@ -1227,6 +1278,7 @@ enum UnaryOp {
     Neg,
     Pos,
     Not,
+    BitNot,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1410,13 +1462,77 @@ impl Parser {
     }
 
     fn comparison(&mut self) -> Result<Expr, RuntimeError> {
-        let mut expr = self.term()?;
+        let mut expr = self.bit_or()?;
         loop {
             let op = match self.peek() {
                 Token::Lt => BinaryOp::Lt,
                 Token::LtEq => BinaryOp::LtEq,
                 Token::Gt => BinaryOp::Gt,
                 Token::GtEq => BinaryOp::GtEq,
+                _ => break,
+            };
+            self.advance();
+            let right = self.bit_or()?;
+            expr = Expr::Binary {
+                left: Box::new(expr),
+                op,
+                right: Box::new(right),
+            };
+        }
+        Ok(expr)
+    }
+
+    // The bitwise levels bind looser than additive arithmetic and tighter than
+    // comparisons, as in Python. Their tokens exist only on the CPU hcode
+    // surface, so the frozen v0 grammar never reaches them.
+    fn bit_or(&mut self) -> Result<Expr, RuntimeError> {
+        let mut expr = self.bit_xor()?;
+        while matches!(self.peek(), Token::Pipe) {
+            self.advance();
+            let right = self.bit_xor()?;
+            expr = Expr::Binary {
+                left: Box::new(expr),
+                op: BinaryOp::BitOr,
+                right: Box::new(right),
+            };
+        }
+        Ok(expr)
+    }
+
+    fn bit_xor(&mut self) -> Result<Expr, RuntimeError> {
+        let mut expr = self.bit_and()?;
+        while matches!(self.peek(), Token::Caret) {
+            self.advance();
+            let right = self.bit_and()?;
+            expr = Expr::Binary {
+                left: Box::new(expr),
+                op: BinaryOp::BitXor,
+                right: Box::new(right),
+            };
+        }
+        Ok(expr)
+    }
+
+    fn bit_and(&mut self) -> Result<Expr, RuntimeError> {
+        let mut expr = self.shift()?;
+        while matches!(self.peek(), Token::Amp) {
+            self.advance();
+            let right = self.shift()?;
+            expr = Expr::Binary {
+                left: Box::new(expr),
+                op: BinaryOp::BitAnd,
+                right: Box::new(right),
+            };
+        }
+        Ok(expr)
+    }
+
+    fn shift(&mut self) -> Result<Expr, RuntimeError> {
+        let mut expr = self.term()?;
+        loop {
+            let op = match self.peek() {
+                Token::Shl => BinaryOp::Shl,
+                Token::Shr => BinaryOp::Shr,
                 _ => break,
             };
             self.advance();
@@ -1455,6 +1571,7 @@ impl Parser {
             let op = match self.peek() {
                 Token::Star => BinaryOp::Mul,
                 Token::Slash => BinaryOp::Div,
+                Token::Percent => BinaryOp::Rem,
                 _ => break,
             };
             self.advance();
@@ -1472,6 +1589,7 @@ impl Parser {
         let op = match self.peek() {
             Token::Minus => Some(UnaryOp::Neg),
             Token::Plus => Some(UnaryOp::Pos),
+            Token::Tilde => Some(UnaryOp::BitNot),
             _ => None,
         };
         if let Some(op) = op {
@@ -1669,6 +1787,21 @@ impl Parser {
     }
 }
 
+/// Builtin names that resolve on the CPU hcode surface. A user function may
+/// not reuse one, because builtins resolve before user functions.
+const HCODE_BUILTIN_NAMES: &[&str] = &[
+    "len",
+    "get",
+    "contains",
+    "abs",
+    "min",
+    "max",
+    "range",
+    "wrapping_add",
+    "wrapping_sub",
+    "wrapping_mul",
+];
+
 struct Evaluator<'a> {
     limits: ExecutionLimits,
     receipt: ExecutionReceipt,
@@ -1727,6 +1860,19 @@ impl<'a> Evaluator<'a> {
     fn eval_program(mut self, program: &Program) -> Result<ExecutionResult, RuntimeError> {
         for statement in &program.statements {
             if let Stmt::Fn(function) = statement {
+                // Builtins resolve before user functions, so a user function
+                // with a builtin name would never run. Reject it up front.
+                if self.surface.hcode_extensions()
+                    && HCODE_BUILTIN_NAMES.contains(&function.name.as_str())
+                {
+                    return Err(RuntimeError::new(
+                        "parse_error",
+                        format!(
+                            "function name '{}' is reserved for a builtin",
+                            function.name
+                        ),
+                    ));
+                }
                 self.functions
                     .insert(function.name.clone(), function.clone());
             }
@@ -2293,17 +2439,24 @@ impl<'a> Evaluator<'a> {
                 };
                 Ok(Some(Value::Bool(value)))
             }
-            "abs" if self.surface.floats_enabled() => {
+            "abs" if self.surface.numeric_builtins() => {
                 let [arg] = args else {
                     return Err(RuntimeError::new("arity_error", "abs expects 1 argument"));
                 };
                 match self.eval_expr(arg)? {
+                    // CPU hcode fails on i64::MIN like every other checked
+                    // integer operation; the hcode-gpu surface is unchanged.
+                    Value::Int(value) if self.surface.hcode_extensions() => value
+                        .checked_abs()
+                        .map(Value::Int)
+                        .ok_or_else(integer_arithmetic_overflow_error)
+                        .map(Some),
                     Value::Int(value) => Ok(Some(Value::Int(value.wrapping_abs()))),
                     Value::Float(value) => Ok(Some(Value::Float(value.abs()))),
                     _ => Err(RuntimeError::new("type_error", "abs expects a number")),
                 }
             }
-            "min" | "max" if self.surface.floats_enabled() => {
+            "min" | "max" if self.surface.numeric_builtins() => {
                 let [left_arg, right_arg] = args else {
                     return Err(RuntimeError::new(
                         "arity_error",
@@ -2389,10 +2542,89 @@ impl<'a> Evaluator<'a> {
                 let exponent = numeric_value(&self.eval_expr(exponent_arg)?, "pow")?;
                 Ok(Some(Value::Float(base.powf(exponent))))
             }
+            "range" if self.surface.hcode_extensions() => self.eval_range(args).map(Some),
+            "wrapping_add" | "wrapping_sub" | "wrapping_mul" if self.surface.hcode_extensions() => {
+                self.eval_wrapping(name, args).map(Some)
+            }
             "abs" | "min" | "max" | "sqrt" | "floor" | "ceil" | "round" | "exp" | "ln" | "pow" => {
                 Ok(None)
             }
             _ => Ok(None),
+        }
+    }
+
+    /// `range(stop)`, `range(start, stop)`, and `range(start, stop, step)`
+    /// build an int list. The element count is charged before the list is
+    /// built, so an unaffordable range fails without allocating it.
+    fn eval_range(&mut self, args: &[Expr]) -> Result<Value, RuntimeError> {
+        let (start, stop, step) = match args {
+            [stop] => (0, self.eval_int_arg(stop, "range")?, 1),
+            [start, stop] => (
+                self.eval_int_arg(start, "range")?,
+                self.eval_int_arg(stop, "range")?,
+                1,
+            ),
+            [start, stop, step] => (
+                self.eval_int_arg(start, "range")?,
+                self.eval_int_arg(stop, "range")?,
+                self.eval_int_arg(step, "range")?,
+            ),
+            _ => {
+                return Err(RuntimeError::new(
+                    "arity_error",
+                    "range expects 1 to 3 arguments",
+                ));
+            }
+        };
+        if step == 0 {
+            return Err(RuntimeError::new(
+                "runtime_error",
+                "range step must not be zero",
+            ));
+        }
+        let count = range_len(start, stop, step);
+        if count > self.limits.max_collection_items {
+            return Err(value_limit_error());
+        }
+        self.charge(count)?;
+        let values = (0..count)
+            .map(|index| {
+                // Every index is below `count`, so the element lies between
+                // `start` and `stop`; the conversion cannot fail in practice.
+                let element = i128::from(start) + i128::from(step) * i128::from(index);
+                i64::try_from(element)
+                    .map(Value::Int)
+                    .map_err(|_| integer_arithmetic_overflow_error())
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        self.materialize_owned_value(Value::List(values))
+    }
+
+    /// `wrapping_add`, `wrapping_sub`, and `wrapping_mul` keep the low 64 bits
+    /// of the result instead of failing, for hashes and pseudo-random streams.
+    fn eval_wrapping(&mut self, name: &str, args: &[Expr]) -> Result<Value, RuntimeError> {
+        let [left, right] = args else {
+            return Err(RuntimeError::new(
+                "arity_error",
+                format!("{name} expects 2 arguments"),
+            ));
+        };
+        let left = self.eval_int_arg(left, name)?;
+        let right = self.eval_int_arg(right, name)?;
+        Ok(Value::Int(match name {
+            "wrapping_add" => left.wrapping_add(right),
+            "wrapping_sub" => left.wrapping_sub(right),
+            _ => left.wrapping_mul(right),
+        }))
+    }
+
+    fn eval_int_arg(&mut self, expr: &Expr, name: &str) -> Result<i64, RuntimeError> {
+        match self.eval_expr(expr)? {
+            Value::Int(value) => Ok(value),
+            _ => Err(RuntimeError::new(
+                "type_error",
+                format!("{name} expects int arguments"),
+            )),
         }
     }
 
@@ -2578,6 +2810,20 @@ fn eval_binary_integer(
             }
             _ => Err(RuntimeError::new("type_error", "/ expects ints")),
         },
+        BinaryOp::Rem => match (left, right) {
+            (Value::Int(_), Value::Int(0)) => {
+                Err(RuntimeError::new("runtime_error", "division by zero"))
+            }
+            (Value::Int(left), Value::Int(right)) => {
+                apply_integer_rem(left, right, checked_integer_arithmetic)
+            }
+            _ => Err(RuntimeError::new("type_error", "% expects ints")),
+        },
+        BinaryOp::BitAnd => int_bitwise(left, right, "&", |left, right| left & right),
+        BinaryOp::BitOr => int_bitwise(left, right, "|", |left, right| left | right),
+        BinaryOp::BitXor => int_bitwise(left, right, "^", |left, right| left ^ right),
+        BinaryOp::Shl => int_shift(left, right, "<<", true),
+        BinaryOp::Shr => int_shift(left, right, ">>", false),
         BinaryOp::Eq => Ok(Value::Bool(left == right)),
         BinaryOp::NotEq => Ok(Value::Bool(left != right)),
         BinaryOp::Lt => int_compare_integer(left, right, "<", |left, right| left < right),
@@ -2585,6 +2831,82 @@ fn eval_binary_integer(
         BinaryOp::Gt => int_compare_integer(left, right, ">", |left, right| left > right),
         BinaryOp::GtEq => int_compare_integer(left, right, ">=", |left, right| left >= right),
     }
+}
+
+/// Remainder takes the sign of the dividend, matching the truncating `/`.
+/// `i64::MIN % -1` overflows in checked mode, like `i64::MIN / -1`.
+fn apply_integer_rem(
+    left: i64,
+    right: i64,
+    checked_integer_arithmetic: bool,
+) -> Result<Value, RuntimeError> {
+    let result = if checked_integer_arithmetic {
+        left.checked_rem(right)
+    } else {
+        Some(left.wrapping_rem(right))
+    };
+    result
+        .map(Value::Int)
+        .ok_or_else(integer_arithmetic_overflow_error)
+}
+
+fn int_bitwise(
+    left: Value,
+    right: Value,
+    op: &'static str,
+    apply: impl FnOnce(i64, i64) -> i64,
+) -> Result<Value, RuntimeError> {
+    match (left, right) {
+        (Value::Int(left), Value::Int(right)) => Ok(Value::Int(apply(left, right))),
+        _ => Err(RuntimeError::new(
+            "type_error",
+            format!("{op} expects ints"),
+        )),
+    }
+}
+
+/// Shift counts must be in `0..=63`. `<<` discards bits shifted out of the
+/// 64-bit word, and `>>` is arithmetic, so the sign is kept.
+fn int_shift(
+    left: Value,
+    right: Value,
+    op: &'static str,
+    shift_left: bool,
+) -> Result<Value, RuntimeError> {
+    match (left, right) {
+        (Value::Int(value), Value::Int(amount)) => {
+            let amount = u32::try_from(amount)
+                .ok()
+                .filter(|amount| *amount < i64::BITS)
+                .ok_or_else(|| {
+                    RuntimeError::new(
+                        "runtime_error",
+                        format!("{op} count must be between 0 and 63"),
+                    )
+                })?;
+            Ok(Value::Int(if shift_left {
+                value.wrapping_shl(amount)
+            } else {
+                value >> amount
+            }))
+        }
+        _ => Err(RuntimeError::new(
+            "type_error",
+            format!("{op} expects ints"),
+        )),
+    }
+}
+
+/// Number of elements `range(start, stop, step)` produces for a non-zero
+/// step. The arithmetic is done in i128, so no endpoints can overflow.
+fn range_len(start: i64, stop: i64, step: i64) -> u64 {
+    let (start, stop, step) = (i128::from(start), i128::from(stop), i128::from(step));
+    let span = if step > 0 { stop - start } else { start - stop };
+    if span <= 0 {
+        return 0;
+    }
+    let stride = step.abs();
+    u64::try_from((span + stride - 1) / stride).unwrap_or(u64::MAX)
 }
 
 fn integer_arithmetic_overflow_error() -> RuntimeError {
@@ -2710,6 +3032,12 @@ fn eval_binary_float(
             (Value::Float(left), Value::Float(right)) => Ok(Value::Float(left / right)),
             _ => Err(RuntimeError::new("type_error", "/ expects ints or floats")),
         },
+        BinaryOp::Rem
+        | BinaryOp::BitAnd
+        | BinaryOp::BitOr
+        | BinaryOp::BitXor
+        | BinaryOp::Shl
+        | BinaryOp::Shr => eval_binary_integer(left, op, right, checked_integer_arithmetic),
         BinaryOp::Eq => Ok(Value::Bool(numeric_or_value_equal(&left, &right))),
         BinaryOp::NotEq => Ok(Value::Bool(!numeric_or_value_equal(&left, &right))),
         BinaryOp::Lt => numeric_compare(
@@ -2800,6 +3128,8 @@ fn eval_unary(
         (UnaryOp::Pos, Value::Int(value)) => Ok(Value::Int(*value)),
         (UnaryOp::Pos, Value::Float(value)) if floats => Ok(Value::Float(*value)),
         (UnaryOp::Not, Value::Bool(value)) => Ok(Value::Bool(!value)),
+        (UnaryOp::BitNot, Value::Int(value)) => Ok(Value::Int(!value)),
+        (UnaryOp::BitNot, _) => Err(RuntimeError::new("type_error", "~ expects an int")),
         (UnaryOp::Neg, _) => Err(RuntimeError::new(
             "type_error",
             if floats {
@@ -3060,5 +3390,165 @@ mod tests {
         assert_eq!(eval_v0("return 10 / 4;", "null").unwrap(), "2");
         assert_eq!(eval_v0("return 1 + 1;", "null").unwrap(), "2");
         assert_eq!(eval_v0("return -5 / 2;", "null").unwrap(), "-2");
+    }
+
+    fn eval_hcode(source: &str) -> Result<String, String> {
+        let max_output_bytes = ExecutionLimits::default().max_output_bytes;
+        let execution = ManagedExecutor
+            .execute_json_input(
+                source,
+                ExecutionLimits::for_managed_function_budget(u64::MAX),
+                "null",
+            )
+            .map_err(|error| error.to_string())?;
+        render_output_bounded(&execution.value, max_output_bytes).map_err(|error| error.to_string())
+    }
+
+    fn hcode_error_code(source: &str) -> &'static str {
+        ManagedExecutor
+            .execute_json_input(
+                source,
+                ExecutionLimits::for_managed_function_budget(u64::MAX),
+                "null",
+            )
+            .expect_err("the source must fail on the hcode surface")
+            .code()
+    }
+
+    #[test]
+    fn hcode_remainder_truncates_toward_zero() {
+        assert_eq!(eval_hcode("return 7 % 3;").unwrap(), "1");
+        assert_eq!(eval_hcode("return -7 % 3;").unwrap(), "-1");
+        assert_eq!(eval_hcode("return 7 % -3;").unwrap(), "1");
+        // The quotient and remainder agree with truncating division.
+        assert_eq!(eval_hcode("return -7 / 2 * 2 + -7 % 2;").unwrap(), "-7");
+        assert_eq!(hcode_error_code("return 1 % 0;"), "runtime_error");
+        assert_eq!(
+            hcode_error_code("return (-9223372036854775807 - 1) % -1;"),
+            "integer_arithmetic_overflow"
+        );
+    }
+
+    #[test]
+    fn hcode_bitwise_and_shift_operators_follow_python_precedence() {
+        assert_eq!(eval_hcode("return (12 & 10) | (1 ^ 3);").unwrap(), "10");
+        // Shifts bind looser than + and -, so this is (1 + 2) << 1.
+        assert_eq!(eval_hcode("return 1 + 2 << 1;").unwrap(), "6");
+        // Bitwise operators bind tighter than ==, so this is (6 & 3) == 2.
+        assert_eq!(eval_hcode("return 6 & 3 == 2;").unwrap(), "true");
+        assert_eq!(
+            eval_hcode("return 1 << 62;").unwrap(),
+            "4611686018427387904"
+        );
+        // >> is arithmetic, so the sign survives.
+        assert_eq!(eval_hcode("return -16 >> 2;").unwrap(), "-4");
+        assert_eq!(eval_hcode("return ~0;").unwrap(), "-1");
+        assert_eq!(hcode_error_code("return 1 << 64;"), "runtime_error");
+        assert_eq!(hcode_error_code("return 1 >> -1;"), "runtime_error");
+    }
+
+    #[test]
+    fn range_builds_bounded_int_lists() {
+        assert_eq!(eval_hcode("return range(4);").unwrap(), "[0,1,2,3]");
+        assert_eq!(eval_hcode("return range(2, 5);").unwrap(), "[2,3,4]");
+        assert_eq!(eval_hcode("return range(5, 0, -2);").unwrap(), "[5,3,1]");
+        assert_eq!(eval_hcode("return range(0, 10, 3);").unwrap(), "[0,3,6,9]");
+        assert_eq!(eval_hcode("return range(3, 3);").unwrap(), "[]");
+        assert_eq!(eval_hcode("return len(range(100000));").unwrap(), "100000");
+        assert_eq!(
+            eval_hcode("let total = 0; for i in range(5) { let total = total + i; } total;")
+                .unwrap(),
+            "10"
+        );
+        assert_eq!(hcode_error_code("return range(1, 2, 0);"), "runtime_error");
+        assert_eq!(
+            hcode_error_code("return range(100001);"),
+            "value_limit_exceeded"
+        );
+    }
+
+    #[test]
+    fn wrapping_builtins_keep_the_low_64_bits() {
+        assert_eq!(
+            eval_hcode("return wrapping_add(9223372036854775807, 1);").unwrap(),
+            "-9223372036854775808"
+        );
+        assert_eq!(
+            eval_hcode("return wrapping_mul(3037000500, 3037000500);").unwrap(),
+            "-9223372036709301616"
+        );
+        assert_eq!(
+            eval_hcode("return wrapping_sub(-9223372036854775807, 2);").unwrap(),
+            "9223372036854775807"
+        );
+        // Plain operators still fail on overflow.
+        assert_eq!(
+            hcode_error_code("return 9223372036854775807 + 1;"),
+            "integer_arithmetic_overflow"
+        );
+    }
+
+    #[test]
+    fn abs_min_and_max_work_on_hcode_integers() {
+        assert_eq!(eval_hcode("return abs(-5);").unwrap(), "5");
+        assert_eq!(eval_hcode("return min(3, 7);").unwrap(), "3");
+        assert_eq!(eval_hcode("return max(2, 9);").unwrap(), "9");
+        assert_eq!(
+            hcode_error_code("return abs(-9223372036854775807 - 1);"),
+            "integer_arithmetic_overflow"
+        );
+    }
+
+    #[test]
+    fn frozen_v0_and_hcode_gpu_reject_the_cpu_extensions() {
+        for source in [
+            "return 7 % 3;",
+            "return 1 << 2;",
+            "return ~1;",
+            "return 6 & 3;",
+        ] {
+            let error = ManagedExecutor
+                .execute(source, ExecutionLimits::default())
+                .unwrap_err();
+            assert_eq!(error.code(), "parse_error", "{source}");
+        }
+        for source in ["return range(3);", "return wrapping_add(1, 2);"] {
+            let error = ManagedExecutor
+                .execute(source, ExecutionLimits::default())
+                .unwrap_err();
+            assert_eq!(error.code(), "name_error", "{source}");
+        }
+        // v0 never reserved builtin names, so its programs may define them.
+        assert_eq!(
+            eval_v0("fn range(n) { return n; } return range(2);", "null").unwrap(),
+            "2"
+        );
+        assert!(
+            eval_gpu("return 7 % 3;", "null")
+                .unwrap_err()
+                .starts_with("parse_error")
+        );
+        assert!(
+            eval_gpu("return range(3);", "null")
+                .unwrap_err()
+                .starts_with("name_error")
+        );
+    }
+
+    #[test]
+    fn hcode_rejects_user_functions_named_like_builtins() {
+        assert_eq!(
+            hcode_error_code("fn range(n) { return n; } return range(2);"),
+            "parse_error"
+        );
+        assert_eq!(
+            hcode_error_code("fn min(a, b) { return a; } return min(1, 2);"),
+            "parse_error"
+        );
+        // Names that are not builtins on hcode stay available to programs.
+        assert_eq!(
+            eval_hcode("fn twice(n) { return n * 2; } return twice(4);").unwrap(),
+            "8"
+        );
     }
 }

@@ -54,7 +54,7 @@ fn add(a, b) {
 add(get(input, "left"), get(input, "right"));
 ```
 
-函式是頂層具名函式，`return` 提早回傳值。`for item in values { ... }` 只遍歷 list，不遍歷 dict、string，也沒有內建 range 產生器。
+函式是頂層具名函式，`return` 提早回傳值。`for item in values { ... }` 只遍歷 list，不遍歷 dict、string。需要整數序列時用 `range(...)` 產生 list（見下方 builtins）。
 
 `if` 是 expression，必須有 `else`；每個 branch 是單一 expression，不是任意 statements block：
 
@@ -70,6 +70,8 @@ CPU hcode 支援 signed `i64` 整數、boolean、string、list、string-keyed di
 | 寫法 | 說明 |
 | --- | --- |
 | `+ - * /` | 整數算術；超出 i64 範圍或除以零會失敗 |
+| `%` | 整數取餘（CPU hcode）；結果符號與被除數相同，除以零失敗 |
+| `& \| ^ ~ << >>` | 位元運算（CPU hcode）；移位數須在 0 到 63，`>>` 為算術右移 |
 | `== != < <= > >=` | 比較運算，運算元仍須符合型別要求 |
 | `and or not` | Boolean 運算；不是 JavaScript 的 `&&`／`||` |
 | `values[index]` | List 或 string 索引可為負數；越界失敗 |
@@ -84,15 +86,18 @@ CPU hcode 支援 signed `i64` 整數、boolean、string、list、string-keyed di
 | `len(value)` | List 元素數、dict entries 數或 string 的 **UTF-8 byte 數** |
 | `get(target, key)` | Dict＋string key，或 list＋非負 integer index；缺 key／越界回 `null`；不支援 string target |
 | `contains(target, value)` | Dict key 存在、string substring 或 list equality membership |
+| `abs(n)`、`min(a, b)`、`max(a, b)` | 整數絕對值、最小值與最大值（CPU hcode）；`abs(i64::MIN)` 會失敗 |
+| `range(stop)`、`range(start, stop)`、`range(start, stop, step)` | 產生 int list（CPU hcode）；每個元素計一次用量，超過 collection 上限會失敗；step 不可為 0 |
+| `wrapping_add`、`wrapping_sub`、`wrapping_mul` | 整數運算保留低 64 位元，不因溢位失敗（CPU hcode） |
 
-`len(string)` 計 bytes，但 `string[index]` 按 characters；不可用前者直接推算後者的有效索引。
+`len(string)` 計 bytes，但 `string[index]` 按 characters；不可用前者直接推算後者的有效索引。上表的 builtin 名稱在 hcode 中是保留字，`fn` 不能使用同名。
 
 ### 不支援的語法
 
-- `while`、`break`、`continue`、`%`、member-dot access（例如 `input.values`）。
+- `while`、`break`、`continue`、member-dot access（例如 `input.values`）。
 - Source comments：不要在 hcode source 加 `//`、`#` 或 `/* ... */`。
 - 任意 host function、第三方套件、GPU kernel 或使用者 executable。
-- CPU 浮點數及 `abs`、`min`、`max`、`sqrt`、`floor`、`ceil`、`round`、`exp`、`ln`、`pow` 等 math builtins。
+- CPU 浮點數，以及 `sqrt`、`floor`、`ceil`、`round`、`exp`、`ln`、`pow` 等 math builtins。
 
 **中文資料放 JSON input，不要直接寫在 source string literals。** Source lexer 的字串是 byte-wise decoding，無法保證 non-ASCII literal 原樣保留，也不接受 `\uXXXX`。可用的 source escapes 是 `\"`、`\\`、`\n`、`\r`、`\t`。JSON input 與輸出支援 UTF-8；例如把 `{"message":"你好"}` 當 input，source 使用 `get(input, "message");`。
 
