@@ -47,14 +47,15 @@ pub struct HcodeArtifactChunkAuthorization {
     pub chunk_size_bytes: i64,
 }
 
-enum HcodeChunkRead {
+pub(crate) enum HcodeChunkRead {
     Bytes,
     Metadata,
+    PeerLease,
 }
 
-/// Both paths check the current assignment in the same statement as the read.
+/// All read paths check the current assignment in the same statement as the read.
 /// Only static query fragments are interpolated; caller values are SQL binds.
-fn hcode_artifact_chunk_sql(mode: HcodeChunkRead) -> String {
+pub(crate) fn hcode_artifact_chunk_sql(mode: HcodeChunkRead) -> String {
     let (select, chunk_join, chunk_gate) = match mode {
         HcodeChunkRead::Bytes => (
             "SELECT c.content, m.sha256, m.size_bytes",
@@ -64,6 +65,19 @@ fn hcode_artifact_chunk_sql(mode: HcodeChunkRead) -> String {
         ),
         HcodeChunkRead::Metadata => (
             "SELECT f.sha256, f.size_bytes, m.sha256, m.size_bytes",
+            "",
+            "",
+        ),
+        HcodeChunkRead::PeerLease => (
+            "SELECT f.id AS artifact_row_id, f.owner_user_id, t.owner,
+                    r.id AS replica_row_id, r.transfer_generation,
+                    t.deadline AS task_deadline, a.deadline AS attempt_deadline,
+                    f.expires_at AS artifact_deadline, m.offset_bytes,
+                    jsonb_build_object(
+                        'task_id', t.task_id, 'artifact_id', f.artifact_id,
+                        'artifact_sha256', f.sha256, 'artifact_size_bytes', f.size_bytes,
+                        'offset', m.offset_bytes, 'chunk_sha256', m.sha256,
+                        'chunk_size_bytes', m.size_bytes) AS scope",
             "",
             "",
         ),

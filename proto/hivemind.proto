@@ -683,6 +683,38 @@ message RevokeHcodeSourceResponse {
     bool revoked = 1;
 }
 
+// Worker -> Nodepool only. Never forward chunk.token to the source peer.
+// A known source may be tried only for an already-ready, active assignment;
+// this is not source discovery or a pre-dispatch availability probe.
+message IssueHcodeReadLeaseRequest {
+    HcodeArtifactChunkDownload chunk = 1;
+    string source_id = 2;
+}
+
+// Worker -> source and source -> Nodepool: purpose-separated read token only.
+// No caller path, URL, range override or execution credential is accepted.
+message HcodePeerReadRequest {
+    string source_id = 1;
+    string token = 2;
+}
+
+message HcodePeerReadAuthorization {
+    string source_id = 1;
+    string registration_id = 2;
+    string task_id = 3;
+    string artifact_id = 4;
+    uint64 offset = 5;
+    HcodeArtifactChunkAuthorization chunk = 6;
+    int64 expires_at_unix_ms = 7;
+}
+
+message HcodeArtifactReadLease {
+    string token = 1;
+    string overlay_ipv4 = 2;
+    uint32 port = 3;
+    HcodePeerReadAuthorization authorization = 4;
+}
+
 // Nodepool -> Worker: authenticated admission/readiness for a
 // general-compute attempt.  Chunk uploads must happen only after this
 // request has established the assignment and immutable request identity.
@@ -1307,6 +1339,18 @@ service HcodeArtifactSourceService {
     rpc RegisterSource(RegisterHcodeSourceRequest) returns (HcodeSourceRegistration);
     rpc GetSource(HcodeSourceRequest) returns (HcodeSourceRegistration);
     rpc RevokeSource(HcodeSourceRequest) returns (RevokeHcodeSourceResponse);
+}
+
+// Nodepool authority. ValidateReadLease rechecks persisted live state for every
+// source read; a valid signature or an earlier successful validation is not enough.
+service HcodeArtifactReadLeaseService {
+    rpc IssueReadLease(IssueHcodeReadLeaseRequest) returns (HcodeArtifactReadLease);
+    rpc ValidateReadLease(HcodePeerReadRequest) returns (HcodePeerReadAuthorization);
+}
+
+// Overlay data plane hosted by the file owner. Bytes never pass through Nodepool.
+service HcodeArtifactPeerService {
+    rpc ReadChunk(HcodePeerReadRequest) returns (HcodeArtifactChunkDownloadResponse);
 }
 
 service BatchRuntimeService {

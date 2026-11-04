@@ -1401,6 +1401,29 @@ async fn run_migrations_inner(pool: &PgPool) -> Result<()> {
     .execute(&mut *tx)
     .await?;
 
+    // One replaceable capability per source/replica/manifest offset bounds row
+    // growth. Registration/enrollment IDs are fences, not cascading references.
+    // Store validated claims, never the reusable execution JWT itself.
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS hcode_artifact_read_leases (
+            lease_id UUID PRIMARY KEY,
+            source_id UUID NOT NULL REFERENCES hcode_artifact_sources(source_id) ON DELETE CASCADE,
+            registration_id UUID NOT NULL,
+            enrollment_id UUID NOT NULL,
+            artifact_row_id UUID NOT NULL REFERENCES general_compute_artifacts(id) ON DELETE CASCADE,
+            replica_row_id UUID NOT NULL REFERENCES managed_consensus_replicas(id) ON DELETE CASCADE,
+            owner_user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            offset_bytes BIGINT NOT NULL CHECK (offset_bytes >= 0),
+            execution_claims JSONB NOT NULL,
+            scope JSONB NOT NULL,
+            overlay_ipv4 VARCHAR(15) NOT NULL,
+            expires_at TIMESTAMPTZ NOT NULL,
+            UNIQUE (source_id, replica_row_id, offset_bytes)
+        );",
+    )
+    .execute(&mut *tx)
+    .await?;
+
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS ledger_entries (
             id UUID PRIMARY KEY DEFAULT gen_random_uuid(),

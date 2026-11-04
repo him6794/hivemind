@@ -1,4 +1,5 @@
 pub mod dispatcher;
+pub mod hcode_read_leases;
 pub mod scheduler;
 pub mod task_repository;
 

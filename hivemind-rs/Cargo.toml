@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "crates/common",
+    "crates/artifact-peer",
     "crates/proto",
     "crates/models",
     "crates/config",

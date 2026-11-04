@@ -26,3 +26,6 @@ hivemind-managed-consensus = { path = "../managed-consensus" }
 hivemind-client-core = { path = "../client-core" }
 general-compute-runtime = { path = "../../../executor-rs/crates/general-compute-runtime" }
 tokio-stream.workspace = true
+
+[dev-dependencies]
+hivemind-artifact-peer = { path = "../artifact-peer" }

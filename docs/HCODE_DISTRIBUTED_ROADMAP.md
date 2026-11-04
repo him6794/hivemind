@@ -30,7 +30,8 @@
 - [x] 來源端點控制面查核：比對 Headscale 節點、單次註冊 key ID、namespace、線上狀態及 overlay IPv4。
 - [x] 帳號綁定的 VPN 簽發紀錄：持久化控制面 key ID，重新簽發與撤銷使舊查核失效。
 - [x] hcode 來源 metadata 登錄、查詢與撤銷：綁定帳號、VPN enrollment、immutable artifact 及短效期限。
-- [ ] 來源可用性驗證、Worker 來源查詢與逐次 live read lease；來源位置可變，但檔案與 chunk 身分不可變。
+- [x] 逐次 live read lease 與宿主共用來源讀取服務；租約綁定當前副本、來源代際與 immutable chunk。
+- [ ] 派工前來源可用性驗證與 Worker 來源查詢；來源位置可變，但檔案與 chunk 身分不可變。
 - [ ] Master／CLI 受控提供來源，Worker 依任務租約直接下載與驗證，不經 Nodepool 搬運大檔。
 - [ ] Worker 內容快取、容量限制、淘汰、到期與損壞隔離；快取命中仍檢查當次授權。
 - [ ] 連線重用、部分下載恢復與 cancellation；有限重試，不得退回未授權來源。
@@ -80,7 +81,7 @@ Worker 的 execution token 只傳給 Nodepool，不轉交來源 peer。P2P 使�
 
 `auth::artifact_read` 的權杖格式使用 Ed25519、固定 `typ`／`purpose`、來源 UUID audience、租約 UUID、task／artifact ID、檔案與 chunk 雜湊、大小及 offset。效期不超過 60 秒且不設寬限，權杖最多 4 KiB，每次只允許一個最多 1 MiB 的 chunk。簽發上限取 live lease、assignment、artifact 期限的最小值；缺少欄位、額外權限欄位、錯誤來源、非法路徑、非標準雜湊和越界範圍都必須拒絕。
 
-這個 codec 不建立或撤銷租約，也不啟用 peer 傳輸。後續來源登錄必須把 `lease_id` 持久化綁定至當前 Worker、attempt、round、generation、來源與 manifest；Nodepool 每次重新檢查完整綁定，不能把合法簽章當作 live lease。分離 payload 而不是轉交 execution token，是為了讓來源即使取得讀取權杖，也無法拿它回報結果或操作帳戶。
+這個 codec 本身不建立或撤銷租約；持久化與逐次驗證由下述讀取租約服務處理。`lease_id` 綁定當前 Worker、attempt、round、generation、來源與 manifest；Nodepool 每次重新檢查完整綁定，不能把合法簽章當作 live lease。分離 payload 而不是轉交 execution token，是為了讓來源即使取得讀取權杖，也無法拿它回報結果或操作帳戶。
 
 ### 可用性不是內容授權
 
@@ -112,7 +113,21 @@ VPN 查核回覆只是一個時間點的身分觀察，不保證資料服務可�
 
 目前已提交的帳號 JWT 沒有可撤銷 session，因此這裡採用明確的 **per-source 撤銷與短效期限**，而不是依賴尚未提交的帳號改版。來源查詢每次重驗帳號 active、原登錄期限、artifact／task 狀態及 enrollment UUID；帳號停用、VPN 撤銷／重簽、來源撤銷與到期均會拒絕後續查詢。這不代表帳號登出能撤銷既有 JWT；之後接入正式帳號 session 時，read lease 必須加上該 session 的 live gate。
 
-登錄狀態固定為 `registered_pending`。它不證明資料服務可達或檔案存在，不改變 artifact `complete`／`availability_status`，不建立 execution hold，不向 Worker 發布來源，也不搬運 bytes。後續須獨立接上可用性驗證、Worker discovery、用途隔離讀取權杖及逐次 live lease，才可將 P2P 工作送往該來源；`GetSource` 不是下載授權。
+登錄狀態固定為 `registered_pending`。它不證明資料服務可達或檔案存在，不改變 artifact `complete`／`availability_status`，不建立 execution hold，不向 Worker 主動發布來源，也不搬運 bytes；`GetSource` 不是下載授權。自動 P2P 派工仍須獨立完成可用性驗證與 Worker discovery。
+
+### 逐次讀取租約與來源服務
+
+`HcodeArtifactReadLeaseService` 由 Nodepool 提供。`IssueReadLease` 接收已知來源 UUID，以及只送給 Nodepool 的 Worker execution token 和 chunk 坐標；它與既有下載共用 current-assignment SQL，另檢查有效帳號 UUID、來源登錄代際、VPN enrollment、task deadline 和持久化的 transfer generation。效期取 60 秒、來源、artifact、task、attempt 及 execution token 期限的最小值，不繼承 execution decoder 的過期寬限。
+
+`hcode_artifact_read_leases` 保存已驗證的 execution claims 而非原 JWT，並綁定來源／登錄／enrollment、artifact row、帳號 UUID、replica row 及完整 manifest scope。每個來源／副本／manifest offset 只保留一筆；重簽更換 lease UUID，舊 capability 隨即失效，重複請求不會無限增加紀錄。`ValidateReadLease` 不只驗簽章；每次以同一 SQL snapshot 重驗 current assignment、持久化租約與來源綁定。先讀取保存的 claims 不構成授權，最後查詢仍要求原 lease UUID 存在。
+
+此階段只允許原本已 `complete`／`available` 的 artifact 和 `ASSIGNED`／`RUNNING` 任務試讀已知來源。授權試讀不代表來源已通過 availability probe，也不將 pending-only artifact 變成可派工。原 CLI 上傳和 Worker 自動下載路徑尚未切換；新 P2P-only admission、探測、來源選取與 overlay 接線仍是後續獨立工作。
+
+`hivemind-artifact-peer` 提供 CLI／Master／Worker 可共用的宿主服務，不依賴 Worker executor。來源啟用前持有與已驗證整檔及 chunk 雜湊相同的 immutable bytes，不依遠端路徑重新開檔。每個宿主最多 16 個來源、單檔 64 MiB、合計 256 MiB；同時最多 8 次讀取，單次最多 1 MiB。宿主可更新同一來源的登錄代際，不重新載入內容、不重啟 listener；遠端 RPC 沒有此操作。
+
+來源只接受用途隔離的 read token，每次回 operator 設定的 Nodepool channel 驗證，最多等待 5 秒，不快取成功授權。Nodepool 不可達、租約失效、登錄代際不一致或範圍不符均不回傳 bytes；網路 await 後再驗期限。金鑰沿用平台 Ed25519 key pair，以固定 typ、purpose 及不含 account／execution 欄位的 schema 隔離用途；Nodepool 啟動時檢查私鑰、公鑰是否匹配。來源只持有公鑰。
+
+撤銷以 Nodepool 的逐次檢查為界：撤銷提交後開始驗證的讀取會拒絕；已通過檢查、正在傳送的單個 chunk 可能完成，不能追回已交付資料。租約與來源失效不刪 execution hold，也不變更停止、結果驗證或結算流程。真 TCP gRPC 與隔離 PostgreSQL 測試涵蓋直接讀取和失效條件；這不等於跨主機 overlay 或效能驗證。
 
 ### 首次端到端 P2P 接線
 

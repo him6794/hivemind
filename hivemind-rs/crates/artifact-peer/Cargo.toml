@@ -1,0 +1,19 @@
+[package]
+name = "hivemind-artifact-peer"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+chrono.workspace = true
+tokio.workspace = true
+tonic.workspace = true
+uuid.workspace = true
+hivemind-auth = { path = "../auth" }
+hivemind-proto = { path = "../proto" }
+general-compute-runtime = { path = "../../../executor-rs/crates/general-compute-runtime" }
+
+[dev-dependencies]
+hivemind-config = { path = "../config" }
+tokio-stream.workspace = true
