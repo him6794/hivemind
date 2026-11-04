@@ -11,20 +11,25 @@ use general_compute_runtime::{
     hcode_artifacts::{CHUNK_BYTES, MAX_ARTIFACTS, MAX_FILE_BYTES, MAX_TOTAL_BYTES},
     sha256_digest, ArtifactManifest, ArtifactRole,
 };
-use hivemind_auth::artifact_read::{ArtifactReadScope, ArtifactReadTokenVerifier};
+use hivemind_auth::{
+    artifact_probe::ArtifactProbeTokenVerifier,
+    artifact_read::{ArtifactReadScope, ArtifactReadTokenVerifier},
+};
 use hivemind_proto::{
     hcode_artifact_peer_service_server::{
         HcodeArtifactPeerService, HcodeArtifactPeerServiceServer,
     },
+    hcode_artifact_probe_service_client::HcodeArtifactProbeServiceClient,
     hcode_artifact_read_lease_service_client::HcodeArtifactReadLeaseServiceClient,
-    HcodeArtifactChunkDownloadResponse, HcodePeerReadRequest, HcodeSourceRegistration,
+    HcodeArtifactChunkDownloadResponse, HcodePeerProbeRequest, HcodePeerReadAuthorization,
+    HcodePeerReadRequest, HcodeSourceRegistration,
 };
 use std::{
     collections::BTreeMap,
     sync::{Arc, RwLock},
     time::Duration,
 };
-use tokio::sync::Semaphore;
+use tokio::sync::{Semaphore, SemaphorePermit};
 use tonic::{transport::Channel, Request, Response, Status};
 use uuid::Uuid;
 
@@ -137,7 +142,9 @@ impl PinnedSource {
 pub struct GrpcArtifactPeer {
     sources: RwLock<BTreeMap<Uuid, PinnedSource>>,
     verifier: ArtifactReadTokenVerifier,
+    probe_verifier: ArtifactProbeTokenVerifier,
     nodepool: HcodeArtifactReadLeaseServiceClient<Channel>,
+    probe_nodepool: HcodeArtifactProbeServiceClient<Channel>,
     concurrent: Arc<Semaphore>,
 }
 
@@ -161,7 +168,11 @@ impl GrpcArtifactPeer {
         Ok(Self {
             sources: RwLock::new(saved),
             verifier: ArtifactReadTokenVerifier::from_pem(public_key)?,
-            nodepool: HcodeArtifactReadLeaseServiceClient::new(nodepool)
+            probe_verifier: ArtifactProbeTokenVerifier::from_pem(public_key)?,
+            nodepool: HcodeArtifactReadLeaseServiceClient::new(nodepool.clone())
+                .max_encoding_message_size(PEER_READ_REQUEST_MAX_BYTES)
+                .max_decoding_message_size(32 * 1024),
+            probe_nodepool: HcodeArtifactProbeServiceClient::new(nodepool)
                 .max_encoding_message_size(PEER_READ_REQUEST_MAX_BYTES)
                 .max_decoding_message_size(32 * 1024),
             concurrent: Arc::new(Semaphore::new(MAX_CONCURRENT_READS)),
@@ -204,6 +215,78 @@ impl GrpcArtifactPeer {
             .max_decoding_message_size(PEER_READ_REQUEST_MAX_BYTES)
             .max_encoding_message_size(PEER_READ_RESPONSE_MAX_BYTES)
     }
+
+    fn permit(&self) -> Result<SemaphorePermit<'_>, Status> {
+        self.concurrent
+            .try_acquire()
+            .map_err(|_| Status::resource_exhausted("source read limit reached"))
+    }
+
+    /// Returns a clone of immutable bytes only if the requested scope is hosted
+    /// and the local registration is still unexpired. No lock is held across awaits.
+    fn live_source(&self, id: Uuid, scope: &ArtifactReadScope) -> Result<PinnedSource, Status> {
+        let source = self
+            .sources
+            .read()
+            .map_err(|_| Status::internal("source registry is unavailable"))?
+            .get(&id)
+            .filter(|source| source.matches(scope))
+            .cloned()
+            .ok_or_else(|| Status::permission_denied("source scope is unavailable"))?;
+        if source.registration.expires_at_unix_ms <= Utc::now().timestamp_millis() {
+            return Err(Status::permission_denied("source registration has expired"));
+        }
+        Ok(source)
+    }
+}
+
+fn canonical_source(value: &str) -> Result<Uuid, Status> {
+    canonical_id(value).map_err(|_| Status::invalid_argument("invalid source ID"))
+}
+
+/// Every Nodepool grant must repeat the source, registration, identity, chunk
+/// digest and expiry fences. A signed token alone or an earlier grant is not enough.
+fn check_grant(
+    grant: &HcodePeerReadAuthorization,
+    source: &PinnedSource,
+    source_id: &str,
+    scope: &ArtifactReadScope,
+    token_exp: u64,
+) -> Result<(), Status> {
+    let expected_expiry = i64::try_from(token_exp.saturating_mul(1000)).unwrap_or(i64::MAX);
+    let now = Utc::now().timestamp_millis();
+    if grant.source_id != source_id
+        || grant.registration_id != source.registration.registration_id
+        || grant.task_id != scope.task_id
+        || grant.artifact_id != scope.artifact_id
+        || grant.offset != scope.offset
+        || grant.expires_at_unix_ms <= now
+        || grant.expires_at_unix_ms > expected_expiry
+        || grant.expires_at_unix_ms > source.registration.expires_at_unix_ms
+        || grant.chunk.as_ref().is_none_or(|chunk| {
+            chunk.artifact_sha256 != scope.artifact_sha256
+                || u64::try_from(chunk.artifact_size_bytes).ok() != Some(scope.artifact_size_bytes)
+                || chunk.chunk_sha256 != scope.chunk_sha256
+                || u64::try_from(chunk.chunk_size_bytes).ok() != Some(scope.chunk_size_bytes)
+        })
+    {
+        return Err(Status::permission_denied("live source scope changed"));
+    }
+    Ok(())
+}
+
+fn chunk_bytes(source: &PinnedSource, scope: &ArtifactReadScope) -> Result<Vec<u8>, Status> {
+    let start = usize::try_from(scope.offset).map_err(|_| Status::out_of_range("invalid range"))?;
+    let end = scope
+        .offset
+        .checked_add(scope.chunk_size_bytes)
+        .and_then(|end| usize::try_from(end).ok())
+        .ok_or_else(|| Status::out_of_range("invalid range"))?;
+    source
+        .bytes
+        .get(start..end)
+        .map(<[u8]>::to_vec)
+        .ok_or_else(|| Status::out_of_range("invalid range"))
 }
 
 #[tonic::async_trait]
@@ -212,28 +295,14 @@ impl HcodeArtifactPeerService for GrpcArtifactPeer {
         &self,
         request: Request<HcodePeerReadRequest>,
     ) -> Result<Response<HcodeArtifactChunkDownloadResponse>, Status> {
-        let _permit = self
-            .concurrent
-            .try_acquire()
-            .map_err(|_| Status::resource_exhausted("source read limit reached"))?;
+        let _permit = self.permit()?;
         let request = request.into_inner();
-        let id = canonical_id(&request.source_id)
-            .map_err(|_| Status::invalid_argument("invalid source ID"))?;
+        let id = canonical_source(&request.source_id)?;
         let read = self
             .verifier
             .verify(&request.token, id)
             .map_err(|_| Status::unauthenticated("invalid artifact-read token"))?;
-        let source = self
-            .sources
-            .read()
-            .map_err(|_| Status::internal("source registry is unavailable"))?
-            .get(&id)
-            .filter(|source| source.matches(&read.scope))
-            .cloned()
-            .ok_or_else(|| Status::permission_denied("source scope is unavailable"))?;
-        if source.registration.expires_at_unix_ms <= Utc::now().timestamp_millis() {
-            return Err(Status::permission_denied("source registration has expired"));
-        }
+        let source = self.live_source(id, &read.scope)?;
         let mut authority = self.nodepool.clone();
         // No success cache and no offline fallback, including on timeout or a
         // dropped Nodepool connection. Only the read capability leaves this peer.
@@ -244,43 +313,45 @@ impl HcodeArtifactPeerService for GrpcArtifactPeer {
         .await
         .map_err(|_| Status::unavailable("Nodepool live validation timed out"))??
         .into_inner();
-        let scope = &read.scope;
-        let expected_expiry = i64::try_from(read.exp.saturating_mul(1000)).unwrap_or(i64::MAX);
-        if grant.source_id != request.source_id
-            || grant.registration_id != source.registration.registration_id
-            || grant.task_id != scope.task_id
-            || grant.artifact_id != scope.artifact_id
-            || grant.offset != scope.offset
-            || grant.expires_at_unix_ms <= Utc::now().timestamp_millis()
-            || grant.expires_at_unix_ms > expected_expiry
-            || grant.expires_at_unix_ms > source.registration.expires_at_unix_ms
-            || grant.chunk.as_ref().is_none_or(|chunk| {
-                chunk.artifact_sha256 != scope.artifact_sha256
-                    || u64::try_from(chunk.artifact_size_bytes).ok()
-                        != Some(scope.artifact_size_bytes)
-                    || chunk.chunk_sha256 != scope.chunk_sha256
-                    || u64::try_from(chunk.chunk_size_bytes).ok() != Some(scope.chunk_size_bytes)
-            })
-        {
-            return Err(Status::permission_denied("live source scope changed"));
-        }
+        check_grant(&grant, &source, &request.source_id, &read.scope, read.exp)?;
         // Recheck expiry after the network await, before copying any bytes.
         self.verifier
             .verify(&request.token, id)
             .map_err(|_| Status::unauthenticated("artifact-read token expired"))?;
-        let start =
-            usize::try_from(scope.offset).map_err(|_| Status::out_of_range("invalid range"))?;
-        let end = scope
-            .offset
-            .checked_add(scope.chunk_size_bytes)
-            .and_then(|end| usize::try_from(end).ok())
-            .ok_or_else(|| Status::out_of_range("invalid range"))?;
-        let bytes = source
-            .bytes
-            .get(start..end)
-            .ok_or_else(|| Status::out_of_range("invalid range"))?
-            .to_vec();
-        Ok(Response::new(HcodeArtifactChunkDownloadResponse { bytes }))
+        Ok(Response::new(HcodeArtifactChunkDownloadResponse {
+            bytes: chunk_bytes(&source, &read.scope)?,
+        }))
+    }
+
+    /// Pre-dispatch sampling. Uses its own purpose and Nodepool RPC, so a probe
+    /// credential cannot authorize an execution read and vice versa.
+    async fn probe_chunk(
+        &self,
+        request: Request<HcodePeerProbeRequest>,
+    ) -> Result<Response<HcodeArtifactChunkDownloadResponse>, Status> {
+        let _permit = self.permit()?;
+        let request = request.into_inner();
+        let id = canonical_source(&request.source_id)?;
+        let probe = self
+            .probe_verifier
+            .verify(&request.token, id)
+            .map_err(|_| Status::unauthenticated("invalid artifact-probe token"))?;
+        let source = self.live_source(id, &probe.scope)?;
+        let mut authority = self.probe_nodepool.clone();
+        let grant = tokio::time::timeout(
+            LIVE_VALIDATION_TIMEOUT,
+            authority.validate_probe_lease(Request::new(request.clone())),
+        )
+        .await
+        .map_err(|_| Status::unavailable("Nodepool live validation timed out"))??
+        .into_inner();
+        check_grant(&grant, &source, &request.source_id, &probe.scope, probe.exp)?;
+        self.probe_verifier
+            .verify(&request.token, id)
+            .map_err(|_| Status::unauthenticated("artifact-probe token expired"))?;
+        Ok(Response::new(HcodeArtifactChunkDownloadResponse {
+            bytes: chunk_bytes(&source, &probe.scope)?,
+        }))
     }
 }
 

@@ -1401,6 +1401,29 @@ async fn run_migrations_inner(pool: &PgPool) -> Result<()> {
     .execute(&mut *tx)
     .await?;
 
+    // One replaceable pre-dispatch probe per source. Generation equality fences
+    // observations across renewals; no JWT or sampled bytes are stored here.
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS hcode_artifact_probes (
+            source_id UUID PRIMARY KEY REFERENCES hcode_artifact_sources(source_id) ON DELETE CASCADE,
+            probe_id UUID NOT NULL UNIQUE,
+            registration_id UUID NOT NULL,
+            enrollment_id UUID NOT NULL,
+            artifact_row_id UUID NOT NULL REFERENCES general_compute_artifacts(id) ON DELETE CASCADE,
+            owner_user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            scope JSONB NOT NULL,
+            overlay_ipv4 VARCHAR(15) NOT NULL,
+            owner_expires_at TIMESTAMPTZ NOT NULL,
+            source_expires_at TIMESTAMPTZ NOT NULL,
+            started_at TIMESTAMPTZ NOT NULL,
+            expires_at TIMESTAMPTZ NOT NULL,
+            verified_at TIMESTAMPTZ,
+            available_until TIMESTAMPTZ
+        );",
+    )
+    .execute(&mut *tx)
+    .await?;
+
     // One replaceable capability per source/replica/manifest offset bounds row
     // growth. Registration/enrollment IDs are fences, not cascading references.
     // Store validated claims, never the reusable execution JWT itself.

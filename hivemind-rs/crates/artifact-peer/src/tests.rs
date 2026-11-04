@@ -1,12 +1,19 @@
 use super::*;
 use general_compute_runtime::ArtifactChunk;
-use hivemind_auth::artifact_read::ArtifactReadTokenSigner;
+use hivemind_auth::{
+    artifact_probe::{ArtifactProbeTokenSigner, ArtifactProbeTokenVerifier},
+    artifact_read::ArtifactReadTokenSigner,
+};
 use hivemind_proto::{
+    hcode_artifact_probe_service_server::{
+        HcodeArtifactProbeService, HcodeArtifactProbeServiceServer,
+    },
     hcode_artifact_read_lease_service_server::{
         HcodeArtifactReadLeaseService, HcodeArtifactReadLeaseServiceServer,
     },
-    HcodeArtifactChunkAuthorization, HcodeArtifactReadLease, HcodePeerReadAuthorization,
-    IssueHcodeReadLeaseRequest,
+    HcodeArtifactChunkAuthorization, HcodeArtifactChunkDownload, HcodeArtifactReadLease,
+    HcodePeerProbeRequest, HcodePeerReadAuthorization, HcodeReadSources, HcodeSourceAvailability,
+    HcodeSourceRequest, IssueHcodeReadLeaseRequest,
 };
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
@@ -33,6 +40,35 @@ impl HcodeArtifactReadLeaseService for Authority {
     async fn validate_read_lease(
         &self,
         request: Request<HcodePeerReadRequest>,
+    ) -> Result<Response<HcodePeerReadAuthorization>, Status> {
+        self.tokens.lock().unwrap().push(request.into_inner().token);
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        if let Some(gate) = &self.gate {
+            gate.acquire().await.unwrap().forget();
+        }
+        self.grant.lock().unwrap().clone().map(Response::new)
+    }
+
+    async fn list_read_sources(
+        &self,
+        _: Request<HcodeArtifactChunkDownload>,
+    ) -> Result<Response<HcodeReadSources>, Status> {
+        panic!("a peer must never discover sources");
+    }
+}
+
+#[tonic::async_trait]
+impl HcodeArtifactProbeService for Authority {
+    async fn probe_source(
+        &self,
+        _: Request<HcodeSourceRequest>,
+    ) -> Result<Response<HcodeSourceAvailability>, Status> {
+        panic!("a peer must never start a source probe");
+    }
+
+    async fn validate_probe_lease(
+        &self,
+        request: Request<HcodePeerProbeRequest>,
     ) -> Result<Response<HcodePeerReadAuthorization>, Status> {
         self.tokens.lock().unwrap().push(request.into_inner().token);
         self.calls.fetch_add(1, Ordering::SeqCst);
@@ -122,6 +158,26 @@ impl Material {
                 .unwrap(),
         }
     }
+    fn probe_request(&self, scope: ArtifactReadScope) -> HcodePeerProbeRequest {
+        HcodePeerProbeRequest {
+            source_id: self.source.source_id.clone(),
+            token: ArtifactProbeTokenSigner::from_pem(&self.private)
+                .unwrap()
+                .sign(
+                    Uuid::parse_str(&self.source.source_id).unwrap(),
+                    Uuid::new_v4(),
+                    scope,
+                    (self.source.expires_at_unix_ms / 1000) as u64,
+                )
+                .unwrap(),
+        }
+    }
+    /// Probe lifetimes are 15 seconds, so the grant must not outlive the token.
+    fn probe_grant(&self) -> HcodePeerReadAuthorization {
+        let mut grant = self.grant();
+        grant.expires_at_unix_ms = Utc::now().timestamp_millis() + 10_000;
+        grant
+    }
     fn grant(&self) -> HcodePeerReadAuthorization {
         HcodePeerReadAuthorization {
             source_id: self.source.source_id.clone(),
@@ -143,9 +199,11 @@ impl Material {
 async fn server(authority: Arc<Authority>) -> (Channel, tokio::task::JoinHandle<()>) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let endpoint = format!("http://{}", listener.local_addr().unwrap());
+    let probes = authority.clone();
     let task = tokio::spawn(async move {
         tonic::transport::Server::builder()
             .add_service(HcodeArtifactReadLeaseServiceServer::from_arc(authority))
+            .add_service(HcodeArtifactProbeServiceServer::from_arc(probes))
             .serve_with_incoming(TcpListenerStream::new(listener))
             .await
             .unwrap();
@@ -349,4 +407,117 @@ async fn peer_bounds_in_flight_reads_and_source_count() {
         assert!(read.await.unwrap().is_ok());
     }
     task.abort();
+}
+
+#[tokio::test]
+async fn peer_probe_is_a_separate_capability_checked_by_nodepool_on_every_request() {
+    let material = Material::new();
+    let authority = Arc::new(Authority {
+        grant: Mutex::new(Ok(material.probe_grant())),
+        tokens: Mutex::new(vec![]),
+        calls: AtomicUsize::new(0),
+        gate: None,
+    });
+    let (channel, task) = server(authority.clone()).await;
+    let peer = GrpcArtifactPeer::new(&material.public, channel, vec![material.pinned()]).unwrap();
+    let probe = material.probe_request(material.scope.clone());
+    assert_eq!(
+        peer.probe_chunk(Request::new(probe.clone()))
+            .await
+            .unwrap()
+            .into_inner()
+            .bytes,
+        material.bytes
+    );
+    assert_eq!(authority.calls.load(Ordering::SeqCst), 1);
+
+    // Read and probe credentials are not interchangeable, and neither reaches Nodepool.
+    let read = material.request(material.scope.clone());
+    assert_eq!(
+        peer.probe_chunk(Request::new(HcodePeerProbeRequest {
+            source_id: read.source_id.clone(),
+            token: read.token.clone(),
+        }))
+        .await
+        .unwrap_err()
+        .code(),
+        tonic::Code::Unauthenticated
+    );
+    assert_eq!(
+        peer.read_chunk(Request::new(HcodePeerReadRequest {
+            source_id: probe.source_id.clone(),
+            token: probe.token.clone(),
+        }))
+        .await
+        .unwrap_err()
+        .code(),
+        tonic::Code::Unauthenticated
+    );
+    assert_eq!(authority.calls.load(Ordering::SeqCst), 1);
+
+    // A success is never cached: revocation takes effect on the next probe.
+    *authority.grant.lock().unwrap() = Err(Status::permission_denied("revoked"));
+    assert_eq!(
+        peer.probe_chunk(Request::new(probe))
+            .await
+            .unwrap_err()
+            .code(),
+        tonic::Code::PermissionDenied
+    );
+    assert_eq!(authority.calls.load(Ordering::SeqCst), 2);
+    task.abort();
+}
+
+#[tokio::test]
+async fn peer_probe_rejects_each_changed_nodepool_grant_field() {
+    let material = Material::new();
+    let authority = Arc::new(Authority {
+        grant: Mutex::new(Ok(material.probe_grant())),
+        tokens: Mutex::new(vec![]),
+        calls: AtomicUsize::new(0),
+        gate: None,
+    });
+    let (channel, task) = server(authority.clone()).await;
+    let peer = GrpcArtifactPeer::new(&material.public, channel, vec![material.pinned()]).unwrap();
+    let request = material.probe_request(material.scope.clone());
+    let token_exp = ArtifactProbeTokenVerifier::from_pem(&material.public)
+        .unwrap()
+        .verify(&request.token, Uuid::parse_str(&request.source_id).unwrap())
+        .unwrap()
+        .exp;
+    for case in 0..9 {
+        let mut grant = material.probe_grant();
+        match case {
+            0 => grant.source_id = Uuid::new_v4().to_string(),
+            1 => grant.registration_id = Uuid::new_v4().to_string(),
+            2 => grant.task_id = "other".into(),
+            3 => grant.artifact_id = "other".into(),
+            4 => grant.offset = 1,
+            5 => grant.chunk = None,
+            6 => grant.chunk.as_mut().unwrap().chunk_sha256 = sha256_digest(b"wrong"),
+            7 => grant.expires_at_unix_ms = Utc::now().timestamp_millis() - 1,
+            _ => grant.expires_at_unix_ms = (token_exp as i64 + 1) * 1000,
+        }
+        *authority.grant.lock().unwrap() = Ok(grant);
+        assert_eq!(
+            peer.probe_chunk(Request::new(request.clone()))
+                .await
+                .unwrap_err()
+                .code(),
+            tonic::Code::PermissionDenied,
+            "case {case}"
+        );
+    }
+    task.abort();
+}
+
+#[tokio::test]
+async fn peer_probe_fails_closed_when_nodepool_is_unreachable() {
+    let material = Material::new();
+    let channel = Channel::from_static("http://127.0.0.1:0").connect_lazy();
+    let peer = GrpcArtifactPeer::new(&material.public, channel, vec![material.pinned()]).unwrap();
+    assert!(peer
+        .probe_chunk(Request::new(material.probe_request(material.scope.clone())))
+        .await
+        .is_err());
 }

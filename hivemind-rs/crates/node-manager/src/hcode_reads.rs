@@ -7,12 +7,12 @@
 use anyhow::Context;
 use hivemind_auth::{
     artifact_read::{ArtifactReadScope, ArtifactReadTokenSigner, ArtifactReadTokenVerifier},
-    worker_execution::WorkerExecutionVerifier,
+    worker_execution::{WorkerExecutionClaims, WorkerExecutionVerifier},
 };
 use hivemind_proto::{
     hcode_artifact_read_lease_service_server::HcodeArtifactReadLeaseService,
-    HcodeArtifactChunkAuthorization, HcodeArtifactReadLease, HcodePeerReadAuthorization,
-    HcodePeerReadRequest, IssueHcodeReadLeaseRequest,
+    HcodeArtifactChunkAuthorization, HcodeArtifactChunkDownload, HcodeArtifactReadLease,
+    HcodePeerReadAuthorization, HcodePeerReadRequest, HcodeReadSources, IssueHcodeReadLeaseRequest,
 };
 use hivemind_task_scheduler::{hcode_read_leases::HcodeReadLease, task_repository::TaskRepository};
 use sqlx::PgPool;
@@ -99,17 +99,13 @@ impl GrpcHcodeArtifactReadLeaseService {
     }
 }
 
-#[tonic::async_trait]
-impl HcodeArtifactReadLeaseService for GrpcHcodeArtifactReadLeaseService {
-    async fn issue_read_lease(
+impl GrpcHcodeArtifactReadLeaseService {
+    /// Shared by issuance and discovery. Authenticates the execution credential
+    /// and rejects any chunk coordinate that is not a safe manifest identity.
+    fn execution_chunk(
         &self,
-        request: Request<IssueHcodeReadLeaseRequest>,
-    ) -> Result<Response<HcodeArtifactReadLease>, Status> {
-        let request = request.into_inner();
-        let source = source_id(&request.source_id)?;
-        let chunk = request
-            .chunk
-            .ok_or_else(|| Status::invalid_argument("missing chunk identity"))?;
+        chunk: &HcodeArtifactChunkDownload,
+    ) -> Result<WorkerExecutionClaims, Status> {
         if chunk.task_id.is_empty()
             || chunk.task_id.len() > hivemind_proto::TASK_ID_MAX_BYTES
             || chunk.task_id == "."
@@ -135,6 +131,22 @@ impl HcodeArtifactReadLeaseService for GrpcHcodeArtifactReadLeaseService {
         {
             return Err(denied());
         }
+        Ok(claims)
+    }
+}
+
+#[tonic::async_trait]
+impl HcodeArtifactReadLeaseService for GrpcHcodeArtifactReadLeaseService {
+    async fn issue_read_lease(
+        &self,
+        request: Request<IssueHcodeReadLeaseRequest>,
+    ) -> Result<Response<HcodeArtifactReadLease>, Status> {
+        let request = request.into_inner();
+        let source = source_id(&request.source_id)?;
+        let chunk = request
+            .chunk
+            .ok_or_else(|| Status::invalid_argument("missing chunk identity"))?;
+        let claims = self.execution_chunk(&chunk)?;
         let lease = self
             .repo
             .issue_hcode_read_lease(&claims, &chunk.artifact_id, chunk.offset, source)
@@ -175,6 +187,25 @@ impl HcodeArtifactReadLeaseService for GrpcHcodeArtifactReadLeaseService {
             .map_err(storage_error)?
             .ok_or_else(denied)?;
         Ok(Response::new(authorization(&lease, read.exp)))
+    }
+
+    /// Lists only sources with a live sampled observation for this exact current
+    /// assignment. Registration alone never makes a source discoverable.
+    async fn list_read_sources(
+        &self,
+        request: Request<HcodeArtifactChunkDownload>,
+    ) -> Result<Response<HcodeReadSources>, Status> {
+        let chunk = request.into_inner();
+        let claims = self.execution_chunk(&chunk)?;
+        let sources = self
+            .repo
+            .discover_hcode_sources(&claims, &chunk.artifact_id, chunk.offset)
+            .await
+            .map_err(storage_error)?
+            .into_iter()
+            .filter_map(|row| crate::hcode_probes::availability(row).ok())
+            .collect();
+        Ok(Response::new(HcodeReadSources { sources }))
     }
 }
 

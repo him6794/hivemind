@@ -31,7 +31,8 @@
 - [x] 帳號綁定的 VPN 簽發紀錄：持久化控制面 key ID，重新簽發與撤銷使舊查核失效。
 - [x] hcode 來源 metadata 登錄、查詢與撤銷：綁定帳號、VPN enrollment、immutable artifact 及短效期限。
 - [x] 逐次 live read lease 與宿主共用來源讀取服務；租約綁定當前副本、來源代際與 immutable chunk。
-- [ ] 派工前來源可用性驗證與 Worker 來源查詢；來源位置可變，但檔案與 chunk 身分不可變。
+- [x] 派工前來源可用性探測與 Worker 來源查詢：探測由 Nodepool 抽樣並驗證完整 manifest chunk；只有目前已指派的 Worker 能查到有效期內的來源觀察。
+- [ ] P2P-only 派工閘門與傳輸模式：派工只接受已探測來源，來源失效時不回退為 Nodepool 位元組。
 - [ ] Master／CLI 受控提供來源，Worker 依任務租約直接下載與驗證，不經 Nodepool 搬運大檔。
 - [ ] Worker 內容快取、容量限制、淘汰、到期與損壞隔離；快取命中仍檢查當次授權。
 - [ ] 連線重用、部分下載恢復與 cancellation；有限重試，不得退回未授權來源。
@@ -128,6 +129,14 @@ VPN 查核回覆只是一個時間點的身分觀察，不保證資料服務可�
 來源只接受用途隔離的 read token，每次回 operator 設定的 Nodepool channel 驗證，最多等待 5 秒，不快取成功授權。Nodepool 不可達、租約失效、登錄代際不一致或範圍不符均不回傳 bytes；網路 await 後再驗期限。金鑰沿用平台 Ed25519 key pair，以固定 typ、purpose 及不含 account／execution 欄位的 schema 隔離用途；Nodepool 啟動時檢查私鑰、公鑰是否匹配。來源只持有公鑰。
 
 撤銷以 Nodepool 的逐次檢查為界：撤銷提交後開始驗證的讀取會拒絕；已通過檢查、正在傳送的單個 chunk 可能完成，不能追回已交付資料。租約與來源失效不刪 execution hold，也不變更停止、結果驗證或結算流程。真 TCP gRPC 與隔離 PostgreSQL 測試涵蓋直接讀取和失效條件；這不等於跨主機 overlay 或效能驗證。
+
+### 來源可用性探測
+
+`HcodeArtifactProbeService.ProbeSource` 只接受來源擁有者的帳號權杖。Nodepool 以目前的來源登錄代際、enrollment 與 overlay IPv4 建立探測紀錄，隨機選取一個完整 manifest chunk，並以獨立用途的 `hcode-artifact-probe+jwt` 權杖（最長 15 秒）向來源取得位元組。Nodepool 以自己持有的 manifest 雜湊驗證後，才寫入 `verified_at` 與 30 秒內有效的 `available_until`；驗證失敗或來源被撤銷時不留下觀察。每個來源只保留一筆紀錄，同一來源 3 秒內只能發起一次探測。
+
+探測權杖不能換取執行租約，也不能通過讀取權杖的驗證；來源每次送出 chunk 前仍由 Nodepool 的 `ValidateProbeLease` 重驗。`ListReadSources` 只對目前已指派的任務列出來源，且要求來源未撤銷、登錄代際相符、觀察未過期；任務尚未派工時不揭露任何來源。來源登錄本身仍不代表可用。
+
+探測要求 Nodepool 能經受控 overlay 路由連到來源的 50054 埠，這是部署前提，尚未在正式環境驗證。探測取得的一個 chunk（最多 1 MiB）只在 Nodepool 記憶體中雜湊，是驗證完整內容所必需的有界例外，不是大檔的常態中繼。
 
 ### 首次端到端 P2P 接線
 

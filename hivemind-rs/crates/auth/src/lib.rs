@@ -1,3 +1,4 @@
+pub mod artifact_probe;
 pub mod artifact_read;
 pub mod enrollment;
 pub mod jwt_service;

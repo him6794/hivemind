@@ -1,4 +1,5 @@
 pub mod grpc;
+pub mod hcode_probes;
 pub mod hcode_reads;
 pub mod hcode_sources;
 pub mod heartbeat;

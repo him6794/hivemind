@@ -72,7 +72,7 @@ pub struct ArtifactReadScope {
 }
 
 impl ArtifactReadScope {
-    fn validate(&self) -> Result<()> {
+    pub(crate) fn validate(&self) -> Result<()> {
         for (identifier, is_task) in [(&self.task_id, true), (&self.artifact_id, false)] {
             if identifier.is_empty()
                 || identifier.len() > IDENTIFIER_MAX_BYTES
@@ -229,14 +229,14 @@ impl ArtifactReadTokenVerifier {
     }
 }
 
-fn timestamp() -> Result<u64> {
+pub(crate) fn timestamp() -> Result<u64> {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_secs())
         .map_err(|_| ArtifactReadTokenError::ClockUnavailable)
 }
 
-fn validate_token_length(token: &str) -> Result<()> {
+pub(crate) fn validate_token_length(token: &str) -> Result<()> {
     if token.is_empty() || token.len() > MAX_ARTIFACT_READ_TOKEN_BYTES {
         return Err(ArtifactReadTokenError::InvalidTokenLength);
     }

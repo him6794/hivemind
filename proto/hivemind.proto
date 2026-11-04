@@ -683,6 +683,24 @@ message RevokeHcodeSourceResponse {
     bool revoked = 1;
 }
 
+// Nodepool -> source -> Nodepool, using a distinct pre-dispatch capability.
+message HcodePeerProbeRequest {
+    string source_id = 1;
+    string token = 2;
+}
+
+// A sampled chunk observation, not proof of permanent whole-file availability.
+message HcodeSourceAvailability {
+    HcodeSourceRegistration source = 1;
+    int64 checked_at_unix_ms = 2;
+    int64 available_until_unix_ms = 3;
+    uint64 sampled_offset = 4;
+}
+
+message HcodeReadSources {
+    repeated HcodeSourceAvailability sources = 1; // at most 8, for this assigned artifact
+}
+
 // Worker -> Nodepool only. Never forward chunk.token to the source peer.
 // A known source may be tried only for an already-ready, active assignment;
 // this is not source discovery or a pre-dispatch availability probe.
@@ -1346,11 +1364,21 @@ service HcodeArtifactSourceService {
 service HcodeArtifactReadLeaseService {
     rpc IssueReadLease(IssueHcodeReadLeaseRequest) returns (HcodeArtifactReadLease);
     rpc ValidateReadLease(HcodePeerReadRequest) returns (HcodePeerReadAuthorization);
+    rpc ListReadSources(HcodeArtifactChunkDownload) returns (HcodeReadSources);
 }
 
-// Overlay data plane hosted by the file owner. Bytes never pass through Nodepool.
+// Owner-triggered, bounded availability sampling. No caller-chosen endpoint or
+// execution identity. Validation always checks the current persisted probe.
+service HcodeArtifactProbeService {
+    rpc ProbeSource(HcodeSourceRequest) returns (HcodeSourceAvailability);
+    rpc ValidateProbeLease(HcodePeerProbeRequest) returns (HcodePeerReadAuthorization);
+}
+
+// Overlay data plane hosted by the file owner. Execution bytes go directly to
+// Workers; Nodepool may sample one bounded manifest chunk to check availability.
 service HcodeArtifactPeerService {
     rpc ReadChunk(HcodePeerReadRequest) returns (HcodeArtifactChunkDownloadResponse);
+    rpc ProbeChunk(HcodePeerProbeRequest) returns (HcodeArtifactChunkDownloadResponse);
 }
 
 service BatchRuntimeService {

@@ -24,7 +24,9 @@ pub struct HcodeReadLease {
 
 // This adds identity and strict wall-clock fences without weakening the shared
 // compatibility predicate. Pending-only artifacts still cannot obtain leases.
-fn candidate_sql() -> String {
+/// `source_predicate` is a fixed fragment chosen by this module; every caller
+/// value is bound as a parameter. Execution reads always pin one source ID.
+fn candidate_sql(source_predicate: &str) -> String {
     let assignment = hcode_artifact_chunk_sql(HcodeChunkRead::PeerLease);
     format!(
         "SELECT a.*, s.source_id, s.registration_id, s.enrollment_id,
@@ -35,7 +37,7 @@ fn candidate_sql() -> String {
                      AND u.username = a.owner AND u.is_active
          JOIN vpn_peer_enrollments e ON e.peer_id = s.peer_id
                      AND e.enrollment_id = s.enrollment_id AND e.user_id = u.id
-         WHERE s.source_id = $14 AND s.revoked_at IS NULL
+         WHERE {source_predicate} AND s.revoked_at IS NULL
            AND s.expires_at > clock_timestamp()
            AND a.artifact_deadline > clock_timestamp()
            AND a.attempt_deadline > clock_timestamp()
@@ -67,6 +69,45 @@ fn bind_assignment<'q, T>(
 }
 
 impl TaskRepository {
+    /// Only sources with a live sampled observation are disclosed, and only
+    /// through the same current-assignment gates as execution reads.
+    pub async fn discover_hcode_sources(
+        &self,
+        claims: &WorkerExecutionClaims,
+        artifact: &str,
+        offset: i64,
+    ) -> Result<Vec<crate::hcode_probes::HcodeProbe>> {
+        if claims.claims.role.as_deref() != Some("worker-execution") || offset < 0 {
+            return Ok(Vec::new());
+        }
+        let Some(expiry) = i64::try_from(claims.claims.exp)
+            .ok()
+            .and_then(|seconds| DateTime::from_timestamp(seconds, 0))
+        else {
+            return Ok(Vec::new());
+        };
+        let candidate = candidate_sql("($14::uuid IS NULL OR s.source_id = $14)");
+        let available = crate::hcode_probes::available_sources_sql();
+        let sql = format!(
+            "SELECT p.probe_id, p.source_id, p.registration_id,
+                p.scope, p.overlay_ipv4, p.expires_at, p.source_expires_at, p.verified_at,
+                LEAST(p.live_until, $15, a.attempt_deadline) AS available_until
+            FROM ({candidate}) a JOIN ({available}) p ON p.source_id = a.source_id
+                AND p.registration_id = a.registration_id AND p.artifact_row_id = a.artifact_row_id
+            WHERE $15 > clock_timestamp() ORDER BY p.live_until DESC, p.source_id LIMIT 8"
+        );
+        Ok(bind_assignment(
+            sqlx::query_as(sqlx::AssertSqlSafe(sql)),
+            claims,
+            artifact,
+            offset,
+        )
+        .bind(None::<Uuid>)
+        .bind(expiry)
+        .fetch_all(&self.pool)
+        .await?)
+    }
+
     /// `claims` must come from Nodepool's execution-token verifier. As with other
     /// repository authorization methods, decoding a JWT is the RPC boundary's job.
     pub async fn issue_hcode_read_lease(
@@ -88,7 +129,7 @@ impl TaskRepository {
         else {
             return Ok(None);
         };
-        let candidate = candidate_sql();
+        let candidate = candidate_sql("s.source_id = $14");
         let sql = format!(
             "WITH candidate AS ({candidate})
              INSERT INTO hcode_artifact_read_leases
@@ -152,7 +193,7 @@ impl TaskRepository {
         ) else {
             return Ok(None);
         };
-        let candidate = candidate_sql();
+        let candidate = candidate_sql("s.source_id = $14");
         let sql = format!(
             "WITH candidate AS ({candidate})
              SELECT l.lease_id, l.source_id, l.registration_id, l.scope,
