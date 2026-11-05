@@ -178,9 +178,48 @@ impl P2pControlPlane for NodepoolP2pControl {
     }
 }
 
+/// Turns a validated overlay `ip:port` target into the address this process
+/// dials. On Windows the embedded userspace VPN has no OS route to the overlay,
+/// so its outbound TCP goes through a local bridge. Elsewhere the target is used.
+#[tonic::async_trait]
+pub trait OverlayDial: Send + Sync {
+    async fn dial_address(&self, overlay_target: &str) -> Result<String, String>;
+}
+
+/// Worker dialer. It asks the process's VPN session for a bridge to the target.
+pub struct UserspaceOverlayDial;
+
+#[tonic::async_trait]
+impl OverlayDial for UserspaceOverlayDial {
+    async fn dial_address(&self, overlay_target: &str) -> Result<String, String> {
+        hivemind_client_runtime::userspace_tcp_bridge(
+            hivemind_client_runtime::ClientRole::Worker,
+            overlay_target,
+        )
+        .await
+        .map_err(|error| error.to_string())
+    }
+}
+
 /// Production overlay reader. The address comes only from a Nodepool lease and
-/// must be a canonical overlay IPv4 on the fixed artifact port.
-pub struct OverlayPeerReader;
+/// must be a canonical overlay IPv4 on the fixed artifact port. Only a validated
+/// target reaches the dialer.
+pub struct OverlayPeerReader {
+    dial: Arc<dyn OverlayDial>,
+}
+
+impl OverlayPeerReader {
+    #[must_use]
+    pub fn new(dial: Arc<dyn OverlayDial>) -> Self {
+        Self { dial }
+    }
+
+    /// Reader for a Worker process, using the process's VPN session to dial.
+    #[must_use]
+    pub fn for_worker() -> Self {
+        Self::new(Arc::new(UserspaceOverlayDial))
+    }
+}
 
 #[tonic::async_trait]
 impl P2pPeerReader for OverlayPeerReader {
@@ -191,8 +230,9 @@ impl P2pPeerReader for OverlayPeerReader {
         source_id: &str,
         read_token: &str,
     ) -> Result<Vec<u8>, String> {
-        let address = overlay_address(overlay_ipv4, port)?;
-        let channel = Endpoint::from_shared(address)
+        let target = overlay_target(overlay_ipv4, port)?;
+        let address = self.dial.dial_address(&target).await?;
+        let channel = Endpoint::from_shared(format!("http://{address}"))
             .map_err(|error| error.to_string())?
             .connect_timeout(CONNECT_TIMEOUT)
             .timeout(READ_TIMEOUT)
@@ -213,7 +253,8 @@ impl P2pPeerReader for OverlayPeerReader {
     }
 }
 
-fn overlay_address(overlay_ipv4: &str, port: u32) -> Result<String, String> {
+/// Validates a Nodepool-issued overlay address and returns its `ip:port` target.
+fn overlay_target(overlay_ipv4: &str, port: u32) -> Result<String, String> {
     let ip = Ipv4Addr::from_str(overlay_ipv4).map_err(|_| "source address is not IPv4")?;
     let overlay_network = u32::from(Ipv4Addr::new(100, 64, 0, 0));
     if u32::from(ip) & 0xffc0_0000 != overlay_network || ip.to_string() != overlay_ipv4 {
@@ -222,7 +263,7 @@ fn overlay_address(overlay_ipv4: &str, port: u32) -> Result<String, String> {
     if port != HCODE_SOURCE_PORT {
         return Err("source port is not the overlay artifact port".into());
     }
-    Ok(format!("http://{ip}:{HCODE_SOURCE_PORT}"))
+    Ok(format!("{ip}:{HCODE_SOURCE_PORT}"))
 }
 
 /// Downloads one artifact from authorized peers. Each chunk is verified before

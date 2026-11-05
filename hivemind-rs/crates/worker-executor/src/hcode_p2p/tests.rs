@@ -3,7 +3,6 @@ use super::*;
 use chrono::Utc;
 use general_compute_runtime::ArtifactRole;
 use hivemind_proto::{
-    hcode_artifact_peer_service_client::HcodeArtifactPeerServiceClient,
     hcode_artifact_peer_service_server::{
         HcodeArtifactPeerService, HcodeArtifactPeerServiceServer,
     },
@@ -14,7 +13,6 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::net::TcpListener;
 use tokio_stream::wrappers::TcpListenerStream;
-use tonic::transport::Endpoint;
 use tonic::{Request, Response, Status};
 
 const EXECUTION_TOKEN: &str = "execution-token-never-forwarded";
@@ -272,45 +270,36 @@ impl P2pControlPlane for Control {
     }
 }
 
-/// Routes each lease to the loopback address of its source. The overlay address
-/// is ignored here because the production reader's address rules are tested directly.
-struct Loopback {
-    addresses: HashMap<String, String>,
+/// Maps each overlay `ip:port` target to the loopback listener of its test
+/// source. The production reader still validates the overlay address first.
+struct RoutingDial {
+    routes: HashMap<String, String>,
 }
 
 #[tonic::async_trait]
-impl P2pPeerReader for Loopback {
-    async fn read_chunk(
-        &self,
-        _overlay_ipv4: &str,
-        _port: u32,
-        source_id: &str,
-        read_token: &str,
-    ) -> Result<Vec<u8>, String> {
-        let address = self
-            .addresses
-            .get(source_id)
-            .ok_or_else(|| "unknown source".to_owned())?;
-        let channel = Endpoint::from_shared(format!("http://{address}"))
-            .map_err(|error| error.to_string())?
-            .connect()
-            .await
-            .map_err(|error| error.to_string())?;
-        let mut client = HcodeArtifactPeerServiceClient::new(channel);
-        let response = client
-            .read_chunk(HcodePeerReadRequest {
-                source_id: source_id.to_owned(),
-                token: read_token.to_owned(),
-            })
-            .await
-            .map_err(|status| status.message().to_owned())?;
-        Ok(response.into_inner().bytes)
+impl OverlayDial for RoutingDial {
+    async fn dial_address(&self, overlay_target: &str) -> Result<String, String> {
+        self.routes
+            .get(overlay_target)
+            .cloned()
+            .ok_or_else(|| "no route to the overlay target".to_owned())
+    }
+}
+
+/// Counts dial attempts so a test can prove that invalid targets never dial.
+struct CountingDial(AtomicUsize);
+
+#[tonic::async_trait]
+impl OverlayDial for CountingDial {
+    async fn dial_address(&self, overlay_target: &str) -> Result<String, String> {
+        self.0.fetch_add(1, Ordering::SeqCst);
+        Ok(overlay_target.to_owned())
     }
 }
 
 struct Harness {
     control: Control,
-    reader: Loopback,
+    reader: OverlayPeerReader,
     peers: Vec<(String, Arc<Mutex<Vec<String>>>)>,
     manifest: ArtifactManifest,
 }
@@ -319,7 +308,7 @@ impl Harness {
     async fn new(data: &[u8], sources: &[(&str, Tamper, Behavior)]) -> Self {
         let shared = Arc::new(data.to_vec());
         let mut specs = Vec::new();
-        let mut addresses = HashMap::new();
+        let mut routes = HashMap::new();
         let mut peers = Vec::new();
         for (index, (id, tamper, behavior)) in sources.iter().enumerate() {
             let seen_tokens = Arc::new(Mutex::new(Vec::new()));
@@ -329,10 +318,11 @@ impl Harness {
                 seen_tokens: seen_tokens.clone(),
             })
             .await;
-            addresses.insert((*id).to_owned(), address);
+            let overlay = format!("100.64.0.{}", index + 1);
+            routes.insert(format!("{overlay}:{HCODE_SOURCE_PORT}"), address);
             specs.push(SourceSpec {
                 id: (*id).to_owned(),
-                overlay: format!("100.64.0.{}", index + 1),
+                overlay,
                 tamper: *tamper,
             });
             peers.push(((*id).to_owned(), seen_tokens));
@@ -347,7 +337,7 @@ impl Harness {
                 leases: AtomicUsize::new(0),
                 seen_by_control: Mutex::new(Vec::new()),
             },
-            reader: Loopback { addresses },
+            reader: OverlayPeerReader::new(Arc::new(RoutingDial { routes })),
             peers,
             manifest,
         }
@@ -572,14 +562,14 @@ async fn control_plane_failure_is_reported_and_no_bytes_are_requested() {
 }
 
 #[test]
-fn production_reader_dials_only_canonical_overlay_addresses_on_the_fixed_port() {
+fn overlay_targets_are_canonical_cgnat_addresses_on_the_fixed_port() {
     assert_eq!(
-        overlay_address("100.64.0.1", HCODE_SOURCE_PORT).unwrap(),
-        "http://100.64.0.1:50054"
+        overlay_target("100.64.0.1", HCODE_SOURCE_PORT).unwrap(),
+        "100.64.0.1:50054"
     );
     assert_eq!(
-        overlay_address("100.127.255.254", HCODE_SOURCE_PORT).unwrap(),
-        "http://100.127.255.254:50054"
+        overlay_target("100.127.255.254", HCODE_SOURCE_PORT).unwrap(),
+        "100.127.255.254:50054"
     );
     for (address, port) in [
         ("127.0.0.1", HCODE_SOURCE_PORT),
@@ -590,6 +580,23 @@ fn production_reader_dials_only_canonical_overlay_addresses_on_the_fixed_port() 
         ("100.64.0.1", 0),
         ("example.test", HCODE_SOURCE_PORT),
     ] {
-        assert!(overlay_address(address, port).is_err(), "{address}:{port}");
+        assert!(overlay_target(address, port).is_err(), "{address}:{port}");
     }
+}
+
+#[tokio::test]
+async fn invalid_overlay_targets_are_rejected_before_any_dial() {
+    let dial = Arc::new(CountingDial(AtomicUsize::new(0)));
+    let reader = OverlayPeerReader::new(dial.clone());
+    for address in ["127.0.0.1", "100.128.0.1", "100.64.0.01"] {
+        let result = reader
+            .read_chunk(address, HCODE_SOURCE_PORT, "source", "token")
+            .await;
+        assert!(result.is_err(), "{address}");
+    }
+    assert!(reader
+        .read_chunk("100.64.0.1", 50055, "source", "token")
+        .await
+        .is_err());
+    assert_eq!(dial.0.load(Ordering::SeqCst), 0);
 }
