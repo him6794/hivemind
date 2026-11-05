@@ -35,6 +35,7 @@ struct Controller {
     requests: Arc<AtomicUsize>,
     pause: Arc<Mutex<Option<Pause>>>,
     expiry: Arc<Mutex<Option<DateTime<Utc>>>>,
+    listing: Arc<Mutex<Option<Vec<serde_json::Value>>>>,
     task: tokio::task::JoinHandle<()>,
 }
 
@@ -48,6 +49,8 @@ impl Controller {
         let paused = pause.clone();
         let expiry: Arc<Mutex<Option<DateTime<Utc>>>> = Arc::new(Mutex::new(None));
         let node_expiry = expiry.clone();
+        let listing: Arc<Mutex<Option<Vec<serde_json::Value>>>> = Arc::new(Mutex::new(None));
+        let served = listing.clone();
         let task = tokio::spawn(async move {
             loop {
                 let (mut stream, _) = listener.accept().await.unwrap();
@@ -62,6 +65,19 @@ impl Controller {
                 assert!(request
                     .to_ascii_lowercase()
                     .contains("authorization: bearer test-control-key\r\n"));
+                if request.starts_with("GET /api/v1/node ") {
+                    count.fetch_add(1, Ordering::SeqCst);
+                    let nodes = served.lock().unwrap().clone().unwrap_or_default();
+                    let body = serde_json::to_vec(&json!({"nodes": nodes})).unwrap();
+                    let mut response = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        body.len()
+                    )
+                    .into_bytes();
+                    response.extend_from_slice(&body);
+                    stream.write_all(&response).await.unwrap();
+                    continue;
+                }
                 let node_id: u64 = request
                     .strip_prefix("GET /api/v1/node/")
                     .unwrap()
@@ -98,8 +114,14 @@ impl Controller {
             requests,
             pause,
             expiry,
+            listing,
             task,
         }
+    }
+
+    /// Nodes returned by `GET /api/v1/node`, the shared-namespace listing.
+    fn set_listing(&self, nodes: Vec<serde_json::Value>) {
+        *self.listing.lock().unwrap() = Some(nodes);
     }
 
     fn pause_next(&self) -> (oneshot::Receiver<()>, oneshot::Sender<()>) {
@@ -731,6 +753,80 @@ async fn source_registration_persistence_rechecks_enrollment_and_opaque_owner() 
             .unwrap()
             .code(),
         tonic::Code::NotFound
+    );
+    fixture.finish().await;
+}
+
+/// One entry of the shared-namespace listing. Its single-use key ID is the
+/// enrollment key the node joined with.
+fn listed_node(node: i64) -> serde_json::Value {
+    json!({
+        "id": node.to_string(), "user": {"name": namespace()},
+        "preAuthKey": {"id": node.to_string(), "reusable": false},
+        "ipAddresses": [format!("100.64.42.{node}")],
+        "online": true, "expiry": null
+    })
+}
+
+#[tokio::test]
+async fn owner_vpn_node_query_resolves_only_the_callers_enrolled_node() {
+    let fixture = Fixture::new("hcode_owner_vpn_node").await;
+    fixture
+        .controller
+        .set_listing(vec![listed_node(3), listed_node(7)]);
+    let response = fixture
+        .service
+        .resolve_owner_vpn_node(Request::new(HcodeOwnerVpnNodeRequest {
+            token: fixture.token.clone(),
+            vpn_client_id: "user:alice:device-7".into(),
+        }))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(response.vpn_client_id, "user:alice:device-7");
+    assert_eq!(response.headscale_node_id, 7);
+    assert_eq!(response.overlay_ipv4, "100.64.42.7");
+    // Another account cannot read this enrollment; the reply reveals nothing about it.
+    let denied = fixture
+        .service
+        .resolve_owner_vpn_node(Request::new(HcodeOwnerVpnNodeRequest {
+            token: fixture.other_token.clone(),
+            vpn_client_id: "user:alice:device-7".into(),
+        }))
+        .await
+        .unwrap_err();
+    assert_eq!(denied.code(), tonic::Code::FailedPrecondition);
+    fixture.finish().await;
+}
+
+#[tokio::test]
+async fn owner_vpn_node_query_reports_an_unjoined_key_and_validates_before_network() {
+    let fixture = Fixture::new("hcode_owner_vpn_node_unjoined").await;
+    fixture.controller.set_listing(vec![listed_node(3)]);
+    let unjoined = fixture
+        .service
+        .resolve_owner_vpn_node(Request::new(HcodeOwnerVpnNodeRequest {
+            token: fixture.token.clone(),
+            vpn_client_id: "user:alice:device-7".into(),
+        }))
+        .await
+        .unwrap_err();
+    assert_eq!(unjoined.code(), tonic::Code::FailedPrecondition);
+    assert!(unjoined.message().contains("not joined"));
+    let requests_before = fixture.controller.requests.load(Ordering::SeqCst);
+    let invalid = fixture
+        .service
+        .resolve_owner_vpn_node(Request::new(HcodeOwnerVpnNodeRequest {
+            token: fixture.token.clone(),
+            vpn_client_id: String::new(),
+        }))
+        .await
+        .unwrap_err();
+    assert_eq!(invalid.code(), tonic::Code::InvalidArgument);
+    assert_eq!(
+        fixture.controller.requests.load(Ordering::SeqCst),
+        requests_before,
+        "an invalid identity never reaches the control plane"
     );
     fixture.finish().await;
 }

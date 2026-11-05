@@ -8,11 +8,13 @@
 
 use chrono::{DateTime, Utc};
 use hivemind_proto::{
-    hcode_artifact_source_service_server::HcodeArtifactSourceService, HcodeSourceRegistration,
-    HcodeSourceRequest, RegisterHcodeSourceRequest, RevokeHcodeSourceResponse,
+    hcode_artifact_source_service_server::HcodeArtifactSourceService, HcodeOwnerVpnNode,
+    HcodeOwnerVpnNodeRequest, HcodeSourceRegistration, HcodeSourceRequest,
+    RegisterHcodeSourceRequest, RevokeHcodeSourceResponse,
 };
 use hivemind_vpn_service::{
     enrollment::{AuthenticatedOwner, VerifiedVpnPeer, VpnEnrollmentError},
+    peer_verifier::PeerVerificationError,
     VpnService,
 };
 use sqlx::PgPool;
@@ -68,6 +70,21 @@ fn storage_error(error: sqlx::Error) -> Status {
 
 fn unavailable() -> Status {
     Status::not_found("source or owned hcode artifact is unavailable")
+}
+
+fn vpn_status(error: VpnEnrollmentError) -> Status {
+    match error {
+        VpnEnrollmentError::Unauthorized(_) => {
+            Status::unauthenticated("active account authorization required")
+        }
+        VpnEnrollmentError::Database(_) | VpnEnrollmentError::Configuration(_) => {
+            Status::internal("VPN identity lookup failed")
+        }
+        VpnEnrollmentError::Controller(PeerVerificationError::NodeNotFound) => {
+            Status::failed_precondition("enrolled VPN node has not joined yet")
+        }
+        _ => Status::failed_precondition("verified VPN enrollment required"),
+    }
 }
 
 fn validate_token(token: &str) -> Result<(), Status> {
@@ -295,15 +312,7 @@ impl HcodeArtifactSourceService for GrpcHcodeArtifactSourceService {
                 request.headscale_node_id,
             )
             .await
-            .map_err(|error| match error {
-                VpnEnrollmentError::Unauthorized(_) => {
-                    Status::unauthenticated("active account authorization required")
-                }
-                VpnEnrollmentError::Database(_) | VpnEnrollmentError::Configuration(_) => {
-                    Status::internal("VPN identity lookup failed")
-                }
-                _ => Status::failed_precondition("verified VPN enrollment required"),
-            })?;
+            .map_err(vpn_status)?;
         let row = self.persist(&owner, &peer, artifact).await?;
         Ok(Response::new(row.into()))
     }
@@ -339,6 +348,30 @@ impl HcodeArtifactSourceService for GrpcHcodeArtifactSourceService {
         .map_err(storage_error)?;
         Ok(Response::new(RevokeHcodeSourceResponse {
             revoked: result.rows_affected() == 1,
+        }))
+    }
+
+    /// Owner-authenticated identity query. The node comes from the persisted
+    /// enrollment key and a bounded control-plane listing, so the reply is a
+    /// registration hint. Registration verifies the node again.
+    async fn resolve_owner_vpn_node(
+        &self,
+        request: Request<HcodeOwnerVpnNodeRequest>,
+    ) -> Result<Response<HcodeOwnerVpnNode>, Status> {
+        let request = request.into_inner();
+        validate_token(&request.token)?;
+        if request.vpn_client_id.is_empty() || request.vpn_client_id.len() > 255 {
+            return Err(Status::invalid_argument("invalid VPN client identity"));
+        }
+        let peer = self
+            .vpn
+            .resolve_user_vpn_node(&request.token, &request.vpn_client_id)
+            .await
+            .map_err(vpn_status)?;
+        Ok(Response::new(HcodeOwnerVpnNode {
+            vpn_client_id: request.vpn_client_id,
+            headscale_node_id: peer.node().node_id(),
+            overlay_ipv4: peer.node().ipv4().to_string(),
         }))
     }
 }

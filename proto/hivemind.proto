@@ -683,6 +683,21 @@ message RevokeHcodeSourceResponse {
     bool revoked = 1;
 }
 
+// Owner -> Nodepool: resolve the owner's own enrolled node for one VPN client.
+// Nodepool derives the enrollment key from its own record and confirms the node
+// with the control plane. The reply is an identity hint for registration, not
+// proof of availability.
+message HcodeOwnerVpnNodeRequest {
+    string token = 1;
+    string vpn_client_id = 2;
+}
+
+message HcodeOwnerVpnNode {
+    string vpn_client_id = 1;
+    uint64 headscale_node_id = 2;
+    string overlay_ipv4 = 3;
+}
+
 // Nodepool -> source -> Nodepool, using a distinct pre-dispatch capability.
 message HcodePeerProbeRequest {
     string source_id = 1;
@@ -1357,6 +1372,7 @@ service HcodeArtifactSourceService {
     rpc RegisterSource(RegisterHcodeSourceRequest) returns (HcodeSourceRegistration);
     rpc GetSource(HcodeSourceRequest) returns (HcodeSourceRegistration);
     rpc RevokeSource(HcodeSourceRequest) returns (RevokeHcodeSourceResponse);
+    rpc ResolveOwnerVpnNode(HcodeOwnerVpnNodeRequest) returns (HcodeOwnerVpnNode);
 }
 
 // Nodepool authority. ValidateReadLease rechecks persisted live state for every

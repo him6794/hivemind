@@ -9,8 +9,8 @@ use hivemind_proto::{
     hcode_artifact_source_service_server::{
         HcodeArtifactSourceService, HcodeArtifactSourceServiceServer,
     },
-    HcodeArtifactChunkAuthorization, HcodePeerProbeRequest, HcodePeerReadAuthorization,
-    RevokeHcodeSourceResponse,
+    HcodeArtifactChunkAuthorization, HcodeOwnerVpnNode, HcodeOwnerVpnNodeRequest,
+    HcodePeerProbeRequest, HcodePeerReadAuthorization, RevokeHcodeSourceResponse,
 };
 use std::sync::{Arc, Mutex};
 use tokio::net::TcpListener;
@@ -118,6 +118,15 @@ impl HcodeArtifactSourceService for Nodepool {
         _request: Request<HcodeSourceRequest>,
     ) -> Result<Response<HcodeSourceRegistration>, Status> {
         Err(Status::unimplemented("not used by the host"))
+    }
+
+    async fn resolve_owner_vpn_node(
+        &self,
+        _request: Request<HcodeOwnerVpnNodeRequest>,
+    ) -> Result<Response<HcodeOwnerVpnNode>, Status> {
+        Err(Status::unimplemented(
+            "replaced when the owner client resolves identities",
+        ))
     }
 
     async fn revoke_source(
