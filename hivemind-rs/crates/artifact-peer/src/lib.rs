@@ -33,6 +33,8 @@ use tokio::sync::{Semaphore, SemaphorePermit};
 use tonic::{transport::Channel, Request, Response, Status};
 use uuid::Uuid;
 
+pub mod owner;
+
 pub const PEER_READ_REQUEST_MAX_BYTES: usize = 8 * 1024;
 pub const PEER_READ_RESPONSE_MAX_BYTES: usize = CHUNK_BYTES + 1024;
 const LIVE_VALIDATION_TIMEOUT: Duration = Duration::from_secs(5);
@@ -50,7 +52,50 @@ pub struct PinnedSource {
     bytes: Arc<Vec<u8>>,
 }
 
-fn canonical_id(value: &str) -> Result<Uuid> {
+/// Checks a complete local copy against its manifest: the hcode size limits, the
+/// whole-file digest, and every chunk digest. Hosts call this before registering,
+/// so a corrupt copy never reaches Nodepool.
+pub fn verify_local_content(manifest: &ArtifactManifest, bytes: &[u8]) -> Result<()> {
+    ensure!(
+        manifest.size_bytes >= 10
+            && manifest.size_bytes <= MAX_FILE_BYTES
+            && bytes.len() as u64 == manifest.size_bytes
+            && manifest.role == ArtifactRole::Input
+            && manifest.mime_type == "application/x-safetensors"
+            && manifest.inline_bytes.is_none()
+            && !manifest.chunks.is_empty()
+            && manifest.chunks.len() as u64 <= MAX_FILE_BYTES / CHUNK_BYTES as u64
+            && manifest
+                .chunks
+                .iter()
+                .all(|chunk| chunk.size_bytes <= CHUNK_BYTES as u64),
+        "source exceeds hcode artifact limits"
+    );
+    manifest.validate().map_err(anyhow::Error::msg)?;
+    ensure!(
+        sha256_digest(bytes) == manifest.sha256,
+        "source content does not match its manifest"
+    );
+    for chunk in &manifest.chunks {
+        let start = usize::try_from(chunk.offset)?;
+        let end = usize::try_from(
+            chunk
+                .offset
+                .checked_add(chunk.size_bytes)
+                .ok_or_else(|| anyhow::anyhow!("chunk range overflows"))?,
+        )?;
+        let content = bytes
+            .get(start..end)
+            .ok_or_else(|| anyhow::anyhow!("invalid chunk range"))?;
+        ensure!(
+            sha256_digest(content) == chunk.sha256,
+            "source chunk digest mismatch"
+        );
+    }
+    Ok(())
+}
+
+pub(crate) fn canonical_id(value: &str) -> Result<Uuid> {
     let id = Uuid::parse_str(value)?;
     ensure!(
         !id.is_nil() && id.to_string() == value,
@@ -93,31 +138,14 @@ impl PinnedSource {
                     .all(|chunk| chunk.size_bytes <= CHUNK_BYTES as u64),
             "source exceeds hcode artifact limits"
         );
-        manifest.validate().map_err(anyhow::Error::msg)?;
+        verify_local_content(&manifest, &bytes)?;
         ensure!(
             registration.artifact_id == manifest.artifact_id
                 && registration.artifact_sha256 == manifest.sha256
                 && u64::try_from(registration.artifact_size_bytes).ok()
-                    == Some(manifest.size_bytes)
-                && sha256_digest(&bytes) == manifest.sha256,
+                    == Some(manifest.size_bytes),
             "source content does not match registration"
         );
-        for chunk in &manifest.chunks {
-            let start = usize::try_from(chunk.offset)?;
-            let end = usize::try_from(
-                chunk
-                    .offset
-                    .checked_add(chunk.size_bytes)
-                    .ok_or_else(|| anyhow::anyhow!("chunk range overflows"))?,
-            )?;
-            let content = bytes
-                .get(start..end)
-                .ok_or_else(|| anyhow::anyhow!("invalid chunk range"))?;
-            ensure!(
-                sha256_digest(content) == chunk.sha256,
-                "source chunk digest mismatch"
-            );
-        }
         Ok(Self {
             registration,
             source_id,
