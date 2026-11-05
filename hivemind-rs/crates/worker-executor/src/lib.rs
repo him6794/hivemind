@@ -4,6 +4,7 @@ pub mod chunk_transport;
 pub mod control_api;
 pub mod executor;
 pub mod grpc_server;
+pub mod hcode_p2p;
 pub mod maintenance;
 pub mod nodepool_client;
 pub mod resource_monitor;
