@@ -122,11 +122,28 @@ impl HcodeArtifactSourceService for Nodepool {
 
     async fn resolve_owner_vpn_node(
         &self,
-        _request: Request<HcodeOwnerVpnNodeRequest>,
+        request: Request<HcodeOwnerVpnNodeRequest>,
     ) -> Result<Response<HcodeOwnerVpnNode>, Status> {
-        Err(Status::unimplemented(
-            "replaced when the owner client resolves identities",
-        ))
+        let request = request.into_inner();
+        if request.token != OWNER_TOKEN {
+            return Err(Status::unauthenticated("owner token rejected"));
+        }
+        let label = request.vpn_client_id;
+        let node = |client: String, overlay: &str| {
+            Ok(Response::new(HcodeOwnerVpnNode {
+                vpn_client_id: client,
+                headscale_node_id: 7,
+                overlay_ipv4: overlay.into(),
+            }))
+        };
+        match label.as_str() {
+            "not-joined" => Err(Status::failed_precondition(
+                "enrolled VPN node has not joined yet",
+            )),
+            "other-label" => node("someone-else".into(), "100.64.1.2"),
+            "outside-overlay" => node(label.clone(), "8.8.8.8"),
+            _ => node(label.clone(), "100.64.1.2"),
+        }
     }
 
     async fn revoke_source(
@@ -523,4 +540,48 @@ fn artifact_files_are_read_as_regular_files_within_the_limit() {
     );
 
     std::fs::remove_dir_all(&directory).unwrap();
+}
+
+#[tokio::test]
+async fn owner_client_resolves_the_enrolled_node_and_registers_with_it() {
+    let fixture = Fixture::start().await;
+    let client = OwnerSourceClient::new(fixture.channel.clone());
+
+    let resolved = client
+        .resolve_identity(OWNER_TOKEN, "owner-host")
+        .await
+        .unwrap();
+    assert_eq!(resolved, identity());
+
+    let (hosted, pinned) = HostedArtifact::publish(
+        client,
+        OWNER_TOKEN,
+        resolved,
+        TASK,
+        fixture.manifest.clone(),
+        fixture.bytes.clone(),
+    )
+    .await
+    .unwrap();
+    let _peer = fixture.serve(pinned).await;
+    hosted.probe().await.unwrap();
+    assert_eq!(fixture.nodepool.counters().registers, 1);
+}
+
+#[tokio::test]
+async fn owner_client_rejects_resolutions_that_do_not_match_the_request() {
+    let fixture = Fixture::start().await;
+    let client = OwnerSourceClient::new(fixture.channel.clone());
+    for label in ["not-joined", "other-label", "outside-overlay"] {
+        assert!(
+            client.resolve_identity(OWNER_TOKEN, label).await.is_err(),
+            "{label}"
+        );
+    }
+    assert!(client.resolve_identity("", "owner-host").await.is_err());
+    assert!(client.resolve_identity(OWNER_TOKEN, "").await.is_err());
+    assert!(client
+        .resolve_identity("wrong-token", "owner-host")
+        .await
+        .is_err());
 }

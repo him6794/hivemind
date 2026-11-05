@@ -4,7 +4,7 @@
 //! probe observation. The host process owns the listener and any Windows
 //! forwarding. It calls [`HostedArtifact::probe`] only after the listener serves.
 
-use std::{future::Future, io::Read, path::Path, time::Duration};
+use std::{future::Future, io::Read, net::Ipv4Addr, path::Path, time::Duration};
 
 use anyhow::{ensure, Context, Result};
 use chrono::Utc;
@@ -15,7 +15,7 @@ use general_compute_runtime::{
 use hivemind_proto::{
     hcode_artifact_probe_service_client::HcodeArtifactProbeServiceClient,
     hcode_artifact_source_service_client::HcodeArtifactSourceServiceClient,
-    HcodeSourceAvailability, HcodeSourceRegistration, HcodeSourceRequest,
+    HcodeOwnerVpnNodeRequest, HcodeSourceAvailability, HcodeSourceRegistration, HcodeSourceRequest,
     RegisterHcodeSourceRequest,
 };
 use tonic::{transport::Channel, Response, Status};
@@ -146,6 +146,45 @@ impl OwnerSourceClient {
         let registration = call(self.sources.clone().register_source(request)).await?;
         check_registration(&registration, task_id, artifact_id)?;
         Ok(registration)
+    }
+
+    /// Asks Nodepool which enrolled Headscale node belongs to this VPN client label.
+    /// The reply is an identity hint. Registration asks Nodepool to verify it again,
+    /// so nothing here is trusted beyond the shape checks below.
+    pub async fn resolve_identity(
+        &self,
+        token: &str,
+        vpn_client_id: &str,
+    ) -> Result<OwnerPeerIdentity> {
+        validate_token(token)?;
+        ensure!(
+            !vpn_client_id.is_empty() && vpn_client_id.len() <= 255,
+            "VPN client identity must be 1 to 255 bytes"
+        );
+        let request = HcodeOwnerVpnNodeRequest {
+            token: token.to_owned(),
+            vpn_client_id: vpn_client_id.to_owned(),
+        };
+        let node = call(self.sources.clone().resolve_owner_vpn_node(request)).await?;
+        ensure!(
+            node.vpn_client_id == vpn_client_id,
+            "Nodepool resolved a different VPN client"
+        );
+        let overlay: Ipv4Addr = node
+            .overlay_ipv4
+            .parse()
+            .context("Nodepool returned a malformed overlay address")?;
+        let octets = overlay.octets();
+        ensure!(
+            octets[0] == 100 && (64..=127).contains(&octets[1]),
+            "Nodepool returned an address outside the overlay"
+        );
+        let identity = OwnerPeerIdentity {
+            vpn_client_id: node.vpn_client_id,
+            headscale_node_id: node.headscale_node_id,
+        };
+        identity.validate()?;
+        Ok(identity)
     }
 
     /// Asks Nodepool to probe the current generation of `source_id`. Nodepool
