@@ -317,6 +317,34 @@ impl LibtailscaleSession {
             }
         }
     }
+
+    /// Forwards TCP `overlay_port` on the tailnet to a loopback listener here.
+    fn listen_forward(&self, overlay_port: u16, local_port: u16) -> Result<()> {
+        anyhow::ensure!(
+            overlay_port != 0 && local_port != 0,
+            "overlay forward ports must be nonzero"
+        );
+        anyhow::ensure!(
+            !self.closed.load(Ordering::Acquire),
+            "embedded libtailscale session is closed"
+        );
+        let network = CString::new("tcp")?;
+        let tailnet_addr = CString::new(forward_tailnet_addr(overlay_port))?;
+        let local_addr = CString::new(forward_local_addr(local_port))?;
+        let status = unsafe {
+            tailscale_listen_forward(
+                self.handle,
+                network.as_ptr(),
+                tailnet_addr.as_ptr(),
+                local_addr.as_ptr(),
+            )
+        };
+        anyhow::ensure!(
+            status == 0,
+            "embedded libtailscale could not expose overlay port {overlay_port}"
+        );
+        Ok(())
+    }
 }
 
 #[cfg(target_os = "windows")]
@@ -882,6 +910,48 @@ fn retire_vpn_session_if_generation(role: ClientRole, generation: u64) -> bool {
 /// Get the current VPN session for a role.
 pub async fn current_vpn_session(role: ClientRole) -> Option<Arc<VpnSession>> {
     vpn_runtime_snapshot(role).0
+}
+
+/// Expose `overlay_port` on the role's overlay to a loopback listener at
+/// `127.0.0.1:local_port`. Windows userspace sessions have no OS interface for
+/// the overlay address, so an owner host calls this after the session is up.
+/// Other platforms bind the OS interface directly and never reach this path.
+#[cfg(target_os = "windows")]
+pub async fn expose_overlay_tcp_port(
+    role: ClientRole,
+    overlay_port: u16,
+    local_port: u16,
+) -> Result<()> {
+    let session = current_vpn_session(role)
+        .await
+        .ok_or_else(|| anyhow::anyhow!("VPN session is not ready"))?;
+    let libtailscale = session
+        .libtailscale
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("embedded libtailscale session is not active"))?;
+    libtailscale.listen_forward(overlay_port, local_port)
+}
+
+/// Non-Windows builds have no embedded forwarder; hosts bind the OS interface.
+#[cfg(not(target_os = "windows"))]
+pub async fn expose_overlay_tcp_port(
+    _role: ClientRole,
+    _overlay_port: u16,
+    _local_port: u16,
+) -> Result<()> {
+    bail!("embedded overlay forwarding exists only on Windows; bind the OS interface directly")
+}
+
+/// The embedded forwarder always listens on the tailnet address for `overlay_port`.
+#[cfg(any(target_os = "windows", test))]
+fn forward_tailnet_addr(overlay_port: u16) -> String {
+    format!(":{overlay_port}")
+}
+
+/// The local side of every forward is loopback; the host chooses only the port.
+#[cfg(any(target_os = "windows", test))]
+fn forward_local_addr(local_port: u16) -> String {
+    format!("127.0.0.1:{local_port}")
 }
 
 /// Return whether this client must use the authenticated external overlay.
@@ -4822,6 +4892,19 @@ mod tests {
             endpoint_port_for_worker(ClientRole::Master, Some("0.0.0.0:60055")),
             50053
         );
+    }
+
+    #[test]
+    fn overlay_forward_addresses_keep_the_local_side_on_loopback() {
+        assert_eq!(forward_tailnet_addr(50054), ":50054");
+        assert_eq!(forward_local_addr(54321), "127.0.0.1:54321");
+    }
+
+    #[tokio::test]
+    async fn overlay_forward_requires_an_active_session() {
+        assert!(expose_overlay_tcp_port(ClientRole::Master, 50054, 54321)
+            .await
+            .is_err());
     }
 
     #[test]
