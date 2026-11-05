@@ -798,3 +798,74 @@ async fn enrollment_control_transport_is_bounded_and_does_not_leak_secrets() {
             .is_err()
     );
 }
+
+fn listed(nodes: Vec<Value>) -> Value {
+    json!({"nodes": nodes})
+}
+
+fn other_enrollment_node(key: i64) -> Value {
+    json!({
+        "id": "3", "user": {"name": crate::shared_headscale_client_user()},
+        "online": true, "ipAddresses": ["100.64.9.9"], "expiry": null,
+        "preAuthKey": {"id": key.to_string(), "key": "masked***", "reusable": false}
+    })
+}
+
+#[tokio::test]
+async fn enrollment_resolves_the_owner_node_by_its_enrollment_key() {
+    let mut steps = issuance_steps(11);
+    steps.push(Step::json(listed(vec![
+        other_enrollment_node(12),
+        node(11)["node"].clone(),
+    ])));
+    let controller = Controller::start(steps).await;
+    let (service, fixture, owner_id, owner_token) =
+        fixture("vpn_enrollment_resolve", &controller).await;
+    let config = service
+        .issue_user_vpn_config_from_token(&owner_token, "Desktop")
+        .await
+        .unwrap();
+    let peer = service
+        .resolve_user_vpn_node(&owner_token, &config.client_id)
+        .await
+        .unwrap();
+    assert_eq!(peer.owner_id(), owner_id);
+    assert_eq!(peer.node().node_id(), 7);
+    assert_eq!(peer.node().preauth_key_id(), 11);
+    assert_eq!(peer.node().ipv4().to_string(), "100.64.1.2");
+    let requests = controller.finish().await;
+    assert_eq!(requests.len(), 4);
+    assert!(requests[3].starts_with("GET /api/v1/node "));
+    assert!(!requests[3].contains("/api/v1/node/"));
+    fixture.cleanup().await.unwrap();
+}
+
+#[tokio::test]
+async fn enrollment_reports_an_unjoined_key_and_hides_other_accounts() {
+    let mut steps = issuance_steps(11);
+    steps.push(Step::json(listed(vec![other_enrollment_node(12)])));
+    let controller = Controller::start(steps).await;
+    let (service, fixture, _owner_id, owner_token) =
+        fixture("vpn_enrollment_unjoined", &controller).await;
+    let config = service
+        .issue_user_vpn_config_from_token(&owner_token, "Desktop")
+        .await
+        .unwrap();
+    let (_, bob_token) = account(&service, "bob").await;
+    assert!(matches!(
+        service
+            .resolve_user_vpn_node(&bob_token, &config.client_id)
+            .await,
+        Err(VpnEnrollmentError::NotEnrolled)
+    ));
+    assert!(matches!(
+        service
+            .resolve_user_vpn_node(&owner_token, &config.client_id)
+            .await,
+        Err(VpnEnrollmentError::Controller(
+            crate::peer_verifier::PeerVerificationError::NodeNotFound
+        ))
+    ));
+    assert_eq!(controller.finish().await.len(), 4);
+    fixture.cleanup().await.unwrap();
+}

@@ -117,6 +117,13 @@ impl VerifiedVpnPeer {
     }
 }
 
+/// How the controller identifies the enrolled node: a caller hint that Nodepool
+/// verifies, or the enrollment key alone, which Headscale resolves to one node.
+enum NodeLookup {
+    Hinted(u64),
+    ByEnrollmentKey,
+}
+
 #[derive(sqlx::FromRow)]
 struct EnrollmentSnapshot {
     enrollment_id: Uuid,
@@ -235,7 +242,32 @@ impl VpnService {
         client_id: &str,
         node_id: u64,
     ) -> std::result::Result<VerifiedVpnPeer, VpnEnrollmentError> {
-        if client_id.is_empty() || client_id.len() > 255 || node_id == 0 {
+        if node_id == 0 {
+            return Err(VpnEnrollmentError::InvalidRequest);
+        }
+        self.verify_owned_peer(token, client_id, NodeLookup::Hinted(node_id))
+            .await
+    }
+
+    /// Find the owner's own enrolled node without a caller-supplied node ID. The
+    /// enrollment key comes from the persisted record, and Headscale must show
+    /// exactly one node that joined with it.
+    pub async fn resolve_user_vpn_node(
+        &self,
+        token: &str,
+        client_id: &str,
+    ) -> std::result::Result<VerifiedVpnPeer, VpnEnrollmentError> {
+        self.verify_owned_peer(token, client_id, NodeLookup::ByEnrollmentKey)
+            .await
+    }
+
+    async fn verify_owned_peer(
+        &self,
+        token: &str,
+        client_id: &str,
+        lookup: NodeLookup,
+    ) -> std::result::Result<VerifiedVpnPeer, VpnEnrollmentError> {
+        if client_id.is_empty() || client_id.len() > 255 {
             return Err(VpnEnrollmentError::InvalidRequest);
         }
         let owner = self
@@ -265,10 +297,11 @@ impl VpnService {
             .peer_verifier
             .as_ref()
             .ok_or(VpnEnrollmentError::ControllerUnavailable)?;
-        let node = verifier
-            .verify_node(node_id, key_id)
-            .await
-            .map_err(VpnEnrollmentError::Controller)?;
+        let node = match lookup {
+            NodeLookup::Hinted(node_id) => verifier.verify_node(node_id, key_id).await,
+            NodeLookup::ByEnrollmentKey => verifier.resolve_node_by_key(key_id).await,
+        }
+        .map_err(VpnEnrollmentError::Controller)?;
         let still_current: bool = sqlx::query_scalar(
             "SELECT EXISTS(
                 SELECT 1 FROM vpn_peer_enrollments e

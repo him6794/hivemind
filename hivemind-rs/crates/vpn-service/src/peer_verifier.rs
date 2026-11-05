@@ -14,6 +14,9 @@ use std::net::{IpAddr, Ipv4Addr};
 use std::time::Duration;
 
 const MAX_NODE_RESPONSE_BYTES: usize = 64 * 1024;
+/// The list covers the whole shared namespace, so it needs a larger bound than a
+/// single node. A reply above this bound fails closed instead of being truncated.
+const MAX_NODE_LIST_RESPONSE_BYTES: usize = 1024 * 1024;
 const MAX_API_KEY_BYTES: usize = 1024;
 
 #[derive(Debug)]
@@ -24,6 +27,7 @@ pub enum PeerVerificationError {
     ResponseTooLarge,
     Json(serde_json::Error),
     InvalidNode(&'static str),
+    NodeNotFound,
 }
 
 impl fmt::Display for PeerVerificationError {
@@ -41,6 +45,9 @@ impl fmt::Display for PeerVerificationError {
             Self::Json(_) => formatter.write_str("Headscale node response is not valid JSON"),
             Self::InvalidNode(reason) => {
                 write!(formatter, "Headscale source identity rejected: {reason}")
+            }
+            Self::NodeNotFound => {
+                formatter.write_str("no Headscale node has joined with this enrollment key yet")
             }
         }
     }
@@ -168,6 +175,34 @@ impl HeadscalePeerVerifier {
             .base_url
             .join(&format!("node/{node_id}"))
             .map_err(|_| PeerVerificationError::Configuration("invalid node lookup URL"))?;
+        let response = self.get_json(url, MAX_NODE_RESPONSE_BYTES).await?;
+        validate_node(
+            &response,
+            node_id,
+            expected_key_id,
+            &self.namespace,
+            Utc::now(),
+        )
+    }
+
+    /// Finds the one node that joined with `expected_key_id`. Headscale lists the
+    /// whole shared namespace, so the reply is bounded, and a second match fails
+    /// closed. The key ID must come from Nodepool's enrollment record.
+    pub async fn resolve_node_by_key(&self, expected_key_id: u64) -> Result<VerifiedOverlayNode> {
+        if expected_key_id == 0 {
+            return Err(PeerVerificationError::InvalidNode(
+                "missing enrollment identity",
+            ));
+        }
+        let url = self
+            .base_url
+            .join("node")
+            .map_err(|_| PeerVerificationError::Configuration("invalid node list URL"))?;
+        let response = self.get_json(url, MAX_NODE_LIST_RESPONSE_BYTES).await?;
+        select_node_by_key(&response, expected_key_id, &self.namespace, Utc::now())
+    }
+
+    async fn get_json(&self, url: Url, limit: usize) -> Result<Value> {
         let mut response = self
             .http
             .get(url)
@@ -180,7 +215,7 @@ impl HeadscalePeerVerifier {
         }
         if response
             .content_length()
-            .is_some_and(|length| length > MAX_NODE_RESPONSE_BYTES as u64)
+            .is_some_and(|length| length > limit as u64)
         {
             return Err(PeerVerificationError::ResponseTooLarge);
         }
@@ -193,20 +228,13 @@ impl HeadscalePeerVerifier {
             if body
                 .len()
                 .checked_add(chunk.len())
-                .is_none_or(|size| size > MAX_NODE_RESPONSE_BYTES)
+                .is_none_or(|size| size > limit)
             {
                 return Err(PeerVerificationError::ResponseTooLarge);
             }
             body.extend_from_slice(&chunk);
         }
-        let response: Value = serde_json::from_slice(&body).map_err(PeerVerificationError::Json)?;
-        validate_node(
-            &response,
-            node_id,
-            expected_key_id,
-            &self.namespace,
-            Utc::now(),
-        )
+        serde_json::from_slice(&body).map_err(PeerVerificationError::Json)
     }
 }
 
@@ -233,6 +261,42 @@ fn validate_node(
         .get("node")
         .filter(|node| node.is_object())
         .ok_or(PeerVerificationError::InvalidNode("missing node"))?;
+    validate_node_object(node, node_id, expected_key_id, namespace, now)
+}
+
+/// Picks the single node enrolled with `expected_key_id`. Unrelated nodes in the
+/// reply are ignored, and a second match with the same key is ambiguous.
+fn select_node_by_key(
+    response: &Value,
+    expected_key_id: u64,
+    namespace: &str,
+    now: DateTime<Utc>,
+) -> Result<VerifiedOverlayNode> {
+    let nodes = response
+        .get("nodes")
+        .and_then(Value::as_array)
+        .ok_or(PeerVerificationError::InvalidNode("missing node list"))?;
+    let mut matches = nodes
+        .iter()
+        .filter(|node| positive_id(node.pointer("/preAuthKey/id")) == Some(expected_key_id));
+    let node = matches.next().ok_or(PeerVerificationError::NodeNotFound)?;
+    if matches.next().is_some() {
+        return Err(PeerVerificationError::InvalidNode(
+            "enrollment key matches more than one node",
+        ));
+    }
+    let node_id = positive_id(node.get("id"))
+        .ok_or(PeerVerificationError::InvalidNode("missing node identity"))?;
+    validate_node_object(node, node_id, expected_key_id, namespace, now)
+}
+
+fn validate_node_object(
+    node: &Value,
+    node_id: u64,
+    expected_key_id: u64,
+    namespace: &str,
+    now: DateTime<Utc>,
+) -> Result<VerifiedOverlayNode> {
     if positive_id(node.get("id")) != Some(node_id)
         || node.pointer("/user/name").and_then(Value::as_str) != Some(namespace)
         || node.get("online").and_then(Value::as_bool) != Some(true)
@@ -558,5 +622,92 @@ mod tests {
             Err(PeerVerificationError::Json(_))
         ));
         server.await.unwrap();
+    }
+
+    fn listed(nodes: Vec<Value>) -> Value {
+        json!({"nodes": nodes})
+    }
+
+    fn other_node(id: &str, key: &str) -> Value {
+        json!({"id": id, "user": {"name": "nodepool"}, "online": true,
+            "ipAddresses": ["100.64.9.9"], "expiry": null,
+            "preAuthKey": {"id": key, "key": "masked-controller-key", "reusable": false}})
+    }
+
+    #[test]
+    fn node_list_selects_the_only_node_enrolled_with_the_key() {
+        let list = listed(vec![
+            other_node("3", "12"),
+            node()["node"].clone(),
+            json!({"id": "4", "user": {"name": "nodepool"}, "online": true,
+                "ipAddresses": ["100.64.9.8"], "expiry": null}),
+        ]);
+        let verified = select_node_by_key(&list, 11, "nodepool", Utc::now()).unwrap();
+        assert_eq!(verified.node_id(), 7);
+        assert_eq!(verified.preauth_key_id(), 11);
+        assert_eq!(verified.ipv4(), Ipv4Addr::new(100, 64, 1, 2));
+    }
+
+    #[test]
+    fn node_list_reports_not_joined_and_refuses_ambiguous_or_foreign_matches() {
+        let now = Utc::now();
+        assert!(matches!(
+            select_node_by_key(&listed(vec![other_node("3", "12")]), 11, "nodepool", now),
+            Err(PeerVerificationError::NodeNotFound)
+        ));
+        let twice = listed(vec![node()["node"].clone(), node()["node"].clone()]);
+        assert!(matches!(
+            select_node_by_key(&twice, 11, "nodepool", now),
+            Err(PeerVerificationError::InvalidNode(_))
+        ));
+        let mut foreign = node()["node"].clone();
+        foreign["user"]["name"] = json!("someone-else");
+        assert!(matches!(
+            select_node_by_key(&listed(vec![foreign]), 11, "nodepool", now),
+            Err(PeerVerificationError::InvalidNode(_))
+        ));
+        for malformed in [json!({}), json!({"nodes": "node"}), json!({"node": {}})] {
+            assert!(matches!(
+                select_node_by_key(&malformed, 11, "nodepool", now),
+                Err(PeerVerificationError::InvalidNode(_))
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn peer_verifier_resolves_the_enrolled_node_from_one_bounded_list() {
+        let list = listed(vec![other_node("3", "12"), node()["node"].clone()]);
+        let (url, server) = serve(response(&serde_json::to_vec(&list).unwrap())).await;
+        let verifier = HeadscalePeerVerifier::new(&url, "api-test-key", "nodepool").unwrap();
+        let verified = verifier.resolve_node_by_key(11).await.unwrap();
+        assert_eq!(verified.node_id(), 7);
+        let request = server.await.unwrap().to_ascii_lowercase();
+        assert!(request.starts_with("get /api/v1/node "));
+        assert!(request.contains("authorization: bearer api-test-key\r\n"));
+    }
+
+    #[tokio::test]
+    async fn peer_verifier_bounds_the_node_list_before_reading_it() {
+        let header = format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            MAX_NODE_LIST_RESPONSE_BYTES + 1
+        );
+        let (url, server) = serve(header.into_bytes()).await;
+        let verifier = HeadscalePeerVerifier::new(&url, "api-test-key", "nodepool").unwrap();
+        assert!(matches!(
+            verifier.resolve_node_by_key(11).await,
+            Err(PeerVerificationError::ResponseTooLarge)
+        ));
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn peer_verifier_rejects_a_missing_enrollment_key_before_network_access() {
+        let verifier =
+            HeadscalePeerVerifier::new("http://127.0.0.1:1", "api-test-key", "nodepool").unwrap();
+        assert!(matches!(
+            verifier.resolve_node_by_key(0).await,
+            Err(PeerVerificationError::InvalidNode(_))
+        ));
     }
 }
