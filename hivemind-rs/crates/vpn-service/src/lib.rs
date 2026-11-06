@@ -526,8 +526,10 @@ mod tests {
         let other_worker = format!("vpn-worker-other-{unique}");
         let task_id = format!("vpn-task-{unique}");
         let token = token_for(&service.config.auth.jwt_secret, &assigned_worker);
-        let assigned_ip = format!("100.64.{}.{}", unique.as_bytes()[0], unique.as_bytes()[1]);
-        let other_ip = format!("100.64.{}.{}", unique.as_bytes()[2], unique.as_bytes()[3]);
+        // Fixed, distinct overlay addresses. The isolated schema makes them unique for
+        // this test; deriving them from UUID characters could collide and fail the insert.
+        let assigned_ip = "100.64.10.1".to_owned();
+        let other_ip = "100.64.10.2".to_owned();
 
         sqlx::query(
             "INSERT INTO users (username, password_hash, balance) VALUES ($1, 'hash', 100)",
