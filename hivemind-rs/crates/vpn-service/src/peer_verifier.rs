@@ -9,14 +9,22 @@ use chrono::{DateTime, Utc};
 use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION};
 use reqwest::{Client, StatusCode, Url};
 use serde_json::Value;
+use std::collections::HashMap;
 use std::fmt;
 use std::net::{IpAddr, Ipv4Addr};
-use std::time::Duration;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 const MAX_NODE_RESPONSE_BYTES: usize = 64 * 1024;
 /// The list covers the whole shared namespace, so it needs a larger bound than a
 /// single node. A reply above this bound fails closed instead of being truncated.
 const MAX_NODE_LIST_RESPONSE_BYTES: usize = 1024 * 1024;
+/// Bounds both hint maps. Eviction only forgets a hint, which can slow a lookup
+/// but can never make a wrong node acceptable.
+const MAX_NODE_HINTS: usize = 4096;
+/// Reuses a "not joined" answer briefly, so repeated queries from one owner do
+/// not each list the shared namespace.
+const NEGATIVE_HINT_TTL: Duration = Duration::from_secs(10);
 const MAX_API_KEY_BYTES: usize = 1024;
 
 #[derive(Debug)]
@@ -94,6 +102,50 @@ impl VerifiedOverlayNode {
     }
 }
 
+/// Hints only save work. A node hint is re-checked with one node lookup before use,
+/// so a stale or reassigned hint cannot authorize a different node.
+#[derive(Default)]
+struct NodeHints {
+    nodes: HashMap<u64, u64>,
+    missing: HashMap<u64, Instant>,
+}
+
+impl NodeHints {
+    fn node(&self, key_id: u64) -> Option<u64> {
+        self.nodes.get(&key_id).copied()
+    }
+
+    fn missing_recently(&self, key_id: u64, now: Instant) -> bool {
+        self.missing
+            .get(&key_id)
+            .is_some_and(|seen| now.saturating_duration_since(*seen) < NEGATIVE_HINT_TTL)
+    }
+
+    fn remember_node(&mut self, key_id: u64, node_id: u64) {
+        self.missing.remove(&key_id);
+        make_room(&mut self.nodes, key_id);
+        self.nodes.insert(key_id, node_id);
+    }
+
+    fn remember_missing(&mut self, key_id: u64, now: Instant) {
+        make_room(&mut self.missing, key_id);
+        self.missing.insert(key_id, now);
+    }
+
+    fn forget_node(&mut self, key_id: u64) {
+        self.nodes.remove(&key_id);
+    }
+}
+
+/// Evicts one arbitrary entry when a new key would exceed the bound.
+fn make_room<V>(map: &mut HashMap<u64, V>, key_id: u64) {
+    if !map.contains_key(&key_id) && map.len() >= MAX_NODE_HINTS {
+        if let Some(evicted) = map.keys().next().copied() {
+            map.remove(&evicted);
+        }
+    }
+}
+
 /// One reusable HTTP pool pinned to an operator-configured control-plane URL.
 /// Peer input cannot select the host, path, namespace or authorization header.
 #[derive(Clone)]
@@ -101,6 +153,7 @@ pub struct HeadscalePeerVerifier {
     base_url: Url,
     namespace: String,
     http: Client,
+    node_hints: Arc<Mutex<NodeHints>>,
 }
 
 impl HeadscalePeerVerifier {
@@ -154,6 +207,7 @@ impl HeadscalePeerVerifier {
             base_url,
             namespace: namespace.into(),
             http,
+            node_hints: Arc::new(Mutex::new(NodeHints::default())),
         })
     }
 
@@ -185,21 +239,66 @@ impl HeadscalePeerVerifier {
         )
     }
 
-    /// Finds the one node that joined with `expected_key_id`. Headscale lists the
-    /// whole shared namespace, so the reply is bounded, and a second match fails
-    /// closed. The key ID must come from Nodepool's enrollment record.
+    /// Finds the one node that joined with `expected_key_id`. A remembered node is
+    /// re-checked with one lookup. The shared namespace is listed only when there is
+    /// no usable hint, and that listing is bounded. A second match fails closed. The
+    /// key ID must come from Nodepool's enrollment record.
     pub async fn resolve_node_by_key(&self, expected_key_id: u64) -> Result<VerifiedOverlayNode> {
         if expected_key_id == 0 {
             return Err(PeerVerificationError::InvalidNode(
                 "missing enrollment identity",
             ));
         }
+        // The hint is copied out first, so the lock is never held across the lookup.
+        let hinted = self.hints().node(expected_key_id);
+        if let Some(hinted) = hinted {
+            match self.verify_node(hinted, expected_key_id).await {
+                Ok(node) => return Ok(node),
+                // A reassigned or removed node only means the hint is stale.
+                Err(PeerVerificationError::InvalidNode(_)) => {
+                    self.hints().forget_node(expected_key_id);
+                }
+                Err(PeerVerificationError::Status(status)) if status == StatusCode::NOT_FOUND => {
+                    self.hints().forget_node(expected_key_id);
+                }
+                // Transport and server failures are reported, never answered by a listing.
+                Err(error) => return Err(error),
+            }
+        }
+        if self
+            .hints()
+            .missing_recently(expected_key_id, Instant::now())
+        {
+            return Err(PeerVerificationError::NodeNotFound);
+        }
+        match self.list_node_by_key(expected_key_id).await {
+            Ok(node) => {
+                self.hints().remember_node(expected_key_id, node.node_id());
+                Ok(node)
+            }
+            Err(PeerVerificationError::NodeNotFound) => {
+                self.hints()
+                    .remember_missing(expected_key_id, Instant::now());
+                Err(PeerVerificationError::NodeNotFound)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    async fn list_node_by_key(&self, expected_key_id: u64) -> Result<VerifiedOverlayNode> {
         let url = self
             .base_url
             .join("node")
             .map_err(|_| PeerVerificationError::Configuration("invalid node list URL"))?;
         let response = self.get_json(url, MAX_NODE_LIST_RESPONSE_BYTES).await?;
         select_node_by_key(&response, expected_key_id, &self.namespace, Utc::now())
+    }
+
+    /// Poisoning cannot make a hint trusted, so a poisoned lock is still usable.
+    fn hints(&self) -> std::sync::MutexGuard<'_, NodeHints> {
+        self.node_hints
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     async fn get_json(&self, url: Url, limit: usize) -> Result<Value> {
@@ -709,5 +808,139 @@ mod tests {
             verifier.resolve_node_by_key(0).await,
             Err(PeerVerificationError::InvalidNode(_))
         ));
+    }
+
+    /// Answers one canned response per connection and records each request line.
+    async fn serve_sequence(
+        responses: Vec<Vec<u8>>,
+    ) -> (String, tokio::task::JoinHandle<Vec<String>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let task = tokio::spawn(async move {
+            let mut lines = Vec::new();
+            for response in responses {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut request = Vec::new();
+                let mut buffer = [0; 1024];
+                while !request.windows(4).any(|part| part == b"\r\n\r\n") {
+                    let len = stream.read(&mut buffer).await.unwrap();
+                    assert!(len > 0 && request.len() < 16 * 1024);
+                    request.extend_from_slice(&buffer[..len]);
+                }
+                let request = String::from_utf8(request).unwrap().to_ascii_lowercase();
+                lines.push(request.lines().next().unwrap().to_owned());
+                let _ = stream.write_all(&response).await;
+            }
+            lines
+        });
+        (url, task)
+    }
+
+    fn listed_node(id: &str, key: &str) -> Value {
+        json!({"id": id, "user": {"name": "nodepool"}, "online": true,
+            "ipAddresses": [format!("100.64.1.{id}")], "expiry": null,
+            "preAuthKey": {"id": key, "key": "masked-controller-key", "reusable": false}})
+    }
+
+    #[tokio::test]
+    async fn resolution_reuses_a_verified_hint_and_relists_only_when_it_goes_stale() {
+        let enrolled = listed_node("7", "11");
+        let reassigned = listed_node("7", "12");
+        let (url, server) = serve_sequence(vec![
+            response(&serde_json::to_vec(&listed(vec![enrolled.clone()])).unwrap()),
+            response(&serde_json::to_vec(&json!({"node": enrolled})).unwrap()),
+            response(&serde_json::to_vec(&json!({"node": reassigned})).unwrap()),
+            response(&serde_json::to_vec(&listed(vec![listed_node("9", "11")])).unwrap()),
+        ])
+        .await;
+        let verifier = HeadscalePeerVerifier::new(&url, "api-test-key", "nodepool").unwrap();
+        assert_eq!(verifier.resolve_node_by_key(11).await.unwrap().node_id(), 7);
+        assert_eq!(verifier.resolve_node_by_key(11).await.unwrap().node_id(), 7);
+        assert_eq!(verifier.resolve_node_by_key(11).await.unwrap().node_id(), 9);
+        assert_eq!(
+            server.await.unwrap(),
+            [
+                "get /api/v1/node http/1.1",
+                "get /api/v1/node/7 http/1.1",
+                "get /api/v1/node/7 http/1.1",
+                "get /api/v1/node http/1.1",
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_hint_that_disappears_is_forgotten_and_a_missing_node_is_reported() {
+        let (url, server) = serve_sequence(vec![
+            response(&serde_json::to_vec(&listed(vec![listed_node("7", "11")])).unwrap()),
+            b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_vec(),
+            response(&serde_json::to_vec(&listed(vec![])).unwrap()),
+        ])
+        .await;
+        let verifier = HeadscalePeerVerifier::new(&url, "api-test-key", "nodepool").unwrap();
+        assert_eq!(verifier.resolve_node_by_key(11).await.unwrap().node_id(), 7);
+        assert!(matches!(
+            verifier.resolve_node_by_key(11).await,
+            Err(PeerVerificationError::NodeNotFound)
+        ));
+        assert_eq!(
+            server.await.unwrap(),
+            [
+                "get /api/v1/node http/1.1",
+                "get /api/v1/node/7 http/1.1",
+                "get /api/v1/node http/1.1",
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failed_hint_check_is_reported_without_a_listing_fallback() {
+        let (url, server) = serve_sequence(vec![
+            response(&serde_json::to_vec(&listed(vec![listed_node("7", "11")])).unwrap()),
+            b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                .to_vec(),
+        ])
+        .await;
+        let verifier = HeadscalePeerVerifier::new(&url, "api-test-key", "nodepool").unwrap();
+        assert_eq!(verifier.resolve_node_by_key(11).await.unwrap().node_id(), 7);
+        assert!(matches!(
+            verifier.resolve_node_by_key(11).await,
+            Err(PeerVerificationError::Status(status)) if status == StatusCode::INTERNAL_SERVER_ERROR
+        ));
+        assert_eq!(server.await.unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn unjoined_keys_are_not_relisted_within_the_negative_ttl() {
+        let (url, server) = serve_sequence(vec![response(
+            &serde_json::to_vec(&listed(vec![])).unwrap(),
+        )])
+        .await;
+        let verifier = HeadscalePeerVerifier::new(&url, "api-test-key", "nodepool").unwrap();
+        assert!(matches!(
+            verifier.resolve_node_by_key(11).await,
+            Err(PeerVerificationError::NodeNotFound)
+        ));
+        assert!(matches!(
+            verifier.resolve_node_by_key(11).await,
+            Err(PeerVerificationError::NodeNotFound)
+        ));
+        assert_eq!(server.await.unwrap(), ["get /api/v1/node http/1.1"]);
+    }
+
+    #[test]
+    fn node_hints_stay_bounded_expire_and_forget_only_the_named_key() {
+        let mut hints = NodeHints::default();
+        for key in 1..=(MAX_NODE_HINTS as u64 + 16) {
+            hints.remember_node(key, key + 1_000);
+        }
+        assert_eq!(hints.nodes.len(), MAX_NODE_HINTS);
+        let before = hints.nodes.len();
+        hints.forget_node(u64::MAX);
+        assert_eq!(hints.nodes.len(), before);
+
+        let now = Instant::now();
+        hints.remember_missing(7, now);
+        assert!(hints.missing_recently(7, now + Duration::from_secs(5)));
+        assert!(!hints.missing_recently(7, now + NEGATIVE_HINT_TTL));
     }
 }

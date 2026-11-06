@@ -869,3 +869,32 @@ async fn enrollment_reports_an_unjoined_key_and_hides_other_accounts() {
     assert_eq!(controller.finish().await.len(), 4);
     fixture.cleanup().await.unwrap();
 }
+
+#[tokio::test]
+async fn enrollment_reuses_the_verified_node_hint_for_later_resolutions() {
+    let mut steps = issuance_steps(11);
+    steps.push(Step::json(listed(vec![
+        other_enrollment_node(12),
+        node(11)["node"].clone(),
+    ])));
+    steps.push(Step::json(node(11)));
+    let controller = Controller::start(steps).await;
+    let (service, fixture, _owner_id, owner_token) =
+        fixture("vpn_enrollment_hint_cache", &controller).await;
+    let config = service
+        .issue_user_vpn_config_from_token(&owner_token, "Desktop")
+        .await
+        .unwrap();
+    for _ in 0..2 {
+        let peer = service
+            .resolve_user_vpn_node(&owner_token, &config.client_id)
+            .await
+            .unwrap();
+        assert_eq!(peer.node().node_id(), 7);
+    }
+    let requests = controller.finish().await;
+    assert_eq!(requests.len(), 5);
+    assert!(requests[3].starts_with("GET /api/v1/node "));
+    assert!(requests[4].starts_with("GET /api/v1/node/7 "));
+    fixture.cleanup().await.unwrap();
+}
