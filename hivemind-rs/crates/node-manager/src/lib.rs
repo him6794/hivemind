@@ -1,3 +1,4 @@
+pub mod account;
 pub mod grpc;
 pub mod hcode_probes;
 pub mod hcode_reads;

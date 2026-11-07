@@ -298,7 +298,8 @@ impl GrpcWorkerSessionService {
         let claims = self
             .state
             .auth
-            .validate_token(&hello.token)
+            .validate_session(&hello.token)
+            .await
             .map_err(|_| Status::unauthenticated("Invalid Worker session token"))?;
         if claims.sub != hello.owner {
             return Err(Status::permission_denied(

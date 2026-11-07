@@ -22,6 +22,7 @@ message LoginResponse {
 message RegisterUserRequest {
     string username = 1;
     string password = 2;
+    string email = 3;
 }
 
 message RegisterUserResponse {
@@ -55,6 +56,87 @@ message TransferCptResponse {
     string transfer_id = 5;
 }
 
+message VerifyEmailRequest {
+    string verification_token = 1;
+}
+
+message VerifyEmailResponse {
+    bool success = 1;
+    string status_message = 2;
+    // "granted", "pool_empty" (the system pool is below the grant), or "already_granted".
+    string welcome_grant_status = 3;
+}
+
+message ResendVerificationRequest {
+    string token = 1;
+}
+
+message ResendVerificationResponse {
+    bool success = 1;
+    string status_message = 2;
+}
+
+// Adds an address only when the account has none or its unverified reservation expired.
+message BindEmailRequest {
+    string token = 1;
+    string current_password = 2;
+    string email = 3;
+}
+
+message BindEmailResponse {
+    bool success = 1;
+    string status_message = 2;
+}
+
+message GetAccountRequest {
+    string token = 1;
+}
+
+message GetAccountResponse {
+    bool success = 1;
+    string status_message = 2;
+    string username = 3;
+    string email = 4;
+    bool email_verified = 5;
+    int64 balance = 6;
+    string welcome_grant_status = 7;
+}
+
+message ChangePasswordRequest {
+    string token = 1;
+    string current_password = 2;
+    string new_password = 3;
+}
+
+message ChangePasswordResponse {
+    bool success = 1;
+    string status_message = 2;
+}
+
+message RequestPasswordResetRequest {
+    string email = 1;
+}
+
+message ResetPasswordRequest {
+    string reset_token = 1;
+    string new_password = 2;
+}
+
+message ResetPasswordResponse {
+    bool success = 1;
+    string status_message = 2;
+}
+
+message RequestUsernameReminderRequest {
+    string email = 1;
+}
+
+// Accepted means the request was processed. The response never reveals whether an account exists.
+message AccountRequestResponse {
+    bool success = 1;
+    string status_message = 2;
+}
+
 message RefreshTokenRequest {
     string old_token = 1;
 }
@@ -62,6 +144,24 @@ message RefreshTokenResponse {
     bool success = 1;
     string status_message = 2;
     string new_token = 3;
+}
+// Ends the sign-in session the token belongs to. The token stops working at once.
+message LogoutRequest {
+    string token = 1;
+}
+message LogoutResponse {
+    bool success = 1;
+    string status_message = 2;
+}
+// Whether the address has verified ownership or an unexpired unverified reservation.
+message CheckEmailRequest {
+    string email = 1;
+}
+message CheckEmailResponse {
+    bool success = 1;
+    string status_message = 2;
+    bool available = 3;
+    bool verified = 4;
 }
 
 // Short-lived, single-use enrollment handoff issued by Nodepool after an
@@ -1301,7 +1401,17 @@ service UserService {
     rpc Login(LoginRequest) returns (LoginResponse);
     rpc GetBalance(GetBalanceRequest) returns (GetBalanceResponse);
     rpc TransferCpt(TransferCptRequest) returns (TransferCptResponse);
+    rpc VerifyEmail(VerifyEmailRequest) returns (VerifyEmailResponse);
+    rpc ResendVerification(ResendVerificationRequest) returns (ResendVerificationResponse);
+    rpc BindEmail(BindEmailRequest) returns (BindEmailResponse);
+    rpc GetAccount(GetAccountRequest) returns (GetAccountResponse);
+    rpc ChangePassword(ChangePasswordRequest) returns (ChangePasswordResponse);
+    rpc RequestPasswordReset(RequestPasswordResetRequest) returns (AccountRequestResponse);
+    rpc ResetPassword(ResetPasswordRequest) returns (ResetPasswordResponse);
+    rpc RequestUsernameReminder(RequestUsernameReminderRequest) returns (AccountRequestResponse);
     rpc RefreshToken(RefreshTokenRequest) returns (RefreshTokenResponse);
+    rpc Logout(LogoutRequest) returns (LogoutResponse);
+    rpc CheckEmail(CheckEmailRequest) returns (CheckEmailResponse);
     rpc IssueEnrollmentCredential(IssueEnrollmentCredentialRequest) returns (IssueEnrollmentCredentialResponse);
     rpc RedeemEnrollmentCredential(RedeemEnrollmentCredentialRequest) returns (RedeemEnrollmentCredentialResponse);
 }

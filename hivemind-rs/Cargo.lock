@@ -2220,8 +2220,10 @@ name = "hivemind-node-manager"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "bcrypt",
  "chrono",
  "general-compute-runtime",
+ "hex",
  "hivemind-artifact-peer",
  "hivemind-auth",
  "hivemind-client-core",
@@ -2233,6 +2235,8 @@ dependencies = [
  "hivemind-task-scheduler",
  "hivemind-vpn-service",
  "prost",
+ "rand 0.8.7",
+ "reqwest 0.12.28",
  "serde_json",
  "sha2 0.10.9",
  "sqlx",

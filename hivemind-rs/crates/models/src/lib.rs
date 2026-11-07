@@ -1,5 +1,8 @@
 pub mod observations;
 
+/// Username of the system account that holds the CPT pool. It never signs in.
+pub const SYSTEM_ACCOUNT_USERNAME: &str = "system";
+
 use chrono::{DateTime, Utc};
 use general_compute_runtime::{
     MANAGED_DSL_V1_RUNTIME_VERSION, MANAGED_DSL_V1_SEMANTICS_MANIFEST_SHA256,

@@ -51,11 +51,13 @@ impl GrpcClient {
         &mut self,
         username: &str,
         password: &str,
+        email: &str,
     ) -> Result<RegisterUserResponse, tonic::Status> {
         self.user
             .register_user(Request::new(RegisterUserRequest {
                 username: username.to_string(),
                 password: password.to_string(),
+                email: email.to_string(),
             }))
             .await
             .map(|r| r.into_inner())

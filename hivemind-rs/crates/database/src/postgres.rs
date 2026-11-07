@@ -210,6 +210,18 @@ async fn run_migrations_inner(pool: &PgPool) -> Result<()> {
         .await?;
 
     sqlx::query(
+        "CREATE TABLE IF NOT EXISTS account_sessions (
+            id TEXT PRIMARY KEY,
+            username VARCHAR(255) NOT NULL,
+            expires_at TIMESTAMPTZ NOT NULL,
+            revoked_at TIMESTAMPTZ,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )",
+    )
+    .execute(&mut *tx)
+    .await?;
+
+    sqlx::query(
         "CREATE TABLE IF NOT EXISTS users (
             id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
             username VARCHAR(255) NOT NULL UNIQUE,
@@ -1929,6 +1941,99 @@ async fn run_migrations_inner(pool: &PgPool) -> Result<()> {
     .execute(&mut *tx)
     .await?;
 
+    // Website accounts: email verification, the welcome grant state, and single-use tokens for
+    // email verification and password reset.
+    sqlx::query("ALTER TABLE users ADD COLUMN IF NOT EXISTS email VARCHAR(320);")
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("ALTER TABLE users ADD COLUMN IF NOT EXISTS email_verified_at TIMESTAMPTZ;")
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query(
+        "ALTER TABLE users ADD COLUMN IF NOT EXISTS welcome_grant_status VARCHAR(32) NOT NULL DEFAULT 'none';",
+    )
+    .execute(&mut *tx)
+    .await?;
+    // Set when the password changes. A token issued before this moment is refused (see auth::validate_session).
+    sqlx::query("ALTER TABLE users ADD COLUMN IF NOT EXISTS password_changed_at TIMESTAMPTZ;")
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query(
+        "CREATE UNIQUE INDEX IF NOT EXISTS users_verified_email_key
+         ON users (LOWER(email)) WHERE email_verified_at IS NOT NULL;",
+    )
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS account_tokens (
+            id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            purpose VARCHAR(32) NOT NULL,
+            token_hash VARCHAR(64) NOT NULL UNIQUE,
+            expires_at TIMESTAMPTZ NOT NULL,
+            used_at TIMESTAMPTZ,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );",
+    )
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS account_tokens_user_purpose_idx
+         ON account_tokens (user_id, purpose);",
+    )
+    .execute(&mut *tx)
+    .await?;
+
+    sqlx::query("ALTER TABLE users ADD COLUMN IF NOT EXISTS email_claim_expires_at TIMESTAMPTZ;")
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query(
+        "ALTER TABLE users ADD COLUMN IF NOT EXISTS username_reminder_requested_at TIMESTAMPTZ;",
+    )
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query("ALTER TABLE account_tokens ADD COLUMN IF NOT EXISTS email_address VARCHAR(320);")
+        .execute(&mut *tx)
+        .await?;
+    // Existing reservations retain their original deadline; restarting never extends it.
+    sqlx::query(
+        "UPDATE users SET email_claim_expires_at = created_at + INTERVAL '24 hours'
+         WHERE email IS NOT NULL AND email_verified_at IS NULL AND email_claim_expires_at IS NULL",
+    )
+    .execute(&mut *tx)
+    .await?;
+    // Preserve verified ownership, otherwise keep the oldest reservation. Only the
+    // duplicate email association is removed; accounts, balances and assets survive.
+    sqlx::query(
+        "WITH ranked AS (
+            SELECT id, ROW_NUMBER() OVER (PARTITION BY LOWER(email)
+                ORDER BY (email_verified_at IS NOT NULL) DESC, created_at, id) AS position
+            FROM users WHERE email IS NOT NULL
+         ), detached AS (
+            UPDATE users SET email = NULL, email_claim_expires_at = NULL
+            WHERE id IN (SELECT id FROM ranked WHERE position > 1)
+              AND email_verified_at IS NULL RETURNING id
+         ) UPDATE account_tokens SET used_at = NOW()
+           WHERE user_id IN (SELECT id FROM detached) AND purpose = 'email_verification' AND used_at IS NULL",
+    ).execute(&mut *tx).await?;
+    sqlx::query(
+        "CREATE UNIQUE INDEX IF NOT EXISTS users_email_key ON users (LOWER(email)) WHERE email IS NOT NULL",
+    ).execute(&mut *tx).await?;
+    sqlx::query(
+        "UPDATE account_tokens t SET email_address = u.email FROM users u
+         WHERE t.user_id = u.id AND t.purpose = 'email_verification' AND t.email_address IS NULL AND t.used_at IS NULL",
+    ).execute(&mut *tx).await?;
+
+    // The system account holds the CPT pool. '!no-login' is not a valid bcrypt hash, so it can
+    // never authenticate. ON CONFLICT keeps an existing balance across restarts.
+    sqlx::query(
+        "INSERT INTO users (username, password_hash, balance, is_active)
+         VALUES ('system', '!no-login', 1000000000, true)
+         ON CONFLICT (username) DO NOTHING;",
+    )
+    .execute(&mut *tx)
+    .await?;
+
     tracing::info!("Database migrations completed successfully");
     tx.commit().await?;
     Ok(())
@@ -1997,6 +2102,77 @@ mod tests {
         create_isolated_test_pool(test_name)
             .await
             .expect("a dedicated test database must be available")
+    }
+
+    #[tokio::test]
+    async fn email_claim_migration_preserves_accounts_and_retires_duplicate_proofs() {
+        let fixture = isolated_fixture("email_claim_migration").await;
+        let pool = &fixture.pool;
+        run_migrations(pool).await.unwrap();
+        sqlx::query("DROP INDEX users_email_key")
+            .execute(pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO users (username, password_hash, balance, email, email_verified_at, created_at) VALUES
+                ('verified-owner', 'hash', 100, 'shared@example.test', NOW(), NOW()),
+                ('duplicate-owner', 'hash', 250, 'SHARED@example.test', NULL, NOW() - INTERVAL '2 days'),
+                ('oldest-owner', 'hash', 300, 'waiting@example.test', NULL, NOW() - INTERVAL '2 hours'),
+                ('newer-owner', 'hash', 400, 'WAITING@example.test', NULL, NOW())",
+        ).execute(pool).await.unwrap();
+        sqlx::query(
+            "INSERT INTO account_tokens (user_id, purpose, token_hash, expires_at)
+             SELECT id, 'email_verification', repeat('a', 64), NOW() + INTERVAL '1 day'
+             FROM users WHERE username = 'duplicate-owner'",
+        )
+        .execute(pool)
+        .await
+        .unwrap();
+        run_migrations(pool).await.unwrap();
+        let rows: Vec<(String, Option<String>, i64)> = sqlx::query_as(
+            "SELECT username, email, balance FROM users WHERE username <> 'system' ORDER BY username",
+        ).fetch_all(pool).await.unwrap();
+        assert_eq!(
+            rows,
+            vec![
+                ("duplicate-owner".into(), None, 250),
+                ("newer-owner".into(), None, 400),
+                (
+                    "oldest-owner".into(),
+                    Some("waiting@example.test".into()),
+                    300
+                ),
+                (
+                    "verified-owner".into(),
+                    Some("shared@example.test".into()),
+                    100
+                ),
+            ]
+        );
+        let retired: bool = sqlx::query_scalar(
+            "SELECT used_at IS NOT NULL FROM account_tokens WHERE token_hash = repeat('a', 64)",
+        )
+        .fetch_one(pool)
+        .await
+        .unwrap();
+        assert!(retired);
+        let expiry: String = sqlx::query_scalar(
+            "SELECT email_claim_expires_at::text FROM users WHERE username = 'oldest-owner'",
+        )
+        .fetch_one(pool)
+        .await
+        .unwrap();
+        run_migrations(pool).await.unwrap();
+        let repeated: String = sqlx::query_scalar(
+            "SELECT email_claim_expires_at::text FROM users WHERE username = 'oldest-owner'",
+        )
+        .fetch_one(pool)
+        .await
+        .unwrap();
+        assert_eq!(expiry, repeated);
+        assert!(sqlx::query("INSERT INTO users (username, password_hash, email) VALUES ('collision', 'hash', 'SHARED@example.test')")
+            .execute(pool).await.is_err());
+        fixture.cleanup().await.unwrap();
     }
 
     async fn create_migration_probe_schema(pool: &PgPool) {

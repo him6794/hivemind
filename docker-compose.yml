@@ -53,6 +53,13 @@ services:
       JWT_SECRET: ${JWT_SECRET:?JWT_SECRET must be set to a non-default value}
       WORKER_EXECUTION_PRIVATE_KEY_PEM: ${WORKER_EXECUTION_PRIVATE_KEY_PEM:?WORKER_EXECUTION_PRIVATE_KEY_PEM must be set for nodepool execution-token signing}
       NODEPOOL_GRPC_ADDR: 0.0.0.0:50051
+      # Account mail. The default keeps mail in local files. Set MAIL_TRANSPORT=resend with
+      # RESEND_API_KEY and MAIL_FROM (in the shell or .env) to send through Resend.
+      MAIL_TRANSPORT: ${MAIL_TRANSPORT:-file}
+      MAIL_OUTBOX_DIR: ${MAIL_OUTBOX_DIR:-dev-mail}
+      MAIL_FROM: "${MAIL_FROM:-}"
+      RESEND_API_KEY: ${RESEND_API_KEY:-}
+      PUBLIC_SITE_URL: ${PUBLIC_SITE_URL:-http://localhost:3000}
       TORRENT_API_DIR: /app/api/torrents
       TORRENT_BT_DIR: /app/bt_torrents
       TORRENT_ANNOUNCE_URL: ${HIVEMIND_TORRENT_ANNOUNCE_URL:-http://nodepool:6969/announce}

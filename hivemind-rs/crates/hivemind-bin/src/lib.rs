@@ -234,10 +234,24 @@ fn validate_service_config(config: &HivemindConfig, role: ServiceRole) -> Result
     }
     if role.includes_nodepool() {
         config.auth.validate_worker_execution_private_key()?;
+        validate_account_mail()?;
     }
     if role.includes_worker() {
         config.auth.validate_worker_execution_public_key()?;
     }
+    Ok(())
+}
+
+/// Refuses to start Nodepool with incomplete account mail settings. A missing Resend key then
+/// shows up at startup, not as mail that is silently never delivered.
+#[cfg(feature = "nodepool")]
+fn validate_account_mail() -> Result<()> {
+    hivemind_node_manager::account::AccountSettings::load_from_env()?;
+    Ok(())
+}
+
+#[cfg(not(feature = "nodepool"))]
+fn validate_account_mail() -> Result<()> {
     Ok(())
 }
 
@@ -1346,6 +1360,7 @@ mod tests {
                 .register_user(RegisterUserRequest {
                     username: username.clone(),
                     password: password.into(),
+                    email: format!("{username}@example.com"),
                 })
                 .await
                 .unwrap()

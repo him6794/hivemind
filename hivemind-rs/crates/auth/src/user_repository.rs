@@ -1,6 +1,6 @@
 use anyhow::Result;
 use hivemind_models::User;
-use sqlx::PgPool;
+use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
 pub struct UserRepository {
@@ -18,6 +18,22 @@ impl UserRepository {
         )
         .bind(username)
         .fetch_optional(&self.pool)
+        .await?;
+        Ok(user)
+    }
+
+    // Reads an active account and holds a shared row lock on it until the transaction ends. A password change
+    // takes the row lock exclusively, so the two cannot interleave between the password check and the session.
+    pub async fn find_active_for_sign_in(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        username: &str,
+    ) -> Result<Option<User>> {
+        let user = sqlx::query_as::<_, User>(
+            "SELECT * FROM users WHERE username = $1 AND is_active = true FOR SHARE",
+        )
+        .bind(username)
+        .fetch_optional(&mut **tx)
         .await?;
         Ok(user)
     }

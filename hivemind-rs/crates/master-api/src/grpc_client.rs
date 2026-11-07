@@ -183,13 +183,19 @@ impl GrpcClient {
         &mut self,
         username: &str,
         password: &str,
+        email: &str,
     ) -> Result<RegisterUserResponse, tonic::Status> {
         let username = username.to_string();
         let password = password.to_string();
+        let email = email.to_string();
         self.with_clients(|mut clients| async move {
             clients
                 .user
-                .register_user(Request::new(RegisterUserRequest { username, password }))
+                .register_user(Request::new(RegisterUserRequest {
+                    username,
+                    password,
+                    email,
+                }))
                 .await
                 .map(|r| r.into_inner())
         })

@@ -7,7 +7,7 @@ use crate::peer_verifier::VerifiedOverlayNode;
 use crate::VpnService;
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
-use hivemind_auth::jwt_service::JwtService;
+use hivemind_auth::AuthManager;
 use uuid::Uuid;
 
 #[derive(Debug)]
@@ -62,9 +62,9 @@ impl From<sqlx::Error> for VpnEnrollmentError {
     }
 }
 
-/// An active account observed through the Nodepool-issued account token.
-/// This is not a revocable account session or a reusable data-plane grant.
-/// Callers must recheck account state and expiry in their own transaction.
+/// An active account observed through a validated Nodepool sign-in session.
+/// This snapshot is not a reusable data-plane grant. Callers must still recheck
+/// account state and expiry in their own transaction.
 pub struct AuthenticatedOwner {
     pub(super) id: Uuid,
     pub(super) username: String,
@@ -135,11 +135,13 @@ struct EnrollmentSnapshot {
 
 impl VpnService {
     pub async fn authenticate_vpn_owner(&self, token: &str) -> Result<AuthenticatedOwner> {
-        let claims = JwtService::new(
+        let claims = AuthManager::new(
+            &self.db,
             &self.config.auth.jwt_secret,
             self.config.auth.token_expiry_hours,
         )
-        .validate(token)?;
+        .validate_session(token)
+        .await?;
         if !matches!(claims.role.as_deref(), None | Some("user") | Some("admin"))
             || claims.task_id.is_some()
             || claims.worker_id.is_some()

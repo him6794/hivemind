@@ -30,6 +30,8 @@ pub struct LoginResponse {
 pub struct RegisterBody {
     pub username: String,
     pub password: String,
+    #[serde(default)]
+    pub email: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -196,7 +198,10 @@ pub async fn register(
     }
 
     let mut grpc = state.grpc_client.clone();
-    match grpc.register_user(username, &body.password).await {
+    match grpc
+        .register_user(username, &body.password, &body.email)
+        .await
+    {
         Ok(resp) if resp.success => (
             StatusCode::CREATED,
             Json(RegisterResponse {

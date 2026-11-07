@@ -1,5 +1,6 @@
 #![allow(clippy::result_large_err)]
 
+use crate::account;
 use hivemind_config::{HivemindConfig, ManagedConsensusRolloutMode};
 use hivemind_proto::{
     batch_runtime_service_server::BatchRuntimeService,
@@ -7,9 +8,14 @@ use hivemind_proto::{
     master_node_service_server::MasterNodeService,
     node_manager_service_server::NodeManagerService,
     user_service_server::UserService,
+    AccountRequestResponse,
     AdminAuditLogEntry,
     AdminWorkerTrustEntry,
     CacheAnomalyEntry,
+    ChangePasswordRequest,
+    ChangePasswordResponse,
+    CheckEmailRequest,
+    CheckEmailResponse,
     CleanupAdminArtifactsRequest,
     CleanupAdminArtifactsResponse,
     CompleteBatchRequest,
@@ -20,6 +26,8 @@ use hivemind_proto::{
     ExecutionPackage,
     GeneralComputeArtifactChunkUpload,
     GeneralComputeArtifactChunkUploadResponse,
+    GetAccountRequest,
+    GetAccountResponse,
     GetAdminArtifactOverviewRequest,
     GetAdminArtifactOverviewResponse,
     // Admin RPC types
@@ -58,6 +66,8 @@ use hivemind_proto::{
     ListWorkersResponse,
     LoginRequest,
     LoginResponse,
+    LogoutRequest,
+    LogoutResponse,
     ManagedConsensusSummary,
     PricingBreakdown,
     ProviderEarningsEntry,
@@ -75,6 +85,12 @@ use hivemind_proto::{
     RegisterUserResponse,
     RegisterWorkerNodeRequest,
     RemoveWorkerRequest,
+    RequestPasswordResetRequest,
+    RequestUsernameReminderRequest,
+    ResendVerificationRequest,
+    ResendVerificationResponse,
+    ResetPasswordRequest,
+    ResetPasswordResponse,
     ResourceObservation as ProtoResourceObservation,
     ResourceSpec as ProtoResourceSpec,
     RunningStatusRequest,
@@ -103,6 +119,8 @@ use hivemind_proto::{
     UploadTaskResponse,
     ValidateGeneralComputeTransferLeaseRequest,
     ValidateGeneralComputeTransferLeaseResponse,
+    VerifyEmailRequest,
+    VerifyEmailResponse,
     WorkerCacheAffinityMetric,
     WorkerCapabilityReport,
     WorkerInfo,
@@ -123,7 +141,6 @@ use crate::service::{
 use crate::NodeManager;
 use hivemind_auth::{enrollment, AuthManager};
 use hivemind_client_core::SharedSessionRegistry;
-use hivemind_database::postgres;
 use hivemind_models::{
     Claims, Task, TaskStatus, WorkerCapabilityReport as ModelWorkerCapabilityReport, WorkerNode,
     WORKER_CAPABILITY_REPORT_MAX_BYTES,
@@ -294,11 +311,38 @@ pub fn artifact_root_for_config(config: &HivemindConfig) -> PathBuf {
 // UserService
 pub struct GrpcUserService {
     state: Arc<NodepoolState>,
+    account: account::AccountSettings,
 }
 impl GrpcUserService {
     pub fn new(state: Arc<NodepoolState>) -> Self {
-        Self { state }
+        Self {
+            state,
+            account: account::AccountSettings::from_env(),
+        }
     }
+
+    /// Replaces the account settings. Tests use this to write mail to a temporary directory.
+    pub fn with_account_settings(mut self, account: account::AccountSettings) -> Self {
+        self.account = account;
+        self
+    }
+}
+
+const INVALID_VERIFICATION_LINK: &str = "This verification link is invalid or has expired.";
+
+fn internal_status(error: impl std::fmt::Display) -> Status {
+    Status::internal(error.to_string())
+}
+
+/// Every account-recovery reply has this shape. It never says whether an account exists.
+fn account_request_response(
+    success: bool,
+    message: &str,
+) -> Result<Response<AccountRequestResponse>, Status> {
+    Ok(Response::new(AccountRequestResponse {
+        success,
+        status_message: message.into(),
+    }))
 }
 
 #[tonic::async_trait]
@@ -310,46 +354,78 @@ impl UserService for GrpcUserService {
         let req = request.into_inner();
         let username = req.username.trim();
         let password = req.password;
+        let rejected = |message: &str| {
+            Ok::<_, Status>(Response::new(RegisterUserResponse {
+                success: false,
+                status_message: message.into(),
+            }))
+        };
         if username.len() < 3 {
-            return Ok(Response::new(RegisterUserResponse {
-                success: false,
-                status_message: "Username must be at least 3 characters".into(),
-            }));
+            return rejected("Username must be at least 3 characters");
         }
-        if is_admin(username) {
-            return Ok(Response::new(RegisterUserResponse {
-                success: false,
-                status_message: "Username is unavailable".into(),
-            }));
+        if is_admin(username)
+            || username.eq_ignore_ascii_case(hivemind_models::SYSTEM_ACCOUNT_USERNAME)
+        {
+            return rejected("Username is unavailable");
         }
-        if password.len() < 8 {
-            return Ok(Response::new(RegisterUserResponse {
-                success: false,
-                status_message: "Password must be at least 8 characters".into(),
-            }));
+        let email = match account::normalize_email(&req.email) {
+            Ok(email) => email,
+            Err(message) => return rejected(message),
+        };
+        if let Err(message) = account::validate_password(&password) {
+            return rejected(message);
         }
 
-        match postgres::create_user(
-            &self.state.scheduler.database().pool,
-            username,
-            &password,
-            1000,
+        // The account starts with no CPT. The welcome grant is paid only after the email is verified.
+        let pool = &self.state.scheduler.database().pool;
+        // Fast feedback before hashing; create_unverified_user repeats the check under
+        // the email claim lock and releases only expired, unverified reservations.
+        if account::find_registered_by_email(pool, &email)
+            .await
+            .map_err(internal_status)?
+            .is_some()
+        {
+            return rejected("This email address is already in use.");
+        }
+        let password_hash = bcrypt::hash(&password, 12).map_err(internal_status)?;
+        let user_id =
+            match account::create_unverified_user(pool, username, &password_hash, &email).await {
+                Ok(user_id) => user_id,
+                Err(error) => {
+                    if let Some(claim_error) = error.downcast_ref::<account::EmailClaimError>() {
+                        return rejected(&claim_error.to_string());
+                    }
+                    let constraint = error
+                        .downcast_ref::<sqlx::Error>()
+                        .and_then(sqlx::Error::as_database_error)
+                        .and_then(|error| error.constraint());
+                    return match constraint {
+                        Some("users_username_key") => rejected("Username already exists"),
+                        Some("users_email_key" | "users_verified_email_key") => {
+                            rejected("This email address is already in use.")
+                        }
+                        _ => Err(internal_status(error)),
+                    };
+                }
+            };
+        let status_message = match account::send_verification_mail(
+            &self.account,
+            pool,
+            user_id,
+            &email,
         )
         .await
         {
-            Ok(()) => Ok(Response::new(RegisterUserResponse {
-                success: true,
-                status_message: "Account created".into(),
-            })),
-            Err(e) => Ok(Response::new(RegisterUserResponse {
-                success: false,
-                status_message: if e.to_string().contains("already exists") {
-                    "Username already exists".into()
-                } else {
-                    e.to_string()
-                },
-            })),
-        }
+            Ok(()) => "Account created. Check your email to verify it.".to_string(),
+            Err(error) => {
+                tracing::warn!(%error, "verification email could not be sent");
+                "Account created, but the verification email could not be sent. Sign in and use Resend verification.".to_string()
+            }
+        };
+        Ok(Response::new(RegisterUserResponse {
+            success: true,
+            status_message,
+        }))
     }
 
     async fn login(
@@ -388,7 +464,8 @@ impl UserService for GrpcUserService {
         let claims = self
             .state
             .auth
-            .validate_token(&req.token)
+            .validate_session(&req.token)
+            .await
             .map_err(|_| Status::unauthenticated("Invalid token"))?;
         let role = match enrollment::EnrollmentRole::parse(&req.role) {
             Ok(role) => role,
@@ -505,7 +582,8 @@ impl UserService for GrpcUserService {
         let claims = self
             .state
             .auth
-            .validate_token(&req.token)
+            .validate_session(&req.token)
+            .await
             .map_err(|_| Status::unauthenticated("Invalid token"))?;
         if !req.username.is_empty() && req.username != claims.sub {
             return Err(Status::permission_denied("Forbidden"));
@@ -535,7 +613,8 @@ impl UserService for GrpcUserService {
         let claims = self
             .state
             .auth
-            .validate_token(&req.token)
+            .validate_session(&req.token)
+            .await
             .map_err(|_| Status::unauthenticated("Invalid token"))?;
         let from_user = claims.sub.trim().to_string();
         let to_user = req.to_username.trim().to_string();
@@ -561,6 +640,34 @@ impl UserService for GrpcUserService {
             return Ok(Response::new(TransferCptResponse {
                 success: false,
                 status_message: "amount_cpt must be positive".into(),
+                from_balance: 0,
+                to_balance: 0,
+                transfer_id: String::new(),
+            }));
+        }
+
+        if to_user.eq_ignore_ascii_case(hivemind_models::SYSTEM_ACCOUNT_USERNAME) {
+            return Ok(Response::new(TransferCptResponse {
+                success: false,
+                status_message: "recipient not found".into(),
+                from_balance: 0,
+                to_balance: 0,
+                transfer_id: String::new(),
+            }));
+        }
+        // Transfers are open only to accounts whose email has been verified. This stops
+        // unverified accounts from moving credit around.
+        let sender_verified: Option<bool> = sqlx::query_scalar(
+            "SELECT email_verified_at IS NOT NULL FROM users WHERE username = $1 AND is_active = true",
+        )
+        .bind(&from_user)
+        .fetch_optional(&self.state.scheduler.database().pool)
+        .await
+        .map_err(|e| Status::internal(e.to_string()))?;
+        if sender_verified != Some(true) {
+            return Ok(Response::new(TransferCptResponse {
+                success: false,
+                status_message: "Verify your email before you transfer CPT".into(),
                 from_balance: 0,
                 to_balance: 0,
                 transfer_id: String::new(),
@@ -757,29 +864,462 @@ impl UserService for GrpcUserService {
         }))
     }
 
+    async fn verify_email(
+        &self,
+        request: Request<VerifyEmailRequest>,
+    ) -> Result<Response<VerifyEmailResponse>, Status> {
+        let token = request.into_inner().verification_token;
+        let token = token.trim();
+        let failure = |message: &str| {
+            Ok::<_, Status>(Response::new(VerifyEmailResponse {
+                success: false,
+                status_message: message.into(),
+                welcome_grant_status: String::new(),
+            }))
+        };
+        if token.is_empty() {
+            return failure(INVALID_VERIFICATION_LINK);
+        }
+
+        let pool = &self.state.scheduler.database().pool;
+        let mut tx = pool.begin().await.map_err(internal_status)?;
+        let Some(user_id) =
+            account::consume_token(&mut tx, token, account::PURPOSE_EMAIL_VERIFICATION)
+                .await
+                .map_err(internal_status)?
+        else {
+            return failure(INVALID_VERIFICATION_LINK);
+        };
+        let (email, verified, grant): (Option<String>, bool, String) = sqlx::query_as(
+            "SELECT email, email_verified_at IS NOT NULL, welcome_grant_status
+             FROM users WHERE id = $1 FOR UPDATE",
+        )
+        .bind(user_id)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(internal_status)?;
+        let Some(email) = email else {
+            return failure(INVALID_VERIFICATION_LINK);
+        };
+        if verified {
+            tx.commit().await.map_err(internal_status)?;
+            return Ok(Response::new(VerifyEmailResponse {
+                success: true,
+                status_message: "This email is already verified.".into(),
+                welcome_grant_status: grant,
+            }));
+        }
+        if account::email_used_by_verified_account(&mut tx, &email, user_id)
+            .await
+            .map_err(internal_status)?
+        {
+            return failure("This email address is already in use.");
+        }
+
+        // The unique indexes remain a final ownership guard at verification time.
+        if let Err(error) = sqlx::query(
+            "UPDATE users SET email_verified_at = NOW(), updated_at = NOW() WHERE id = $1",
+        )
+        .bind(user_id)
+        .execute(&mut *tx)
+        .await
+        {
+            if error.to_string().contains("users_verified_email_key") {
+                return failure("This email address is already in use.");
+            }
+            return Err(internal_status(error));
+        }
+        let grant = account::grant_welcome_if_eligible(&mut tx, user_id)
+            .await
+            .map_err(internal_status)?;
+        tx.commit().await.map_err(internal_status)?;
+        Ok(Response::new(VerifyEmailResponse {
+            success: true,
+            status_message: "Email verified.".into(),
+            welcome_grant_status: grant.to_string(),
+        }))
+    }
+
+    async fn resend_verification(
+        &self,
+        request: Request<ResendVerificationRequest>,
+    ) -> Result<Response<ResendVerificationResponse>, Status> {
+        let claims = self
+            .state
+            .auth
+            .validate_session(&request.into_inner().token)
+            .await
+            .map_err(|_| Status::unauthenticated("Invalid token"))?;
+        let pool = &self.state.scheduler.database().pool;
+        let account = account::find_active_account(pool, &claims.sub)
+            .await
+            .map_err(internal_status)?
+            .ok_or_else(|| Status::unauthenticated("User is not active"))?;
+        let Some(email) = account.email.clone() else {
+            return Ok(Response::new(ResendVerificationResponse {
+                success: false,
+                status_message: "Add an email address to your account first.".into(),
+            }));
+        };
+        if account.email_verified {
+            return Ok(Response::new(ResendVerificationResponse {
+                success: true,
+                status_message: "Your email is already verified.".into(),
+            }));
+        }
+        // A verified account already owns this address, so the link could never be used. No mail is sent.
+        if account::find_verified_by_email(pool, &email)
+            .await
+            .map_err(internal_status)?
+            .is_some()
+        {
+            return Ok(Response::new(ResendVerificationResponse {
+                success: false,
+                status_message: "This email address is already in use.".into(),
+            }));
+        }
+        if account::cooldown_active(pool, account.id, account::PURPOSE_EMAIL_VERIFICATION)
+            .await
+            .map_err(internal_status)?
+        {
+            return Ok(Response::new(ResendVerificationResponse {
+                success: false,
+                status_message: "Wait a minute before requesting another verification email."
+                    .into(),
+            }));
+        }
+        match account::send_verification_mail(&self.account, pool, account.id, &email).await {
+            Ok(()) => Ok(Response::new(ResendVerificationResponse {
+                success: true,
+                status_message: "We sent a new verification email.".into(),
+            })),
+            Err(error) => {
+                tracing::warn!(%error, "verification email could not be sent");
+                Ok(Response::new(ResendVerificationResponse {
+                    success: false,
+                    status_message: "We could not send the email. Try again later.".into(),
+                }))
+            }
+        }
+    }
+
+    async fn bind_email(
+        &self,
+        request: Request<hivemind_proto::BindEmailRequest>,
+    ) -> Result<Response<hivemind_proto::BindEmailResponse>, Status> {
+        let req = request.into_inner();
+        let claims = self
+            .state
+            .auth
+            .validate_session(&req.token)
+            .await
+            .map_err(|_| Status::unauthenticated("Invalid token"))?;
+        let rejected = |message: &str| {
+            Ok(Response::new(hivemind_proto::BindEmailResponse {
+                success: false,
+                status_message: message.into(),
+            }))
+        };
+        let email = match account::normalize_email(&req.email) {
+            Ok(email) => email,
+            Err(message) => return rejected(message),
+        };
+        let pool = &self.state.scheduler.database().pool;
+        let owner = account::find_active_account(pool, &claims.sub)
+            .await
+            .map_err(internal_status)?
+            .ok_or_else(|| Status::unauthenticated("User is not active"))?;
+        if req.current_password.len() > 72
+            || !bcrypt::verify(&req.current_password, &owner.password_hash).unwrap_or(false)
+        {
+            return rejected("Current password is incorrect.");
+        }
+        if let Err(error) = account::bind_email(pool, owner.id, &owner.password_hash, &email).await
+        {
+            if let Some(claim_error) = error.downcast_ref::<account::EmailClaimError>() {
+                return rejected(&claim_error.to_string());
+            }
+            return Err(internal_status(error));
+        }
+        let status_message = match account::send_verification_mail(
+            &self.account,
+            pool,
+            owner.id,
+            &email,
+        )
+        .await
+        {
+            Ok(()) => "Email added. Check your email to verify it.",
+            Err(error) => {
+                tracing::warn!(%error, "verification email could not be sent after binding");
+                "Email added, but the verification email could not be sent. Use Resend verification."
+            }
+        };
+        Ok(Response::new(hivemind_proto::BindEmailResponse {
+            success: true,
+            status_message: status_message.into(),
+        }))
+    }
+
+    async fn get_account(
+        &self,
+        request: Request<GetAccountRequest>,
+    ) -> Result<Response<GetAccountResponse>, Status> {
+        let claims = self
+            .state
+            .auth
+            .validate_session(&request.into_inner().token)
+            .await
+            .map_err(|_| Status::unauthenticated("Invalid token"))?;
+        let pool = &self.state.scheduler.database().pool;
+        let account = account::find_active_account(pool, &claims.sub)
+            .await
+            .map_err(internal_status)?
+            .ok_or_else(|| Status::not_found("User not found"))?;
+        Ok(Response::new(GetAccountResponse {
+            success: true,
+            status_message: "OK".into(),
+            username: account.username,
+            email: account.email.unwrap_or_default(),
+            email_verified: account.email_verified,
+            balance: account.balance,
+            welcome_grant_status: account.welcome_grant_status,
+        }))
+    }
+
+    async fn change_password(
+        &self,
+        request: Request<ChangePasswordRequest>,
+    ) -> Result<Response<ChangePasswordResponse>, Status> {
+        let req = request.into_inner();
+        let claims = self
+            .state
+            .auth
+            .validate_session(&req.token)
+            .await
+            .map_err(|_| Status::unauthenticated("Invalid token"))?;
+        let failure = |message: &str| ChangePasswordResponse {
+            success: false,
+            status_message: message.into(),
+        };
+        let pool = &self.state.scheduler.database().pool;
+        let account = account::find_active_account(pool, &claims.sub)
+            .await
+            .map_err(internal_status)?
+            .ok_or_else(|| Status::not_found("User not found"))?;
+        if !bcrypt::verify(&req.current_password, &account.password_hash).unwrap_or(false) {
+            return Ok(Response::new(failure("Current password is incorrect.")));
+        }
+        if let Err(message) = account::validate_password(&req.new_password) {
+            return Ok(Response::new(failure(message)));
+        }
+        if req.new_password == req.current_password {
+            return Ok(Response::new(failure(
+                "The new password must be different from the current password.",
+            )));
+        }
+        let hash = bcrypt::hash(&req.new_password, 12).map_err(internal_status)?;
+        // The session that made the change stays signed in. Every other session of the account ends in the
+        // same transaction as the new password, so no session survives a commit that changed the password.
+        let keep = self
+            .state
+            .auth
+            .jwt_service()
+            .session_id(&req.token)
+            .map_err(internal_status)?;
+        // The application clock stamps the change. It is the clock that stamps a token's iat, so the two compare.
+        let changed_at = chrono::Utc::now();
+        let mut tx = pool.begin().await.map_err(internal_status)?;
+        let updated = sqlx::query(
+            "UPDATE users SET password_hash = $1, password_changed_at = $2, updated_at = NOW()
+             WHERE id = $3 AND password_hash = $4 AND is_active = true",
+        )
+        .bind(&hash)
+        .bind(changed_at)
+        .bind(account.id)
+        .bind(&account.password_hash)
+        .execute(&mut *tx)
+        .await
+        .map_err(internal_status)?;
+        if updated.rows_affected() != 1 {
+            return Err(Status::unauthenticated(
+                "Account credentials changed; sign in again",
+            ));
+        }
+        hivemind_auth::session_store::end_account_sessions(&mut tx, account.id, keep.as_deref())
+            .await
+            .map_err(internal_status)?;
+        tx.commit().await.map_err(internal_status)?;
+        Ok(Response::new(ChangePasswordResponse {
+            success: true,
+            status_message: "Password changed.".into(),
+        }))
+    }
+
+    async fn request_password_reset(
+        &self,
+        request: Request<RequestPasswordResetRequest>,
+    ) -> Result<Response<AccountRequestResponse>, Status> {
+        const ACCEPTED: &str = "If an account uses this email address, we sent a reset link.";
+        let Ok(email) = account::normalize_email(&request.into_inner().email) else {
+            return account_request_response(true, ACCEPTED);
+        };
+        let pool = &self.state.scheduler.database().pool;
+        if let Some(account) = account::find_verified_by_email(pool, &email)
+            .await
+            .map_err(internal_status)?
+        {
+            let cooling_down =
+                account::cooldown_active(pool, account.id, account::PURPOSE_PASSWORD_RESET)
+                    .await
+                    .map_err(internal_status)?;
+            if !cooling_down {
+                if let Err(error) =
+                    account::send_reset_mail(&self.account, pool, account.id, &email).await
+                {
+                    tracing::warn!(%error, "password reset email could not be sent");
+                }
+            }
+        }
+        account_request_response(true, ACCEPTED)
+    }
+
+    async fn reset_password(
+        &self,
+        request: Request<ResetPasswordRequest>,
+    ) -> Result<Response<ResetPasswordResponse>, Status> {
+        let req = request.into_inner();
+        let failure = |message: &str| ResetPasswordResponse {
+            success: false,
+            status_message: message.into(),
+        };
+        if let Err(message) = account::validate_password(&req.new_password) {
+            return Ok(Response::new(failure(message)));
+        }
+        let pool = &self.state.scheduler.database().pool;
+        let mut tx = pool.begin().await.map_err(internal_status)?;
+        let Some(user_id) = account::consume_token(
+            &mut tx,
+            req.reset_token.trim(),
+            account::PURPOSE_PASSWORD_RESET,
+        )
+        .await
+        .map_err(internal_status)?
+        else {
+            return Ok(Response::new(failure(
+                "This reset link is invalid or has expired.",
+            )));
+        };
+        let hash = bcrypt::hash(&req.new_password, 12).map_err(internal_status)?;
+        let changed_at = chrono::Utc::now();
+        sqlx::query(
+            "UPDATE users SET password_hash = $1, password_changed_at = $2, updated_at = NOW() WHERE id = $3",
+        )
+        .bind(&hash)
+        .bind(changed_at)
+        .bind(user_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(internal_status)?;
+        // A reset comes from someone who cannot sign in, so no session is kept. Every session ends.
+        hivemind_auth::session_store::end_account_sessions(&mut tx, user_id, None)
+            .await
+            .map_err(internal_status)?;
+        tx.commit().await.map_err(internal_status)?;
+        Ok(Response::new(ResetPasswordResponse {
+            success: true,
+            status_message: "Password updated. Sign in with the new password.".into(),
+        }))
+    }
+
+    async fn request_username_reminder(
+        &self,
+        request: Request<RequestUsernameReminderRequest>,
+    ) -> Result<Response<AccountRequestResponse>, Status> {
+        const ACCEPTED: &str = "If an account uses this email address, we sent its username.";
+        let Ok(email) = account::normalize_email(&request.into_inner().email) else {
+            return account_request_response(true, ACCEPTED);
+        };
+        let pool = &self.state.scheduler.database().pool;
+        if let Some(username) = account::reserve_username_reminder(pool, &email)
+            .await
+            .map_err(internal_status)?
+        {
+            if let Err(error) = account::send_username_mail(&self.account, &email, &username).await
+            {
+                tracing::warn!(%error, "username reminder could not be sent");
+            }
+        }
+        account_request_response(true, ACCEPTED)
+    }
+
     async fn refresh_token(
         &self,
         request: Request<RefreshTokenRequest>,
     ) -> Result<Response<RefreshTokenResponse>, Status> {
         let req = request.into_inner();
-        match self.state.auth.validate_token(&req.old_token) {
-            Ok(claims) => {
-                let token = self
-                    .state
-                    .auth
-                    .jwt_service()
-                    .encode_claims(&claims)
-                    .map_err(|e| Status::internal(format!("Token: {}", e)))?;
-                Ok(Response::new(RefreshTokenResponse {
-                    success: true,
-                    status_message: "OK".into(),
-                    new_token: token,
-                }))
-            }
+        match self.state.auth.renew_token(&req.old_token).await {
+            Ok(token) => Ok(Response::new(RefreshTokenResponse {
+                success: true,
+                status_message: "OK".into(),
+                new_token: token,
+            })),
             Err(_) => Ok(Response::new(RefreshTokenResponse {
                 success: false,
                 status_message: "Invalid token".into(),
                 new_token: String::new(),
+            })),
+        }
+    }
+
+    async fn logout(
+        &self,
+        request: Request<LogoutRequest>,
+    ) -> Result<Response<LogoutResponse>, Status> {
+        let req = request.into_inner();
+        // Ending the session is what stops the token from working. A token that is not valid has nothing to end.
+        match self.state.auth.end_session(&req.token).await {
+            Ok(_) => Ok(Response::new(LogoutResponse {
+                success: true,
+                status_message: "OK".into(),
+            })),
+            Err(_) => Ok(Response::new(LogoutResponse {
+                success: false,
+                status_message: "Could not end the session".into(),
+            })),
+        }
+    }
+
+    async fn check_email(
+        &self,
+        request: Request<CheckEmailRequest>,
+    ) -> Result<Response<CheckEmailResponse>, Status> {
+        let req = request.into_inner();
+        // Availability uses the same verified ownership and reservation deadline as sign-up.
+        let email = match account::normalize_email(&req.email) {
+            Ok(email) => email,
+            Err(message) => {
+                return Ok(Response::new(CheckEmailResponse {
+                    success: false,
+                    status_message: message.into(),
+                    available: false,
+                    verified: false,
+                }))
+            }
+        };
+        let pool = &self.state.scheduler.database().pool;
+        match account::find_registered_by_email(pool, &email).await {
+            Ok(existing) => Ok(Response::new(CheckEmailResponse {
+                success: true,
+                status_message: "OK".into(),
+                available: existing.is_none(),
+                verified: existing.is_some_and(|account| account.email_verified),
+            })),
+            Err(_) => Ok(Response::new(CheckEmailResponse {
+                success: false,
+                status_message: "Could not check the address".into(),
+                available: false,
+                verified: false,
             })),
         }
     }
@@ -832,7 +1372,8 @@ async fn authorize_worker_identity(
     }
     let claims = state
         .auth
-        .validate_token(token)
+        .validate_session(token)
+        .await
         .map_err(|_| Status::unauthenticated("Invalid token"))?;
     let worker = state
         .node_manager
@@ -1235,7 +1776,8 @@ impl NodeManagerService for GrpcNodeManagerService {
         let claims = self
             .state
             .auth
-            .validate_token(&req.token)
+            .validate_session(&req.token)
+            .await
             .map_err(|_| Status::unauthenticated("Invalid token"))?;
         if !is_safe_worker_id(&worker_id) {
             return Ok(Response::new(StatusResponse {
@@ -1871,7 +2413,8 @@ impl NodeManagerService for GrpcNodeManagerService {
         let claims = self
             .state
             .auth
-            .validate_token(&req.token)
+            .validate_session(&req.token)
+            .await
             .map_err(|_| Status::unauthenticated("Invalid token"))?;
         let workers = self
             .state
@@ -1911,7 +2454,8 @@ impl NodeManagerService for GrpcNodeManagerService {
         let claims = self
             .state
             .auth
-            .validate_token(&req.token)
+            .validate_session(&req.token)
+            .await
             .map_err(|_| Status::unauthenticated("Invalid token"))?;
         let worker = self
             .state
@@ -1956,7 +2500,8 @@ impl NodeManagerService for GrpcNodeManagerService {
         let req = request.into_inner();
         self.state
             .auth
-            .validate_token(&req.token)
+            .validate_session(&req.token)
+            .await
             .map_err(|_| Status::unauthenticated("Invalid token"))?;
         Ok(Response::new(
             hivemind_proto::GetPerformanceContractResponse {
@@ -2102,7 +2647,8 @@ impl GeneralComputeArtifactService for GrpcGeneralComputeArtifactService {
         let claims = self
             .state
             .auth
-            .validate_token(&req.token)
+            .validate_session(&req.token)
+            .await
             .map_err(|_| Status::unauthenticated("Invalid token"))?;
         let task = self
             .state
@@ -2186,7 +2732,8 @@ impl MasterNodeService for GrpcMasterNodeService {
         let claims = self
             .state
             .auth
-            .validate_token(&req.token)
+            .validate_session(&req.token)
+            .await
             .map_err(|_| Status::unauthenticated("Invalid token"))?;
         if !is_safe_task_id(&req.task_id) {
             return Ok(Response::new(UploadTaskResponse {
@@ -2572,7 +3119,8 @@ impl MasterNodeService for GrpcMasterNodeService {
         let claims = self
             .state
             .auth
-            .validate_token(&req.token)
+            .validate_session(&req.token)
+            .await
             .map_err(|_| Status::unauthenticated("Invalid token"))?;
         if req.task_ids.len() > 100 || req.task_ids.iter().any(|id| !is_safe_task_id(id)) {
             return Err(Status::invalid_argument(
@@ -2616,7 +3164,8 @@ impl MasterNodeService for GrpcMasterNodeService {
         let claims = self
             .state
             .auth
-            .validate_token(&req.token)
+            .validate_session(&req.token)
+            .await
             .map_err(|_| Status::unauthenticated("Invalid token"))?;
         match self.state.scheduler.get_task(&req.task_id).await {
             Ok(Some(t)) => {
@@ -2779,7 +3328,8 @@ impl MasterNodeService for GrpcMasterNodeService {
         let claims = self
             .state
             .auth
-            .validate_token(&req.token)
+            .validate_session(&req.token)
+            .await
             .map_err(|_| Status::unauthenticated("Invalid token"))?;
         match self.state.scheduler.get_task(&req.task_id).await {
             Ok(Some(t)) if t.owner != claims.sub => {
@@ -2934,7 +3484,8 @@ impl MasterNodeService for GrpcMasterNodeService {
         let claims = self
             .state
             .auth
-            .validate_token(&req.token)
+            .validate_session(&req.token)
+            .await
             .map_err(|_| Status::unauthenticated("Invalid token"))?;
         match self.state.scheduler.get_task(&req.task_id).await {
             Ok(Some(t)) => {
@@ -2968,7 +3519,8 @@ impl MasterNodeService for GrpcMasterNodeService {
         let claims = self
             .state
             .auth
-            .validate_token(&req.token)
+            .validate_session(&req.token)
+            .await
             .map_err(|_| Status::unauthenticated("Invalid token"))?;
         let Some(task) = self
             .state
@@ -3139,7 +3691,8 @@ impl MasterNodeService for GrpcMasterNodeService {
         let claims = self
             .state
             .auth
-            .validate_token(&req.token)
+            .validate_session(&req.token)
+            .await
             .map_err(|_| Status::unauthenticated("Invalid token"))?;
         if !is_admin(&claims.sub) {
             return Ok(Response::new(GetAdminBillingOverviewResponse {
@@ -3177,7 +3730,8 @@ impl MasterNodeService for GrpcMasterNodeService {
         let claims = self
             .state
             .auth
-            .validate_token(&req.token)
+            .validate_session(&req.token)
+            .await
             .map_err(|_| Status::unauthenticated("Invalid token"))?;
         if !is_admin(&claims.sub) {
             return Ok(Response::new(GetAdminArtifactOverviewResponse {
@@ -3212,7 +3766,8 @@ impl MasterNodeService for GrpcMasterNodeService {
         let claims = self
             .state
             .auth
-            .validate_token(&req.token)
+            .validate_session(&req.token)
+            .await
             .map_err(|_| Status::unauthenticated("Invalid token"))?;
         if !is_admin(&claims.sub) {
             return Ok(Response::new(CleanupAdminArtifactsResponse {
@@ -3263,7 +3818,8 @@ impl MasterNodeService for GrpcMasterNodeService {
         let claims = self
             .state
             .auth
-            .validate_token(&req.token)
+            .validate_session(&req.token)
+            .await
             .map_err(|_| Status::unauthenticated("Invalid token"))?;
         if !is_admin(&claims.sub) {
             return Ok(Response::new(GetAdminSchedulingCacheMetricsResponse {
@@ -3316,7 +3872,8 @@ impl MasterNodeService for GrpcMasterNodeService {
         let claims = self
             .state
             .auth
-            .validate_token(&req.token)
+            .validate_session(&req.token)
+            .await
             .map_err(|_| Status::unauthenticated("Invalid token"))?;
         if !is_admin(&claims.sub) {
             return Ok(Response::new(GetAdminSchedulingCacheAlertResponse {
@@ -3386,7 +3943,8 @@ impl MasterNodeService for GrpcMasterNodeService {
         let claims = self
             .state
             .auth
-            .validate_token(&req.token)
+            .validate_session(&req.token)
+            .await
             .map_err(|_| Status::unauthenticated("Invalid token"))?;
         if !is_admin(&claims.sub) {
             return Ok(Response::new(ListAdminSchedulingCacheAnomaliesResponse {
@@ -3431,7 +3989,8 @@ impl MasterNodeService for GrpcMasterNodeService {
         let claims = self
             .state
             .auth
-            .validate_token(&req.token)
+            .validate_session(&req.token)
+            .await
             .map_err(|_| Status::unauthenticated("Invalid token"))?;
         let worker = self
             .state
@@ -3496,7 +4055,8 @@ impl MasterNodeService for GrpcMasterNodeService {
         let claims = self
             .state
             .auth
-            .validate_token(&req.token)
+            .validate_session(&req.token)
+            .await
             .map_err(|_| Status::unauthenticated("Invalid token"))?;
         if !is_admin(&claims.sub) {
             return Ok(Response::new(UpdateWorkerTrustControlResponse {
@@ -3545,7 +4105,8 @@ impl MasterNodeService for GrpcMasterNodeService {
         let claims = self
             .state
             .auth
-            .validate_token(&req.token)
+            .validate_session(&req.token)
+            .await
             .map_err(|_| Status::unauthenticated("Invalid token"))?;
         if !is_admin(&claims.sub) {
             return Ok(Response::new(ListAdminWorkerTrustResponse {
@@ -3605,7 +4166,8 @@ impl MasterNodeService for GrpcMasterNodeService {
         let claims = self
             .state
             .auth
-            .validate_token(&req.token)
+            .validate_session(&req.token)
+            .await
             .map_err(|_| Status::unauthenticated("Invalid token"))?;
         if !is_admin(&claims.sub) {
             return Ok(Response::new(ListAdminAuditLogsResponse {
@@ -3650,7 +4212,8 @@ impl MasterNodeService for GrpcMasterNodeService {
         let req = request.into_inner();
         self.state
             .auth
-            .validate_token(&req.token)
+            .validate_session(&req.token)
+            .await
             .map_err(|_| Status::unauthenticated("Invalid token"))?;
         if validate_quote_resources(
             req.cpu_score,
@@ -3695,7 +4258,8 @@ impl MasterNodeService for GrpcMasterNodeService {
         let claims = self
             .state
             .auth
-            .validate_token(&req.token)
+            .validate_session(&req.token)
+            .await
             .map_err(|_| Status::unauthenticated("Invalid token"))?;
         let pool = &self.state.scheduler.database().pool;
         let total: i64 = sqlx::query_scalar(
@@ -3764,7 +4328,8 @@ impl MasterNodeService for GrpcMasterNodeService {
         let claims = self
             .state
             .auth
-            .validate_token(&req.token)
+            .validate_session(&req.token)
+            .await
             .map_err(|_| Status::unauthenticated("Invalid token"))?;
         let worker_id = req.worker_id.trim();
         if worker_id.is_empty() {
@@ -3872,7 +4437,8 @@ impl MasterNodeService for GrpcMasterNodeService {
         let claims = self
             .state
             .auth
-            .validate_token(&req.token)
+            .validate_session(&req.token)
+            .await
             .map_err(|_| Status::unauthenticated("Invalid token"))?;
         let Some(worker) = self
             .state
@@ -3912,7 +4478,8 @@ impl MasterNodeService for GrpcMasterNodeService {
         let claims = self
             .state
             .auth
-            .validate_token(&req.token)
+            .validate_session(&req.token)
+            .await
             .map_err(|_| Status::unauthenticated("Invalid token"))?;
         let Some(current) = self
             .state
@@ -6044,7 +6611,11 @@ mod tests {
 
     #[tokio::test]
     async fn upload_task_rejects_unsupported_runtime_from_direct_grpc_caller() {
-        let service = GrpcMasterNodeService::new(nodepool_state_without_database());
+        // The token is checked against the database (see auth::validate_session), so this test needs one.
+        let (service, _task_id, _other_token, _owner) = match test_service().await {
+            Some(parts) => parts,
+            None => return,
+        };
         let owner = "grpc-runtime-bypass-owner";
         let rejected_task_id = format!("grpc-runtime-bypass-{}", uuid::Uuid::new_v4());
         let response = service
@@ -6078,7 +6649,11 @@ mod tests {
 
     #[tokio::test]
     async fn upload_task_rejects_retired_runtimes_before_persisting_any_assignment() {
-        let service = GrpcMasterNodeService::new(nodepool_state_without_database());
+        // The token is checked against the database (see auth::validate_session), so this test needs one.
+        let (service, _task_id, _other_token, _owner) = match test_service().await {
+            Some(parts) => parts,
+            None => return,
+        };
         let owner = "grpc-retired-runtime-owner";
         for (runtime, replacement) in [
             ("managed-function-v0", "hcode"),
@@ -6111,7 +6686,7 @@ mod tests {
                 .unwrap()
                 .into_inner();
 
-            // Admission must reject retired names before touching the database.
+            // Admission must reject retired names before any assignment is persisted.
             assert!(!response.success);
             assert_eq!(
                 response.status_message,
@@ -6576,6 +7151,7 @@ mod tests {
             .register_user(Request::new(RegisterUserRequest {
                 username: admin_username.clone(),
                 password: "valid-test-password".into(),
+                email: format!("{admin_username}@example.com"),
             }))
             .await
             .unwrap()
@@ -6599,6 +7175,1022 @@ mod tests {
         assert!(!persisted);
     }
 
+    fn account_mail_settings(outbox: &std::path::Path) -> account::AccountSettings {
+        account::AccountSettings {
+            site_url: "http://localhost:3000".into(),
+            mail: account::MailTransport::File(outbox.to_path_buf()),
+        }
+    }
+
+    fn outbox_message_count(outbox: &std::path::Path) -> usize {
+        std::fs::read_dir(outbox)
+            .map(|entries| entries.count())
+            .unwrap_or(0)
+    }
+
+    /// Reads the token that follows `marker` in the newest outbox message containing it.
+    fn token_from_outbox(outbox: &std::path::Path, marker: &str) -> String {
+        let mut paths: Vec<_> = std::fs::read_dir(outbox)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .collect();
+        paths.sort();
+        for path in paths.iter().rev() {
+            let content = std::fs::read_to_string(path).unwrap();
+            if let Some(index) = content.find(marker) {
+                return content[index + marker.len()..]
+                    .chars()
+                    .take_while(|c| c.is_ascii_hexdigit())
+                    .collect();
+            }
+        }
+        panic!("no outbox message contains {marker}");
+    }
+
+    async fn system_pool_balance(pool: &sqlx::PgPool) -> i64 {
+        sqlx::query_scalar("SELECT balance FROM users WHERE username = 'system'")
+            .fetch_one(pool)
+            .await
+            .unwrap()
+    }
+
+    async fn register_account(
+        user_service: &GrpcUserService,
+        username: &str,
+        email: &str,
+    ) -> RegisterUserResponse {
+        user_service
+            .register_user(Request::new(RegisterUserRequest {
+                username: username.into(),
+                password: "valid-test-password".into(),
+                email: email.into(),
+            }))
+            .await
+            .unwrap()
+            .into_inner()
+    }
+
+    async fn verify_from_outbox(
+        user_service: &GrpcUserService,
+        outbox: &std::path::Path,
+    ) -> VerifyEmailResponse {
+        let token = token_from_outbox(outbox, "/#/verify-email/");
+        user_service
+            .verify_email(Request::new(VerifyEmailRequest {
+                verification_token: token,
+            }))
+            .await
+            .unwrap()
+            .into_inner()
+    }
+
+    async fn login_response(
+        user_service: &GrpcUserService,
+        username: &str,
+        password: &str,
+    ) -> LoginResponse {
+        user_service
+            .login(Request::new(LoginRequest {
+                username: username.into(),
+                password: password.into(),
+            }))
+            .await
+            .unwrap()
+            .into_inner()
+    }
+
+    #[tokio::test]
+    async fn welcome_grant_is_paid_once_after_email_verification() {
+        let lock = grpc_db_lock();
+        let _lock_guard = lock.lock().await;
+        let (service, task_id, _other_token, owner) = match test_service().await {
+            Some(parts) => parts,
+            None => return,
+        };
+        let pool = service.state.scheduler.database().pool.clone();
+        let outbox = std::env::temp_dir().join(format!("hivemind-grant-{}", uuid::Uuid::new_v4()));
+        let user_service = GrpcUserService::new(service.state.clone())
+            .with_account_settings(account_mail_settings(&outbox));
+        let username = format!("grant-user-{}", uuid::Uuid::new_v4());
+        let pool_before = system_pool_balance(&pool).await;
+
+        // Registration alone pays nothing.
+        let registration =
+            register_account(&user_service, &username, &format!("{username}@example.com")).await;
+        assert!(registration.success, "{}", registration.status_message);
+        let unverified = account::find_active_account(&pool, &username)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(unverified.balance, 0);
+        assert!(!unverified.email_verified);
+        assert_eq!(system_pool_balance(&pool).await, pool_before);
+
+        // Verifying the email pays the grant once, from the system pool.
+        let verified = verify_from_outbox(&user_service, &outbox).await;
+        assert!(verified.success, "{}", verified.status_message);
+        assert_eq!(verified.welcome_grant_status, "granted");
+        let granted = account::find_active_account(&pool, &username)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(granted.balance, 1000);
+        assert!(granted.email_verified);
+        assert_eq!(system_pool_balance(&pool).await, pool_before - 1000);
+        let ledger_rows: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM ledger_entries WHERE idempotency_key LIKE 'welcome-grant:%'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(ledger_rows, 2);
+
+        // The same link cannot pay again.
+        let replay = verify_from_outbox(&user_service, &outbox).await;
+        assert!(!replay.success);
+        assert_eq!(
+            account::find_active_account(&pool, &username)
+                .await
+                .unwrap()
+                .unwrap()
+                .balance,
+            1000
+        );
+        assert_eq!(system_pool_balance(&pool).await, pool_before - 1000);
+
+        cleanup(&service.state.scheduler, &task_id, &owner).await;
+        std::fs::remove_dir_all(&outbox).ok();
+    }
+
+    #[tokio::test]
+    async fn welcome_grant_is_skipped_when_the_pool_is_below_the_grant() {
+        let lock = grpc_db_lock();
+        let _lock_guard = lock.lock().await;
+        let (service, task_id, _other_token, owner) = match test_service().await {
+            Some(parts) => parts,
+            None => return,
+        };
+        let pool = service.state.scheduler.database().pool.clone();
+        let outbox = std::env::temp_dir().join(format!("hivemind-empty-{}", uuid::Uuid::new_v4()));
+        let user_service = GrpcUserService::new(service.state.clone())
+            .with_account_settings(account_mail_settings(&outbox));
+        sqlx::query("UPDATE users SET balance = 999 WHERE username = 'system'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let username = format!("empty-pool-{}", uuid::Uuid::new_v4());
+        let registration =
+            register_account(&user_service, &username, &format!("{username}@example.com")).await;
+        assert!(registration.success, "{}", registration.status_message);
+
+        let verified = verify_from_outbox(&user_service, &outbox).await;
+        assert!(verified.success, "{}", verified.status_message);
+        assert_eq!(verified.welcome_grant_status, "pool_empty");
+        assert_eq!(
+            account::find_active_account(&pool, &username)
+                .await
+                .unwrap()
+                .unwrap()
+                .balance,
+            0
+        );
+        assert_eq!(system_pool_balance(&pool).await, 999);
+
+        cleanup(&service.state.scheduler, &task_id, &owner).await;
+        std::fs::remove_dir_all(&outbox).ok();
+    }
+
+    #[tokio::test]
+    async fn signing_out_ends_the_session_and_stops_its_tokens() {
+        let lock = grpc_db_lock();
+        let _lock_guard = lock.lock().await;
+        let (service, task_id, _other_token, owner) = match test_service().await {
+            Some(parts) => parts,
+            None => return,
+        };
+        let outbox = std::env::temp_dir().join(format!("hivemind-logout-{}", uuid::Uuid::new_v4()));
+        let user_service = GrpcUserService::new(service.state.clone())
+            .with_account_settings(account_mail_settings(&outbox));
+        let username = format!("logout-user-{}", uuid::Uuid::new_v4());
+        let registration =
+            register_account(&user_service, &username, &format!("{username}@example.com")).await;
+        assert!(registration.success, "{}", registration.status_message);
+        let verified = verify_from_outbox(&user_service, &outbox).await;
+        assert!(verified.success, "{}", verified.status_message);
+
+        let auth = &service.state.auth;
+        let signed_in = login_response(&user_service, &username, "valid-test-password").await;
+        assert!(signed_in.success, "{}", signed_in.status_message);
+        let token = signed_in.token;
+        auth.validate_session(&token)
+            .await
+            .expect("a fresh sign-in session is active");
+
+        // A refresh keeps the same session, so a refreshed copy of the token is ended with the original.
+        let refreshed = user_service
+            .refresh_token(Request::new(RefreshTokenRequest {
+                old_token: token.clone(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(refreshed.success, "{}", refreshed.status_message);
+        let refreshed_token = refreshed.new_token;
+        assert_eq!(
+            auth.jwt_service().session_id(&refreshed_token).unwrap(),
+            auth.jwt_service().session_id(&token).unwrap()
+        );
+
+        let logout = user_service
+            .logout(Request::new(LogoutRequest {
+                token: token.clone(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(logout.success, "{}", logout.status_message);
+        assert!(auth.validate_session(&token).await.is_err());
+        assert!(auth.validate_session(&refreshed_token).await.is_err());
+        // The signature is still good, so the plain check accepts it. Only the session check refuses it.
+        assert!(auth.validate_token(&token).is_ok());
+
+        // Ending a session twice is not an error, and signing in again opens a session that works.
+        let again = user_service
+            .logout(Request::new(LogoutRequest { token }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(again.success, "{}", again.status_message);
+        let next = login_response(&user_service, &username, "valid-test-password").await;
+        assert!(auth.validate_session(&next.token).await.is_ok());
+
+        cleanup(&service.state.scheduler, &task_id, &owner).await;
+        std::fs::remove_dir_all(&outbox).ok();
+    }
+
+    #[tokio::test]
+    async fn changing_or_resetting_the_password_ends_the_other_sign_ins() {
+        let lock = grpc_db_lock();
+        let _lock_guard = lock.lock().await;
+        let (service, task_id, _other_token, owner) = match test_service().await {
+            Some(parts) => parts,
+            None => return,
+        };
+        let outbox =
+            std::env::temp_dir().join(format!("hivemind-sessions-{}", uuid::Uuid::new_v4()));
+        let user_service = GrpcUserService::new(service.state.clone())
+            .with_account_settings(account_mail_settings(&outbox));
+        let username = format!("session-user-{}", uuid::Uuid::new_v4());
+        let email = format!("{username}@example.com");
+        assert!(
+            register_account(&user_service, &username, &email)
+                .await
+                .success
+        );
+        assert!(verify_from_outbox(&user_service, &outbox).await.success);
+        let auth = &service.state.auth;
+
+        // Two sign-ins. The one that changes the password stays signed in, and the other one ends.
+        let current = login_response(&user_service, &username, "valid-test-password").await;
+        assert!(current.success, "{}", current.status_message);
+        let other = login_response(&user_service, &username, "valid-test-password").await;
+        assert!(other.success, "{}", other.status_message);
+        // A token from before sessions existed has no session row. Only the password change can end it.
+        let now = Utc::now().timestamp() as usize;
+        let legacy = auth
+            .jwt_service()
+            .encode_claims(&Claims {
+                sub: username.clone(),
+                user_id: uuid::Uuid::new_v4().to_string(),
+                role: None,
+                task_id: None,
+                worker_id: None,
+                exp: now + 3600,
+                iat: now - 3600,
+            })
+            .unwrap();
+        auth.validate_session(&legacy)
+            .await
+            .expect("a token from before any password change is still accepted");
+
+        let changed = user_service
+            .change_password(Request::new(ChangePasswordRequest {
+                token: current.token.clone(),
+                current_password: "valid-test-password".into(),
+                new_password: "changed-test-password".into(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(changed.success, "{}", changed.status_message);
+        auth.validate_session(&current.token)
+            .await
+            .expect("the session that changed the password stays signed in");
+        assert!(auth.validate_session(&other.token).await.is_err());
+        assert!(auth.validate_session(&legacy).await.is_err());
+
+        // A reset ends every session, including the one that stayed signed in during the change.
+        let before_reset = login_response(&user_service, &username, "changed-test-password").await;
+        assert!(before_reset.success, "{}", before_reset.status_message);
+        let requested = user_service
+            .request_password_reset(Request::new(RequestPasswordResetRequest {
+                email: email.clone(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(requested.success);
+        let reset_token = token_from_outbox(&outbox, "/#/reset-password/");
+        let reset = user_service
+            .reset_password(Request::new(ResetPasswordRequest {
+                reset_token,
+                new_password: "reset-test-password".into(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(reset.success, "{}", reset.status_message);
+        assert!(auth.validate_session(&current.token).await.is_err());
+        assert!(auth.validate_session(&before_reset.token).await.is_err());
+
+        // A sign-in with the new password works.
+        let next = login_response(&user_service, &username, "reset-test-password").await;
+        assert!(next.success, "{}", next.status_message);
+        auth.validate_session(&next.token)
+            .await
+            .expect("a sign-in after the reset works");
+
+        cleanup(&service.state.scheduler, &task_id, &owner).await;
+        std::fs::remove_dir_all(&outbox).ok();
+    }
+
+    async fn email_available(user_service: &GrpcUserService, email: &str) -> CheckEmailResponse {
+        user_service
+            .check_email(Request::new(CheckEmailRequest {
+                email: email.into(),
+            }))
+            .await
+            .unwrap()
+            .into_inner()
+    }
+
+    #[tokio::test]
+    async fn the_sign_up_email_check_takes_any_registered_address_and_says_whether_it_is_verified()
+    {
+        let lock = grpc_db_lock();
+        let _lock_guard = lock.lock().await;
+        let (service, task_id, _other_token, owner) = match test_service().await {
+            Some(parts) => parts,
+            None => return,
+        };
+        let outbox =
+            std::env::temp_dir().join(format!("hivemind-email-check-{}", uuid::Uuid::new_v4()));
+        let user_service = GrpcUserService::new(service.state.clone())
+            .with_account_settings(account_mail_settings(&outbox));
+        let username = format!("email-check-{}", uuid::Uuid::new_v4());
+        let address = format!("{username}@example.com");
+
+        // Nothing owns the address yet.
+        let free = email_available(&user_service, &address).await;
+        assert!(free.success, "{}", free.status_message);
+        assert!(free.available);
+
+        // An account that uses the address takes it, verified or not, so a second account cannot be made with it.
+        let registration = register_account(&user_service, &username, &address).await;
+        assert!(registration.success, "{}", registration.status_message);
+        let unverified = email_available(&user_service, &address).await;
+        assert!(unverified.success, "{}", unverified.status_message);
+        assert!(!unverified.available);
+        assert!(!unverified.verified);
+        let second = register_account(&user_service, &format!("{username}-two"), &address).await;
+        assert!(
+            !second.success,
+            "a second account on the same address must be refused"
+        );
+
+        // Once verified, the address is still taken, and the answer says it is verified, whatever letter case
+        // the visitor types.
+        let verified = verify_from_outbox(&user_service, &outbox).await;
+        assert!(verified.success, "{}", verified.status_message);
+        let taken = email_available(&user_service, &address.to_uppercase()).await;
+        assert!(taken.success, "{}", taken.status_message);
+        assert!(!taken.available);
+        assert!(taken.verified);
+
+        // A value that is not an address is refused, and it is not reported as free or taken.
+        let malformed = email_available(&user_service, "not-an-address").await;
+        assert!(!malformed.success);
+
+        cleanup(&service.state.scheduler, &task_id, &owner).await;
+        std::fs::remove_dir_all(&outbox).ok();
+    }
+
+    #[tokio::test]
+    async fn legacy_accounts_can_bind_email_without_losing_assets_or_bypassing_verification() {
+        let (service, task_id, _, owner) = test_service()
+            .await
+            .expect("isolated test database required");
+        let outbox = std::env::temp_dir().join(format!("hivemind-bind-{}", uuid::Uuid::new_v4()));
+        let user_service = GrpcUserService::new(service.state.clone())
+            .with_account_settings(account_mail_settings(&outbox));
+        let pool = &service.state.scheduler.database().pool;
+        let hash = bcrypt::hash("legacy-password", 4).unwrap();
+        let id: uuid::Uuid = sqlx::query_scalar(
+            "INSERT INTO users (username, password_hash, balance, welcome_grant_status) VALUES ('legacy-owner', $1, 2000, 'granted') RETURNING id",
+        ).bind(&hash).fetch_one(pool).await.unwrap();
+        sqlx::query(
+            "INSERT INTO users (username, password_hash, balance) VALUES ('recipient', $1, 0)",
+        )
+        .bind(&hash)
+        .execute(pool)
+        .await
+        .unwrap();
+        let login = login_response(&user_service, "legacy-owner", "legacy-password").await;
+        assert!(login.success);
+        let bind = |password: &str| hivemind_proto::BindEmailRequest {
+            token: login.token.clone(),
+            current_password: password.into(),
+            email: "legacy@example.test".into(),
+        };
+        assert!(
+            !user_service
+                .bind_email(Request::new(bind("wrong-password")))
+                .await
+                .unwrap()
+                .into_inner()
+                .success
+        );
+        let result = user_service
+            .bind_email(Request::new(bind("legacy-password")))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(result.success, "{}", result.status_message);
+        let account = account::find_active_account(pool, "legacy-owner")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(account.id, id);
+        assert_eq!(account.balance, 2000);
+        assert_eq!(account.welcome_grant_status, account::GRANT_GRANTED);
+        assert!(!account.email_verified);
+        let transfer = || TransferCptRequest {
+            token: login.token.clone(),
+            to_username: "recipient".into(),
+            amount_cpt: 10,
+            idempotency_key: uuid::Uuid::new_v4().to_string(),
+        };
+        assert!(
+            !user_service
+                .transfer_cpt(Request::new(transfer()))
+                .await
+                .unwrap()
+                .into_inner()
+                .success
+        );
+        let verified = verify_from_outbox(&user_service, &outbox).await;
+        assert!(verified.success, "{}", verified.status_message);
+        assert_eq!(
+            verified.welcome_grant_status,
+            account::GRANT_ALREADY_GRANTED
+        );
+        assert_eq!(
+            account::find_active_account(pool, "legacy-owner")
+                .await
+                .unwrap()
+                .unwrap()
+                .balance,
+            2000
+        );
+        assert!(
+            user_service
+                .transfer_cpt(Request::new(transfer()))
+                .await
+                .unwrap()
+                .into_inner()
+                .success
+        );
+        assert!(
+            !user_service
+                .bind_email(Request::new(bind("legacy-password")))
+                .await
+                .unwrap()
+                .into_inner()
+                .success
+        );
+        service.state.auth.end_session(&login.token).await.unwrap();
+        assert_eq!(
+            user_service
+                .bind_email(Request::new(bind("legacy-password")))
+                .await
+                .unwrap_err()
+                .code(),
+            tonic::Code::Unauthenticated
+        );
+        cleanup(&service.state.scheduler, &task_id, &owner).await;
+        std::fs::remove_dir_all(outbox).unwrap();
+    }
+
+    #[tokio::test]
+    async fn username_reminder_cooldown_is_atomic_across_service_instances() {
+        let (service, task_id, _, owner) = test_service()
+            .await
+            .expect("isolated test database required");
+        let outbox =
+            std::env::temp_dir().join(format!("hivemind-reminder-{}", uuid::Uuid::new_v4()));
+        let first = GrpcUserService::new(service.state.clone())
+            .with_account_settings(account_mail_settings(&outbox));
+        let second = GrpcUserService::new(service.state.clone())
+            .with_account_settings(account_mail_settings(&outbox));
+        assert!(
+            register_account(&first, "reminder-owner", "reminder@example.test")
+                .await
+                .success
+        );
+        assert!(verify_from_outbox(&first, &outbox).await.success);
+        let before = outbox_message_count(&outbox);
+        let request = || {
+            Request::new(RequestUsernameReminderRequest {
+                email: "reminder@example.test".into(),
+            })
+        };
+        let (a, b) = tokio::join!(
+            first.request_username_reminder(request()),
+            second.request_username_reminder(request())
+        );
+        assert!(a.unwrap().into_inner().success);
+        assert!(b.unwrap().into_inner().success);
+        assert_eq!(outbox_message_count(&outbox), before + 1);
+        let restarted = GrpcUserService::new(service.state.clone())
+            .with_account_settings(account_mail_settings(&outbox));
+        assert!(
+            restarted
+                .request_username_reminder(request())
+                .await
+                .unwrap()
+                .into_inner()
+                .success
+        );
+        assert_eq!(outbox_message_count(&outbox), before + 1);
+        let pool = &service.state.scheduler.database().pool;
+        sqlx::query("UPDATE users SET username_reminder_requested_at = NOW() - INTERVAL '61 seconds' WHERE username = 'reminder-owner'")
+            .execute(pool).await.unwrap();
+        assert!(
+            restarted
+                .request_username_reminder(request())
+                .await
+                .unwrap()
+                .into_inner()
+                .success
+        );
+        assert_eq!(outbox_message_count(&outbox), before + 2);
+        sqlx::query("UPDATE users SET username_reminder_requested_at = NULL WHERE username = 'reminder-owner'")
+            .execute(pool).await.unwrap();
+        let failing = GrpcUserService::new(service.state.clone()).with_account_settings(
+            account::AccountSettings {
+                site_url: "http://localhost".into(),
+                mail: account::MailTransport::Disabled,
+            },
+        );
+        assert!(
+            failing
+                .request_username_reminder(request())
+                .await
+                .unwrap()
+                .into_inner()
+                .success
+        );
+        assert!(
+            restarted
+                .request_username_reminder(request())
+                .await
+                .unwrap()
+                .into_inner()
+                .success
+        );
+        assert_eq!(
+            outbox_message_count(&outbox),
+            before + 2,
+            "failed delivery still consumes the cooldown"
+        );
+        cleanup(&service.state.scheduler, &task_id, &owner).await;
+        std::fs::remove_dir_all(outbox).unwrap();
+    }
+
+    #[tokio::test]
+    async fn concurrent_signup_sends_only_one_email_for_one_address() {
+        let (service, task_id, _, owner) = test_service()
+            .await
+            .expect("isolated test database required");
+        let outbox =
+            std::env::temp_dir().join(format!("hivemind-signup-race-{}", uuid::Uuid::new_v4()));
+        let first = GrpcUserService::new(service.state.clone())
+            .with_account_settings(account_mail_settings(&outbox));
+        let second = GrpcUserService::new(service.state.clone())
+            .with_account_settings(account_mail_settings(&outbox));
+        let (a, b) = tokio::join!(
+            register_account(&first, "first-owner", "shared@example.test"),
+            register_account(&second, "second-owner", "SHARED@example.test"),
+        );
+        assert_ne!(a.success, b.success);
+        assert_eq!(
+            if a.success {
+                b.status_message
+            } else {
+                a.status_message
+            },
+            "This email address is already in use."
+        );
+        assert_eq!(outbox_message_count(&outbox), 1);
+        cleanup(&service.state.scheduler, &task_id, &owner).await;
+        std::fs::remove_dir_all(outbox).unwrap();
+    }
+
+    #[tokio::test]
+    async fn one_account_per_email_address_at_sign_up() {
+        let lock = grpc_db_lock();
+        let _lock_guard = lock.lock().await;
+        let (service, task_id, _other_token, owner) = match test_service().await {
+            Some(parts) => parts,
+            None => return,
+        };
+        let outbox = std::env::temp_dir().join(format!("hivemind-dupe-{}", uuid::Uuid::new_v4()));
+        let user_service = GrpcUserService::new(service.state.clone())
+            .with_account_settings(account_mail_settings(&outbox));
+        let pool = service.state.scheduler.database().pool.clone();
+        let shared = format!("shared-{}@example.com", uuid::Uuid::new_v4());
+        let first = format!("first-{}", uuid::Uuid::new_v4());
+        let second = format!("second-{}", uuid::Uuid::new_v4());
+        assert!(
+            register_account(&user_service, &first, &shared)
+                .await
+                .success
+        );
+
+        // An account that has not verified the address still uses it, so a second account cannot take it.
+        let mails_before = outbox_message_count(&outbox);
+        let refused = register_account(&user_service, &second, &shared).await;
+        assert!(!refused.success);
+        assert!(
+            refused.status_message.contains("already in use"),
+            "{}",
+            refused.status_message
+        );
+        assert!(account::find_active_account(&pool, &second)
+            .await
+            .unwrap()
+            .is_none());
+        assert_eq!(outbox_message_count(&outbox), mails_before);
+
+        // Verifying the first account keeps the address with it.
+        assert!(verify_from_outbox(&user_service, &outbox).await.success);
+        let third = format!("third-{}", uuid::Uuid::new_v4());
+        assert!(
+            !register_account(&user_service, &third, &shared)
+                .await
+                .success
+        );
+
+        cleanup(&service.state.scheduler, &task_id, &owner).await;
+        std::fs::remove_dir_all(&outbox).ok();
+    }
+
+    #[tokio::test]
+    async fn a_used_address_gets_no_new_verification_mail() {
+        let lock = grpc_db_lock();
+        let _lock_guard = lock.lock().await;
+        let (service, task_id, _other_token, owner) = match test_service().await {
+            Some(parts) => parts,
+            None => return,
+        };
+        let outbox = std::env::temp_dir().join(format!("hivemind-taken-{}", uuid::Uuid::new_v4()));
+        let user_service = GrpcUserService::new(service.state.clone())
+            .with_account_settings(account_mail_settings(&outbox));
+        let address = format!("taken-{}@example.com", uuid::Uuid::new_v4());
+        let waiting = format!("waiting-{}", uuid::Uuid::new_v4());
+        let claimer = format!("claimer-{}", uuid::Uuid::new_v4());
+        let late = format!("late-{}", uuid::Uuid::new_v4());
+        let pool = &service.state.scheduler.database().pool;
+
+        // Only one account can use an address, verified or not. A refused sign-up writes no mail.
+        assert!(
+            register_account(&user_service, &waiting, &address)
+                .await
+                .success
+        );
+        let mails_before = outbox_message_count(&outbox);
+        assert!(
+            !register_account(&user_service, &claimer, &address)
+                .await
+                .success
+        );
+        assert_eq!(outbox_message_count(&outbox), mails_before);
+
+        // Once the account that uses the address verifies it, the address still opens to no one else.
+        assert!(verify_from_outbox(&user_service, &outbox).await.success);
+        let mails_after_verify = outbox_message_count(&outbox);
+        assert!(
+            !register_account(&user_service, &late, &address)
+                .await
+                .success
+        );
+        assert!(account::find_active_account(pool, &late)
+            .await
+            .unwrap()
+            .is_none());
+        assert_eq!(outbox_message_count(&outbox), mails_after_verify);
+
+        cleanup(&service.state.scheduler, &task_id, &owner).await;
+        std::fs::remove_dir_all(&outbox).ok();
+    }
+
+    #[tokio::test]
+    async fn transfers_need_a_verified_sender_and_never_pay_the_system_account() {
+        let lock = grpc_db_lock();
+        let _lock_guard = lock.lock().await;
+        let (service, task_id, _other_token, owner) = match test_service().await {
+            Some(parts) => parts,
+            None => return,
+        };
+        let pool = service.state.scheduler.database().pool.clone();
+        let outbox = std::env::temp_dir().join(format!("hivemind-xfer-{}", uuid::Uuid::new_v4()));
+        let user_service = GrpcUserService::new(service.state.clone())
+            .with_account_settings(account_mail_settings(&outbox));
+        let alice = format!("alice-{}", uuid::Uuid::new_v4());
+        let bob = format!("bob-{}", uuid::Uuid::new_v4());
+        assert!(
+            register_account(&user_service, &alice, &format!("{alice}@example.com"))
+                .await
+                .success
+        );
+        assert!(verify_from_outbox(&user_service, &outbox).await.success);
+        assert!(
+            register_account(&user_service, &bob, &format!("{bob}@example.com"))
+                .await
+                .success
+        );
+
+        let alice_token = login_response(&user_service, &alice, "valid-test-password")
+            .await
+            .token;
+        let bob_token = login_response(&user_service, &bob, "valid-test-password")
+            .await
+            .token;
+
+        // An unverified account cannot send CPT.
+        let blocked = user_service
+            .transfer_cpt(Request::new(TransferCptRequest {
+                token: bob_token,
+                to_username: alice.clone(),
+                amount_cpt: 10,
+                idempotency_key: String::new(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(!blocked.success);
+        assert!(blocked.status_message.contains("Verify your email"));
+
+        // Nothing can be sent to the system account.
+        let to_system = user_service
+            .transfer_cpt(Request::new(TransferCptRequest {
+                token: alice_token.clone(),
+                to_username: "system".into(),
+                amount_cpt: 10,
+                idempotency_key: String::new(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(!to_system.success);
+        assert_eq!(system_pool_balance(&pool).await, 1_000_000_000 - 1000);
+
+        // A verified sender can pay another account.
+        let paid = user_service
+            .transfer_cpt(Request::new(TransferCptRequest {
+                token: alice_token,
+                to_username: bob.clone(),
+                amount_cpt: 100,
+                idempotency_key: String::new(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(paid.success, "{}", paid.status_message);
+        assert_eq!(
+            account::find_active_account(&pool, &alice)
+                .await
+                .unwrap()
+                .unwrap()
+                .balance,
+            900
+        );
+        assert_eq!(
+            account::find_active_account(&pool, &bob)
+                .await
+                .unwrap()
+                .unwrap()
+                .balance,
+            100
+        );
+
+        cleanup(&service.state.scheduler, &task_id, &owner).await;
+        std::fs::remove_dir_all(&outbox).ok();
+    }
+
+    #[tokio::test]
+    async fn an_inflight_password_change_cannot_overwrite_a_committed_reset() {
+        let lock = grpc_db_lock();
+        let _lock_guard = lock.lock().await;
+        let (service, task_id, _other_token, owner) = test_service()
+            .await
+            .expect("isolated test database required");
+        let user_service = Arc::new(GrpcUserService::new(service.state.clone()));
+        let pool = service.state.scheduler.database().pool.clone();
+        let username = format!("password-race-{}", uuid::Uuid::new_v4());
+        let old_hash = bcrypt::hash("old-password", 4).unwrap();
+        let user_id = account::create_unverified_user(
+            &pool,
+            &username,
+            &old_hash,
+            &format!("{username}@example.test"),
+        )
+        .await
+        .unwrap();
+        let login = login_response(&user_service, &username, "old-password").await;
+        assert!(login.success);
+
+        let mut reset = pool.begin().await.unwrap();
+        let reset_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *reset)
+            .await
+            .unwrap();
+        sqlx::query("SELECT id FROM users WHERE id = $1 FOR UPDATE")
+            .bind(user_id)
+            .execute(&mut *reset)
+            .await
+            .unwrap();
+        let changing = user_service.clone();
+        let change = tokio::spawn(async move {
+            changing
+                .change_password(Request::new(ChangePasswordRequest {
+                    token: login.token,
+                    current_password: "old-password".into(),
+                    new_password: "stale-change-password".into(),
+                }))
+                .await
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                let waiting: bool = sqlx::query_scalar(
+                    "SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE $1 = ANY(pg_blocking_pids(pid)))",
+                ).bind(reset_pid).fetch_one(&pool).await.unwrap();
+                if waiting { break; }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        }).await.expect("password change must reach its blocked update");
+        let new_hash = bcrypt::hash("reset-password", 4).unwrap();
+        sqlx::query(
+            "UPDATE users SET password_hash = $1, password_changed_at = NOW() WHERE id = $2",
+        )
+        .bind(&new_hash)
+        .bind(user_id)
+        .execute(&mut *reset)
+        .await
+        .unwrap();
+        hivemind_auth::session_store::end_account_sessions(&mut reset, user_id, None)
+            .await
+            .unwrap();
+        reset.commit().await.unwrap();
+        let result = change.await.unwrap();
+        assert!(result.is_err() || !result.unwrap().into_inner().success);
+        let stored: String = sqlx::query_scalar("SELECT password_hash FROM users WHERE id = $1")
+            .bind(user_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(stored, new_hash);
+        cleanup(&service.state.scheduler, &task_id, &owner).await;
+    }
+
+    #[tokio::test]
+    async fn password_reset_works_once_and_change_password_needs_the_current_password() {
+        let lock = grpc_db_lock();
+        let _lock_guard = lock.lock().await;
+        let (service, task_id, _other_token, owner) = match test_service().await {
+            Some(parts) => parts,
+            None => return,
+        };
+        let outbox = std::env::temp_dir().join(format!("hivemind-reset-{}", uuid::Uuid::new_v4()));
+        let user_service = GrpcUserService::new(service.state.clone())
+            .with_account_settings(account_mail_settings(&outbox));
+        let username = format!("reset-user-{}", uuid::Uuid::new_v4());
+        let email = format!("{username}@example.com");
+        assert!(
+            register_account(&user_service, &username, &email)
+                .await
+                .success
+        );
+        assert!(verify_from_outbox(&user_service, &outbox).await.success);
+
+        // An unknown address gets the same reply and no mail.
+        let mails_before = outbox_message_count(&outbox);
+        let unknown = user_service
+            .request_password_reset(Request::new(RequestPasswordResetRequest {
+                email: "nobody-here@example.com".into(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(unknown.success);
+        assert_eq!(outbox_message_count(&outbox), mails_before);
+
+        // A verified address gets a single-use reset link.
+        let known = user_service
+            .request_password_reset(Request::new(RequestPasswordResetRequest {
+                email: email.clone(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(known.success);
+        assert_eq!(outbox_message_count(&outbox), mails_before + 1);
+        let reset_token = token_from_outbox(&outbox, "/#/reset-password/");
+        let reset = user_service
+            .reset_password(Request::new(ResetPasswordRequest {
+                reset_token: reset_token.clone(),
+                new_password: "brand-new-password".into(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(reset.success, "{}", reset.status_message);
+        let reused = user_service
+            .reset_password(Request::new(ResetPasswordRequest {
+                reset_token,
+                new_password: "another-password".into(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(!reused.success);
+
+        assert!(
+            !login_response(&user_service, &username, "valid-test-password")
+                .await
+                .success
+        );
+        let login = login_response(&user_service, &username, "brand-new-password").await;
+        assert!(login.success);
+
+        // Changing the password needs the current one.
+        let wrong = user_service
+            .change_password(Request::new(ChangePasswordRequest {
+                token: login.token.clone(),
+                current_password: "wrong-current".into(),
+                new_password: "third-password-123".into(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(!wrong.success);
+        let changed = user_service
+            .change_password(Request::new(ChangePasswordRequest {
+                token: login.token,
+                current_password: "brand-new-password".into(),
+                new_password: "third-password-123".into(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(changed.success, "{}", changed.status_message);
+        assert!(
+            login_response(&user_service, &username, "third-password-123")
+                .await
+                .success
+        );
+
+        // The username reminder goes to the verified address.
+        let reminder = user_service
+            .request_username_reminder(Request::new(RequestUsernameReminderRequest {
+                email: email.clone(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(reminder.success);
+        let reminder_text = std::fs::read_dir(&outbox)
+            .unwrap()
+            .map(|entry| std::fs::read_to_string(entry.unwrap().path()).unwrap())
+            .any(|content| {
+                content.contains(&username) && content.contains("Your Hivemind username")
+            });
+        assert!(reminder_text);
+
+        cleanup(&service.state.scheduler, &task_id, &owner).await;
+        std::fs::remove_dir_all(&outbox).ok();
+    }
+
     #[tokio::test]
     async fn register_user_allows_non_admin_username_when_admin_is_configured() {
         // Given: a configured admin username and a distinct public username.
@@ -6618,6 +8210,7 @@ mod tests {
             .register_user(Request::new(RegisterUserRequest {
                 username: username.clone(),
                 password: "valid-test-password".into(),
+                email: format!("{username}@example.com"),
             }))
             .await
             .unwrap()
@@ -9407,6 +11000,13 @@ mod tests {
         .execute(&service.state.scheduler.database().pool)
         .await
         .unwrap();
+        // The sender must have a verified email before it can transfer CPT.
+        sqlx::query("UPDATE users SET email = $1, email_verified_at = NOW() WHERE username = $2")
+            .bind(format!("{from}@example.com"))
+            .bind(&from)
+            .execute(&service.state.scheduler.database().pool)
+            .await
+            .unwrap();
         let token = token_for(&service.state.auth, &from);
         let response = user_service
             .transfer_cpt(Request::new(TransferCptRequest {
@@ -9453,6 +11053,13 @@ mod tests {
         .execute(&service.state.scheduler.database().pool)
         .await
         .unwrap();
+        // The sender must have a verified email before it can transfer CPT.
+        sqlx::query("UPDATE users SET email = $1, email_verified_at = NOW() WHERE username = $2")
+            .bind(format!("{from}@example.com"))
+            .bind(&from)
+            .execute(&service.state.scheduler.database().pool)
+            .await
+            .unwrap();
         let token = token_for(&service.state.auth, &from);
         let response = user_service
             .transfer_cpt(Request::new(TransferCptRequest {

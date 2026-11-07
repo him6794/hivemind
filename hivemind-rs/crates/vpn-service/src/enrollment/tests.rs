@@ -1,5 +1,6 @@
 use super::*;
 use crate::headscale_client::HeadscaleClient;
+use hivemind_auth::jwt_service::JwtService;
 use hivemind_config::HivemindConfig;
 use hivemind_database::postgres::{create_isolated_test_pool, run_migrations, IsolatedTestPool};
 use hivemind_database::DatabaseManager;
@@ -221,6 +222,60 @@ async fn binding(service: &VpnService, client_id: &str) -> (Uuid, Uuid, Uuid, i6
     .fetch_one(&service.db.pool)
     .await
     .unwrap()
+}
+
+#[tokio::test]
+async fn owner_authentication_rejects_revoked_sessions_and_reset_legacy_tokens() {
+    let controller = Controller::start(vec![]).await;
+    let (service, fixture, owner_id, legacy_token) =
+        fixture("vpn_owner_session_revocation", &controller).await;
+    let sid = Uuid::new_v4().to_string();
+    let expiry = Utc::now() + chrono::Duration::hours(1);
+    sqlx::query("INSERT INTO account_sessions (id, username, expires_at) VALUES ($1, 'alice', $2)")
+        .bind(&sid)
+        .bind(expiry)
+        .execute(&fixture.pool)
+        .await
+        .unwrap();
+    let session_token = JwtService::new(&service.config.auth.jwt_secret, 24)
+        .encode_session_claims(
+            &Claims {
+                sub: "alice".into(),
+                user_id: owner_id.to_string(),
+                role: None,
+                task_id: None,
+                worker_id: None,
+                exp: expiry.timestamp() as usize,
+                iat: (Utc::now().timestamp() - 60) as usize,
+            },
+            &sid,
+        )
+        .unwrap();
+    assert!(service.authenticate_vpn_owner(&session_token).await.is_ok());
+    assert!(service.authenticate_vpn_owner(&legacy_token).await.is_ok());
+
+    sqlx::query("UPDATE account_sessions SET revoked_at = NOW() WHERE id = $1")
+        .bind(&sid)
+        .execute(&fixture.pool)
+        .await
+        .unwrap();
+    assert!(service
+        .authenticate_vpn_owner(&session_token)
+        .await
+        .is_err());
+    assert!(service
+        .issue_user_vpn_config_from_token(&session_token, "desktop")
+        .await
+        .is_err());
+
+    sqlx::query("UPDATE users SET password_changed_at = NOW() WHERE id = $1")
+        .bind(owner_id)
+        .execute(&fixture.pool)
+        .await
+        .unwrap();
+    assert!(service.authenticate_vpn_owner(&legacy_token).await.is_err());
+    assert!(controller.requests.lock().unwrap().is_empty());
+    fixture.cleanup().await.unwrap();
 }
 
 #[tokio::test]

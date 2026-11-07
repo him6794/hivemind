@@ -2,18 +2,21 @@ pub mod artifact_probe;
 pub mod artifact_read;
 pub mod enrollment;
 pub mod jwt_service;
+pub mod session_store;
 pub mod user_repository;
 pub mod worker_execution;
 
 use anyhow::Result;
 use hivemind_database::DatabaseManager;
 use jwt_service::JwtService;
+use session_store::SessionStore;
 use std::sync::Arc;
 use user_repository::UserRepository;
 
 pub struct AuthManager {
     jwt: Arc<JwtService>,
     users: Arc<UserRepository>,
+    sessions: Arc<SessionStore>,
 }
 
 impl Clone for AuthManager {
@@ -21,6 +24,7 @@ impl Clone for AuthManager {
         Self {
             jwt: self.jwt.clone(),
             users: self.users.clone(),
+            sessions: self.sessions.clone(),
         }
     }
 }
@@ -30,28 +34,99 @@ impl AuthManager {
         Self {
             jwt: Arc::new(JwtService::new(jwt_secret, token_expiry_hours)),
             users: Arc::new(UserRepository::new(db.pool.clone())),
+            sessions: Arc::new(SessionStore::new(db.pool.clone())),
         }
     }
 
     /// Authenticate username/password, return JWT token on success
     pub async fn authenticate(&self, username: &str, password: &str) -> Result<Option<String>> {
-        let user = match self.users.find_by_username(username).await? {
+        if username == hivemind_models::SYSTEM_ACCOUNT_USERNAME {
+            return Ok(None);
+        }
+        // The account row is locked (shared) from the password check until the session commits. A password
+        // change needs the row lock first, so it cannot end the sessions while a sign-in that checked the old
+        // password is still open. Either the change waits for this session, or the sign-in reads the new hash.
+        let mut tx = self.sessions.begin().await?;
+        let user = match self
+            .users
+            .find_active_for_sign_in(&mut tx, username)
+            .await?
+        {
             Some(u) => u,
-            None => return Ok(None),
+            None => {
+                tx.rollback().await?;
+                return Ok(None);
+            }
         };
 
         let valid = bcrypt::verify(password, &user.password_hash).unwrap_or(false);
         if !valid || !user.is_active {
+            tx.rollback().await?;
             return Ok(None);
         }
 
-        let token_response = self.jwt.generate_token(&user)?;
+        let session_id = uuid::Uuid::new_v4().to_string();
+        let token_response = self.jwt.generate_session_token(&user, &session_id)?;
+        self.sessions
+            .open(
+                &mut tx,
+                &session_id,
+                &user.username,
+                token_response.expires_at,
+            )
+            .await?;
+        tx.commit().await?;
         Ok(Some(token_response.token))
     }
 
-    /// Validate a JWT token and extract claims
+    /// Validate a JWT token and extract claims. This checks the signature and expiry only. A token that acts
+    /// for the user should go through `validate_session`, which also checks the sign-in session.
     pub fn validate_token(&self, token: &str) -> Result<hivemind_models::Claims> {
         self.jwt.validate(token)
+    }
+
+    /// Validate a token. A sign-in session must not have ended. A token with no session must have been issued
+    /// after the account's last password change.
+    pub async fn validate_session(&self, token: &str) -> Result<hivemind_models::Claims> {
+        let claims = self.jwt.validate(token)?;
+        match self.jwt.session_id(token)? {
+            Some(session_id) => {
+                if !self.sessions.is_active(&session_id, &claims.sub).await? {
+                    anyhow::bail!("session has ended");
+                }
+            }
+            None => {
+                if !self
+                    .sessions
+                    .password_unchanged_since(&claims.sub, claims.iat)
+                    .await?
+                {
+                    anyhow::bail!("password changed after this token was issued");
+                }
+            }
+        }
+        Ok(claims)
+    }
+
+    /// Ends the sign-in session a token belongs to. A token with no session, or one that is not valid, has
+    /// nothing to end, and that returns false.
+    pub async fn end_session(&self, token: &str) -> Result<bool> {
+        let Ok(claims) = self.jwt.validate(token) else {
+            return Ok(false);
+        };
+        match self.jwt.session_id(token)? {
+            Some(session_id) => self.sessions.end(&session_id, &claims.sub).await,
+            None => Ok(false),
+        }
+    }
+
+    /// The token for a refresh: the same claims and the same session, once the session has been checked.
+    pub async fn renew_token(&self, token: &str) -> Result<String> {
+        let claims = self.validate_session(token).await?;
+        match self.jwt.session_id(token)? {
+            Some(session_id) => self.jwt.encode_session_claims(&claims, &session_id),
+            None => self.jwt.encode_claims(&claims),
+        }
     }
 
     pub fn jwt_service(&self) -> &JwtService {
