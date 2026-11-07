@@ -143,8 +143,12 @@ impl TaskScheduler {
             .await
     }
 
-    pub async fn list_user_tasks(&self, owner: &str) -> Result<Vec<Task>> {
-        self.repo.find_by_owner(owner).await
+    pub async fn list_user_tasks(&self, owner: &str, task_ids: &[String]) -> Result<Vec<Task>> {
+        if task_ids.is_empty() {
+            self.repo.find_by_owner(owner).await
+        } else {
+            self.repo.find_owned_task_ids(owner, task_ids).await
+        }
     }
 
     pub async fn update_task_status(

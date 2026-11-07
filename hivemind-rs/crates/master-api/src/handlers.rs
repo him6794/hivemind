@@ -1641,9 +1641,23 @@ async fn create_task_from_submission(
 pub async fn list_tasks(
     State(state): State<AppState>,
     AuthUser { token, .. }: AuthUser,
+    Query(query): Query<HashMap<String, String>>,
 ) -> (StatusCode, Json<TaskListResponse>) {
+    let task_ids: Vec<String> = query
+        .get("task_ids")
+        .map(|ids| ids.split(',').map(str::to_owned).collect())
+        .unwrap_or_default();
+    if task_ids.len() > 100 || task_ids.iter().any(|id| !is_safe_task_id(id)) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(TaskListResponse {
+                success: false,
+                tasks: vec![],
+            }),
+        );
+    }
     let mut grpc = state.grpc_client.clone();
-    match grpc.get_all_user_tasks(&token).await {
+    match grpc.get_all_user_tasks(&token, task_ids).await {
         Ok(resp) => {
             let tasks: Vec<TaskInfo> = resp
                 .tasks

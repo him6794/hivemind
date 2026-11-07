@@ -220,7 +220,20 @@ hivemind-bin submit ./sum.hdsl \
   --max-cpt 1000
 ```
 
-實際支援的是 `--input <json>`，不是 `--input-file`。CLI 的密碼參數可能被本機程序檢視工具看見；不要在共享機器的命令列硬寫正式帳密，也不要把命令輸出、token 或私密 input 貼到公開紀錄。原生 Master／Worker UI 執行檔不是這個 submit CLI。
+`submit` 只接受 `--input <json>`，不接受 `--input-file`。多筆輸入請改用 `batch`：
+
+```bash
+hivemind-bin batch ./sum.hdsl \
+  --api http://127.0.0.1:8082 \
+  --username "$HIVEMIND_USER" \
+  --inputs ./inputs.jsonl \
+  --max-total-cpt 500 \
+  --out ./sum-results.csv
+```
+
+`inputs.jsonl` 每行一個 JSON 值，空行會被略過。`--max-total-cpt` 是必填的總預算上限：命令會先報價，若「任務數 × 每筆上限」超過它就直接拒絕，不會提交任何任務。每筆任務的上限預設為 100 CPT，且不得低於該任務的報價（報價只計算資源預留，不含程式執行的用量，所以上限不能設成報價）。可用 `--max-cpt-per-task` 調整；超過上限的任務會以 `budget_exhausted` 失敗，依目前的計費規則，未達 quorum 的任務不收費。提交速度預設為每分鐘 50 筆，低於 Master 的每分鐘提交上限（預設 60）；遇到 429 會等候視窗重置後再試。全部任務結束或超過 `--timeout-secs`（預設 3600）後，結果寫入 CSV，欄位為 `index,task_id,status,output,billed_cpt,message,input`。只有全部任務都 `COMPLETED` 時命令才以成功結束。
+
+密碼可以用 `HIVEMIND_PASSWORD` 環境變數提供，不必出現在命令列。CLI 的 `--password` 仍可能被本機程序檢視工具看見；不要在共享機器的命令列硬寫正式帳密，也不要把命令輸出、token 或私密 input 貼到公開紀錄。原生 Master／Worker UI 執行檔不是這個 CLI。
 
 ## 7. 限制與錯誤排查
 

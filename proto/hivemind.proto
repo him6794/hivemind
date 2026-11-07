@@ -241,6 +241,8 @@ message UploadTaskResponse {
 
 message GetAllUserTasksRequest {
     string token = 1;
+    // Empty returns the latest 100 tasks. Otherwise returns only these owned IDs (max 100).
+    repeated string task_ids = 2;
 }
 
 message GetAllUserTasksResponse {

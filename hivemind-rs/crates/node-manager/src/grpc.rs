@@ -2574,7 +2574,17 @@ impl MasterNodeService for GrpcMasterNodeService {
             .auth
             .validate_token(&req.token)
             .map_err(|_| Status::unauthenticated("Invalid token"))?;
-        match self.state.scheduler.list_user_tasks(&claims.sub).await {
+        if req.task_ids.len() > 100 || req.task_ids.iter().any(|id| !is_safe_task_id(id)) {
+            return Err(Status::invalid_argument(
+                "Provide at most 100 valid task IDs",
+            ));
+        }
+        match self
+            .state
+            .scheduler
+            .list_user_tasks(&claims.sub, &req.task_ids)
+            .await
+        {
             Ok(tasks) => {
                 let pool = &self.state.scheduler.database().pool;
                 let mut task_infos = Vec::with_capacity(tasks.len());
@@ -8842,6 +8852,7 @@ mod tests {
         let list = service
             .get_all_user_tasks(Request::new(GetAllUserTasksRequest {
                 token: owner_token.clone(),
+                task_ids: vec![],
             }))
             .await
             .unwrap()
@@ -10055,6 +10066,63 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn task_id_filter_finds_old_tasks_without_exposing_another_owner() {
+        let (service, oldest, other_token, owner) = test_service()
+            .await
+            .expect("isolated test database required");
+        let token = token_for(&service.state.auth, &owner);
+        for index in 0..101 {
+            service
+                .state
+                .scheduler
+                .create_task(&make_task(&format!("newer-{index}"), &owner))
+                .await
+                .unwrap();
+        }
+        sqlx::query("UPDATE tasks SET created_at = NOW() - INTERVAL '1 day', status = 'COMPLETED', output = '42', billed_amount = 7 WHERE task_id = $1")
+            .bind(&oldest).execute(&service.state.scheduler.database().pool).await.unwrap();
+        let recent = service
+            .get_all_user_tasks(Request::new(GetAllUserTasksRequest {
+                token: token.clone(),
+                task_ids: vec![],
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(recent.tasks.len(), 100);
+        assert!(!recent.tasks.iter().any(|task| task.task_id == oldest));
+        let filtered = service
+            .get_all_user_tasks(Request::new(GetAllUserTasksRequest {
+                token: token.clone(),
+                task_ids: vec![oldest.clone()],
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(filtered.tasks.len(), 1);
+        assert_eq!(filtered.tasks[0].output, "42");
+        assert_eq!(filtered.tasks[0].billed_amount, 7);
+        let denied = service
+            .get_all_user_tasks(Request::new(GetAllUserTasksRequest {
+                token: other_token,
+                task_ids: vec![oldest.clone()],
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(denied.tasks.is_empty());
+        let oversized = service
+            .get_all_user_tasks(Request::new(GetAllUserTasksRequest {
+                token,
+                task_ids: vec![oldest.clone(); 101],
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(oversized.code(), tonic::Code::InvalidArgument);
+        cleanup(&service.state.scheduler, &oldest, &owner).await;
+    }
+
+    #[tokio::test]
     async fn test_get_all_user_tasks_preserves_persisted_task_fields() {
         let lock = grpc_db_lock();
         let _guard = lock.lock().await;
@@ -10089,7 +10157,10 @@ mod tests {
         .unwrap();
 
         let response = service
-            .get_all_user_tasks(Request::new(GetAllUserTasksRequest { token: owner_token }))
+            .get_all_user_tasks(Request::new(GetAllUserTasksRequest {
+                token: owner_token,
+                task_ids: vec![],
+            }))
             .await
             .unwrap()
             .into_inner();

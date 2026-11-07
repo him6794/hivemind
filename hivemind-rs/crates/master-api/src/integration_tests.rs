@@ -134,6 +134,104 @@ fn reserve_loopback_addr() -> Option<SocketAddr> {
 }
 
 #[tokio::test]
+async fn task_list_http_filter_reaches_old_owned_tasks_and_rejects_invalid_ids() {
+    let mut fixture = nodepool_test_fixture()
+        .await
+        .expect("isolated test database required");
+    let mut client = fixture.take_client().unwrap();
+    let username = "http-task-owner";
+    let password = "integration-pass-example";
+    sqlx::query("INSERT INTO users (username, password_hash, balance) VALUES ($1, $2, 0)")
+        .bind(username)
+        .bind(bcrypt::hash(password, 4).unwrap())
+        .execute(&fixture.db.pool)
+        .await
+        .unwrap();
+    let login = client.login(username, password).await.unwrap();
+    assert!(login.success);
+    let token = login.token;
+    sqlx::query(
+        "INSERT INTO tasks (task_id, owner, status, output, billed_amount, created_at)
+         VALUES ('old-task', $1, 'COMPLETED', '42', 7, NOW() - INTERVAL '1 day'),
+                ('other-task', 'another-owner', 'COMPLETED', 'private', 9, NOW())",
+    )
+    .bind(username)
+    .execute(&fixture.db.pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO tasks (task_id, owner)
+         SELECT 'new-task-' || n, $1 FROM generate_series(1, 101) AS n",
+    )
+    .bind(username)
+    .execute(&fixture.db.pool)
+    .await
+    .unwrap();
+
+    let app = crate::routes::create_router(crate::handlers::AppState {
+        grpc_client: client,
+        config: fixture.api_config(),
+        task_submit_limiter: Arc::new(tokio::sync::Mutex::new(
+            crate::handlers::TaskSubmitRateLimiter::new(),
+        )),
+    });
+    for (uri, expected_count) in [
+        ("/api/tasks", 100),
+        (
+            "/api/tasks?task_ids=old-task%2Cother-task%2Cmissing-task",
+            1,
+        ),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(uri)
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["success"], true);
+        let tasks = value["tasks"].as_array().unwrap();
+        assert_eq!(tasks.len(), expected_count);
+        assert!(tasks.iter().all(|task| task["owner"] == username));
+        if expected_count == 1 {
+            assert_eq!(tasks[0]["task_id"], "old-task");
+            assert_eq!(tasks[0]["output"], "42");
+            assert_eq!(tasks[0]["billed_amount"], 7);
+        } else {
+            assert!(!tasks.iter().any(|task| task["task_id"] == "old-task"));
+        }
+    }
+    for ids in [
+        "".to_owned(),
+        "..%2Fsecret".to_owned(),
+        vec!["old-task"; 101].join(","),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/tasks?task_ids={ids}"))
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
 async fn grpc_client_talks_to_nodepool_test_fixture_for_provider_flow() {
     let mut fixture = match nodepool_test_fixture().await {
         Some(fixture) => fixture,

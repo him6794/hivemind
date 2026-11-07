@@ -6252,6 +6252,21 @@ impl TaskRepository {
         .map_err(Into::into)
     }
 
+    pub async fn find_owned_task_ids(&self, owner: &str, task_ids: &[String]) -> Result<Vec<Task>> {
+        anyhow::ensure!(
+            task_ids.len() <= 100,
+            "at most 100 task IDs may be requested"
+        );
+        sqlx::query_as::<_, Task>(
+            "SELECT * FROM tasks WHERE owner = $1 AND task_id = ANY($2) ORDER BY created_at DESC LIMIT 100",
+        )
+        .bind(owner)
+        .bind(task_ids)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(Into::into)
+    }
+
     pub async fn find_pending(&self) -> Result<Vec<Task>> {
         // Unstarted uploads must not wait forever after their pinned bytes expire.
         // In-flight replicas and held balances remain on the normal stop/settlement path.

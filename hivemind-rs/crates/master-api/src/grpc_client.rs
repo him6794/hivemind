@@ -331,12 +331,13 @@ impl GrpcClient {
     pub async fn get_all_user_tasks(
         &mut self,
         token: &str,
+        task_ids: Vec<String>,
     ) -> Result<GetAllUserTasksResponse, tonic::Status> {
         let token = token.to_string();
         self.with_clients(|mut clients| async move {
             clients
                 .master
-                .get_all_user_tasks(Request::new(GetAllUserTasksRequest { token }))
+                .get_all_user_tasks(Request::new(GetAllUserTasksRequest { token, task_ids }))
                 .await
                 .map(|r| r.into_inner())
         })

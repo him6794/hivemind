@@ -160,6 +160,9 @@ pub async fn run_from_cli(args: Vec<String>) -> Result<()> {
     if let cli::CliCommand::Result(result) = command {
         return cli::run_result(result).await;
     }
+    if let cli::CliCommand::Batch(batch) = command {
+        return cli::run_batch(batch).await;
+    }
     let service = match command {
         cli::CliCommand::Service(service) => service,
         _ => unreachable!(),
