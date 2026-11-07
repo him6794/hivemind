@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { CircleHelp, CornerDownLeft, Download, FileText, Home, Laptop, LogIn, Receipt, ScrollText, Shield, User, UserPlus } from "lucide-react";
+import { CircleHelp, CornerDownLeft, Download, FileCheck, FileText, Home, Laptop, Lock, LockKeyhole, LogIn, MailCheck, KeyRound, Receipt, ScrollText, Shield, User, UserPlus, UserSearch } from "lucide-react";
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from "@/components/ui/dialog";
 import { useAppStore, type Route } from "@/store/app-store";
 import { useI18n } from "@/store/i18n-store";
@@ -14,6 +14,10 @@ const routeIcons: Record<Route, React.ElementType> = {
   login: LogIn,
   register: UserPlus,
   account: User,
+  "forgot-password": KeyRound,
+  "forgot-username": UserSearch,
+  "verify-email": MailCheck,
+  "reset-password": LockKeyhole,
   download: Download,
   pricing: Receipt,
   share: Laptop,
@@ -21,6 +25,8 @@ const routeIcons: Record<Route, React.ElementType> = {
   faq: CircleHelp,
   docs: FileText,
   terms: ScrollText,
+  "terms-of-service": FileCheck,
+  privacy: Lock,
 };
 
 export function CommandPalette() {

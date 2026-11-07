@@ -48,5 +48,16 @@ export function createRateLimiter({ limit, windowMs, now = () => Date.now(), max
       }
       return { allowed: true, retryAfterSeconds: 0 };
     },
+    /** Gives back the newest attempt counted for `key`, for an attempt that should not count against the caller. */
+    release(key) {
+      const cutoff = now() - windowMs;
+      const recent = (hits.get(key) ?? []).filter((time) => time > cutoff);
+      recent.pop();
+      if (recent.length > 0) {
+        hits.set(key, recent);
+      } else {
+        hits.delete(key);
+      }
+    },
   };
 }

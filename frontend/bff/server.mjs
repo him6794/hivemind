@@ -1,9 +1,9 @@
 // Process entry for the website backend. Run it beside Nodepool; the reverse proxy
-// in front of it forwards /api/register, /api/login and /api/balance here, and
+// in front of it forwards the account API (/api/*, see ACCOUNT_API_PATHS) here, and
 // /health is for host checks.
 import http from 'node:http';
 import { timingSafeEqual } from 'node:crypto';
-import { handleAccountRequest } from './account-api.mjs';
+import { ACCOUNT_API_PATHS, handleAccountRequest } from './account-api.mjs';
 
 const HOST = process.env.HOST ?? '127.0.0.1';
 const PORT = Number(process.env.PORT ?? 3100);
@@ -23,7 +23,7 @@ function fromPagesFunction(headers) {
   return given.length === PROXY_SECRET_BYTES.length && timingSafeEqual(given, PROXY_SECRET_BYTES);
 }
 
-const ACCOUNT_PATHS = new Set(['/api/register', '/api/login', '/api/balance']);
+const ACCOUNT_PATHS = new Set(ACCOUNT_API_PATHS);
 // The account routes accept far less than this (MAX_BODY_BYTES in account-api.mjs).
 // The cap keeps a large upload from being buffered before any route checks it.
 const MAX_BUFFERED_BYTES = 64 * 1024;

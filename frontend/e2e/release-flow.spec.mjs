@@ -17,6 +17,7 @@ const taskInputJson = 'null';
 const runSuffix = Date.now().toString(36);
 const username = `qa${runSuffix}`.slice(0, 28);
 const password = `HiveQA!${runSuffix}`;
+const email = `${username}@example.com`;
 const completedTaskId = `qa-complete-${runSuffix}`;
 const cancelledTaskId = `qa-cancel-${runSuffix}`;
 const evidenceLogPath = path.join(evidenceDirectory, 'release-flow-actions.txt');
@@ -31,8 +32,14 @@ function recordEvidence(message) {
 
 async function useEnglish(page) {
   await page.goto(`${officialSiteUrl}/#/`);
-  await page.getByRole('button', { name: 'Switch language', exact: true }).click();
+  // The site starts in Chinese, so the toggle is named in either language.
+  await page.getByRole('button', { name: /^(Switch language|切換語言)$/ }).click();
   await page.getByRole('menuitemradio', { name: 'English', exact: true }).click();
+}
+
+// The verification widget writes its token into the form once the check passes. A form submitted before that is refused.
+async function waitForCaptcha(page) {
+  await page.waitForFunction(() => (document.querySelector('input[name="cf-turnstile-response"]')?.value ?? '').length > 0, null, { timeout: 30_000 });
 }
 
 test.describe.serial('release browser flow across the official site, Worker console, and Master console', () => {
@@ -57,14 +64,18 @@ test.describe.serial('release browser flow across the official site, Worker cons
     await page.goto(`${officialSiteUrl}/#/register`);
     await expect(page.getByRole('heading', {
       level: 1,
-      name: 'Create a Hivemind account and get started.',
+      name: 'Create your account',
       exact: true,
     })).toBeVisible();
 
-    await page.getByLabel('Username').fill(username);
+    // Sign-up runs in steps: email, username, password, then a review that sends the account.
+    await page.getByLabel('Email', { exact: true }).fill(email);
+    await page.getByRole('button', { name: 'Next', exact: true }).click();
+    await page.getByLabel('Username', { exact: true }).fill(username);
+    await page.getByRole('button', { name: 'Next', exact: true }).click();
     await page.getByLabel('Password', { exact: true }).fill(password);
-    await page.getByLabel('Confirm password').fill(`${password}-mismatch`);
-    await page.getByRole('button', { name: 'Create account' }).click();
+    await page.getByLabel('Confirm password', { exact: true }).fill(`${password}-mismatch`);
+    await page.getByRole('button', { name: 'Next', exact: true }).click();
     await expect(page.getByText('Passwords do not match.', { exact: true })).toBeVisible();
     await page.screenshot({
       path: evidencePath('site-registration-validation.png'),
@@ -72,13 +83,25 @@ test.describe.serial('release browser flow across the official site, Worker cons
     });
     recordEvidence('PASS official site displayed controlled mismatched-password validation.');
 
-    await page.getByLabel('Confirm password').fill(password);
-    await page.getByRole('button', { name: 'Create account' }).click();
+    await page.getByLabel('Confirm password', { exact: true }).fill(password);
+    await page.getByRole('button', { name: 'Next', exact: true }).click();
+    await expect(page.getByRole('heading', { level: 1, name: 'Check your details', exact: true })).toBeVisible();
+    await waitForCaptcha(page);
+    await page.getByRole('button', { name: 'Create account', exact: true }).click();
+    // A new account is not signed in. The verification email comes first, and the welcome grant follows verification.
+    await expect(page.getByRole('heading', { level: 1, name: 'Check your email to verify the account', exact: true })).toBeVisible();
+    await expect(page.getByText(`We sent a verification email to ${email}.`, { exact: true })).toBeVisible();
+    recordEvidence('PASS official site asked the new account to verify its email before sign-in.');
+
+    await page.goto(`${officialSiteUrl}/#/login`);
+    await page.getByLabel('Username', { exact: true }).fill(username);
+    await page.getByLabel('Password', { exact: true }).fill(password);
+    await waitForCaptcha(page);
+    await page.getByRole('button', { name: 'Sign in', exact: true }).click();
     await expect(page).toHaveURL(/#\/account$/);
     await expect(page.getByRole('heading', { level: 1, name: 'Account Center', exact: true })).toBeVisible();
     await expect(page.getByText(username, { exact: true })).toBeVisible();
     await expect(page.getByText('CPT balance', { exact: true })).toBeVisible();
-    await expect(page.getByRole('button', { name: 'Open docs', exact: true })).toBeVisible();
     await expect(page.getByText(/^\d+\.\d{2}$/)).toBeVisible();
 
     const sensitiveStorageKeys = await page.evaluate(() => (
@@ -89,7 +112,7 @@ test.describe.serial('release browser flow across the official site, Worker cons
       path: evidencePath('site-account.png'),
       fullPage: true,
     });
-    recordEvidence('PASS official site registered the account, loaded balance, and kept bearer auth out of localStorage.');
+    recordEvidence('PASS official site signed the new account in, loaded balance, and kept the session token out of localStorage.');
 
     await page.evaluate(() => {
       window.localStorage.setItem(
@@ -97,17 +120,20 @@ test.describe.serial('release browser flow across the official site, Worker cons
         JSON.stringify({ state: { token: 'legacy-bearer-token' } }),
       );
     });
-    await page.getByRole('button', { name: 'Sign out', exact: true }).click();
+    // The navigation bar has a sign-out button too, so the one in the page body is named.
+    await page.getByRole('main').getByRole('button', { name: 'Sign out', exact: true }).click();
     await expect(page).toHaveURL(/#\/$/);
     await expect.poll(() => page.evaluate(() => window.localStorage.getItem('hivemind-site-auth'))).toBeNull();
     await page.goto(`${officialSiteUrl}/#/login`);
-    await page.getByLabel('Username').fill(username);
-    await page.getByLabel('Password').fill(`${password}-wrong`);
-    await page.getByRole('button', { name: 'Sign in' }).click();
-    await expect(page.getByText('Invalid credentials', { exact: true })).toBeVisible();
+    await page.getByLabel('Username', { exact: true }).fill(username);
+    await page.getByLabel('Password', { exact: true }).fill(`${password}-wrong`);
+    await waitForCaptcha(page);
+    await page.getByRole('button', { name: 'Sign in', exact: true }).click();
+    await expect(page.getByText('The username or password is incorrect.', { exact: true })).toBeVisible();
 
-    await page.getByLabel('Password').fill(password);
-    await page.getByRole('button', { name: 'Sign in' }).click();
+    await page.getByLabel('Password', { exact: true }).fill(password);
+    await waitForCaptcha(page);
+    await page.getByRole('button', { name: 'Sign in', exact: true }).click();
     await expect(page).toHaveURL(/#\/account$/);
     await expect(page.getByText(username, { exact: true })).toBeVisible();
     recordEvidence('PASS official site rejected bad credentials and accepted the correct login.');

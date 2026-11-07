@@ -47,7 +47,25 @@ test('site definition exposes only official website and account-center routes', 
   assert.equal(site.brand.name, 'Hivemind');
   assert.deepEqual(
     site.routes.map((route) => route.id),
-    ['home', 'login', 'register', 'account', 'pricing', 'share', 'download', 'security', 'faq', 'docs', 'terms']
+    [
+      'home',
+      'login',
+      'register',
+      'account',
+      'forgot-password',
+      'forgot-username',
+      'verify-email',
+      'reset-password',
+      'pricing',
+      'share',
+      'download',
+      'security',
+      'faq',
+      'docs',
+      'terms',
+      'terms-of-service',
+      'privacy',
+    ]
   );
   // The point of pinning the route list: the official site is a product and
   // account surface, so an operations console must never appear in it.
@@ -478,14 +496,17 @@ test('download page takes its links only from the release metadata', () => {
   assert.doesNotMatch(page, /https?:\/\//, 'the page must not hard-code a download address');
 });
 
-test('website backend limits attempts, bounds request bodies, and keeps registration errors generic', () => {
+test('website backend limits attempts, bounds request bodies, and never returns account service text', () => {
   const route = fs.readFileSync(new URL('./bff/account-api.mjs', import.meta.url), 'utf8');
 
   assert.match(route, /createRateLimiter/);
   assert.match(route, /readJsonObject\(request, MAX_BODY_BYTES\)/);
   assert.match(route, /rate_limited/);
   assert.match(route, /registration_failed/);
-  assert.doesNotMatch(route, /already exists/i, 'the duplicate-username message must not reach the browser');
+  // A duplicate username or address gets the site's own code. The account service's text is matched, never returned.
+  assert.match(route, /'username_taken'/);
+  assert.match(route, /'email_in_use'/);
+  assert.doesNotMatch(route, /(message|status_message):\s*response\.status_message/, 'the account service text must not be returned');
 });
 
 test('security headers and a non-root container user are configured', () => {
@@ -634,6 +655,93 @@ test('documentation pages follow the shared structure in both locales', () => {
   for (const id of exampleIds) {
     assert.ok(published.has(id), `example "${id}" must appear on a documentation page`);
   }
+});
+
+// Email verification, password reset, and the account forms are the account-center surface.
+// Each piece is checked where it is defined, so a route cannot be added to one place only.
+test('every account route is registered in the store, the page switch, and the command palette', () => {
+  const accountRoutes = ['forgot-password', 'forgot-username', 'verify-email', 'reset-password'];
+  const storeSource = fs.readFileSync(new URL('./src/store/app-store.ts', import.meta.url), 'utf8');
+  const pageSource = fs.readFileSync(new URL('./src/app/page.tsx', import.meta.url), 'utf8');
+  const paletteSource = fs.readFileSync(new URL('./src/components/site/command-palette.tsx', import.meta.url), 'utf8');
+
+  for (const id of accountRoutes) {
+    assert.match(storeSource, new RegExp(`\\| "${id}"`), `the Route union must include "${id}"`);
+    assert.match(pageSource, new RegExp(`case "${id}":`), `page.tsx must render "${id}"`);
+    assert.match(paletteSource, new RegExp(`"${id}":\\s*\\w+`), `the command palette needs an icon for "${id}"`);
+  }
+});
+
+test('the browser calls only account paths that the website backend serves', async () => {
+  const { ACCOUNT_API_PATHS } = await import('./bff/account-api.mjs');
+  const client = fs.readFileSync(new URL('./src/lib/hivemind-api.ts', import.meta.url), 'utf8');
+  const called = new Set([...client.matchAll(/"(\/api\/[a-z-]+)"/g)].map((match) => match[1]));
+
+  assert.ok(called.size >= 11, 'the browser client should call the account API');
+  for (const path of called) {
+    assert.ok(ACCOUNT_API_PATHS.includes(path), `${path} must be served by the website backend`);
+  }
+});
+
+test('the website backend verifies Turnstile itself and fails closed without a secret', () => {
+  const account = fs.readFileSync(new URL('./bff/account-api.mjs', import.meta.url), 'utf8');
+  const verifier = fs.readFileSync(new URL('./bff/turnstile.mjs', import.meta.url), 'utf8');
+
+  assert.match(verifier, /https:\/\/challenges\.cloudflare\.com\/turnstile\/v0\/siteverify/);
+  assert.match(account, /TURNSTILE_SECRET_KEY/);
+  assert.match(account, /captcha_not_configured/);
+  assert.match(account, /captcha_failed/);
+  assert.doesNotMatch(account, /NEXT_PUBLIC_/, 'the website backend must not read browser-side settings');
+});
+
+test('registration collects an email behind Turnstile and does not claim the welcome grant', () => {
+  const registerSource = fs.readFileSync(new URL('./src/components/pages/register-page.tsx', import.meta.url), 'utf8');
+
+  assert.match(registerSource, /htmlFor="register-email"/);
+  assert.match(registerSource, /TurnstileWidget/);
+  assert.match(registerSource, /Check your email to verify the account/);
+  assert.doesNotMatch(registerSource, /1000 CPT/);
+});
+
+test('the account page offers verification, transfer, and password change through the account API', () => {
+  const formsSource = fs.readFileSync(new URL('./src/components/pages/account-forms.tsx', import.meta.url), 'utf8');
+  const pageSource = fs.readFileSync(new URL('./src/components/pages/account-page.tsx', import.meta.url), 'utf8');
+
+  assert.match(pageSource, /EmailVerificationForm/);
+  assert.match(pageSource, /TransferForm/);
+  assert.match(pageSource, /ChangePasswordForm/);
+  assert.match(formsSource, /resendVerification\(/);
+  assert.match(formsSource, /transferCpt\(/);
+  assert.match(formsSource, /changePassword\(/);
+  // One key per transfer, reused on retry, so a repeated request cannot send CPT twice.
+  assert.match(formsSource, /newIdempotencyKey\(\)/);
+});
+
+test('login needs Turnstile too, and the website backend checks it before the sign-in limits', () => {
+  const loginSource = fs.readFileSync(new URL('./src/components/pages/login-page.tsx', import.meta.url), 'utf8');
+  assert.match(loginSource, /TurnstileWidget/);
+  assert.match(loginSource, /captcha_required/);
+  const account = fs.readFileSync(new URL('./bff/account-api.mjs', import.meta.url), 'utf8');
+  const postLogin = account.match(/async function postLogin\(request, ctx\) \{[\s\S]*?\n\}/)?.[0] ?? '';
+  assert.match(postLogin, /verifyHuman/);
+  assert.ok(postLogin.indexOf('verifyHuman') < postLogin.indexOf('login(ctx'));
+});
+
+test('the site loads no third-party script other than Turnstile, and no analytics', () => {
+  const layoutSource = fs.readFileSync(new URL('./src/app/layout.tsx', import.meta.url), 'utf8');
+  const policySource = fs.readFileSync(new URL('./src/lib/turnstile-policy.mjs', import.meta.url), 'utf8');
+
+  assert.doesNotMatch(layoutSource, /<script\b/i);
+  assert.match(policySource, /challenges\.cloudflare\.com\/turnstile\/v0\/api\.js/);
+});
+
+test('the local API rewrite is gated to the development server and the export stays static', () => {
+  const config = fs.readFileSync(new URL('./next.config.ts', import.meta.url), 'utf8');
+
+  assert.match(config, /output: "export"/);
+  assert.match(config, /PHASE_DEVELOPMENT_SERVER/);
+  assert.match(config, /HIVEMIND_LOCAL_API/);
+  assert.match(config, /http:\/\/127\.0\.0\.1:3100/);
 });
 
 // The repository templates in templates/hcode are the programs the CLI users

@@ -48,6 +48,24 @@ test('bounds stored keys by dropping the oldest entries under a flood of distinc
   assert.equal(limiter.check('a').allowed, true);
 });
 
+test('release gives back only the newest attempt for a key', () => {
+  const clock = manualClock(0);
+  const limiter = createRateLimiter({ limit: 2, windowMs: 10_000, now: clock.now });
+
+  assert.equal(limiter.check('a').allowed, true);
+  clock.advance(1_000);
+  assert.equal(limiter.check('a').allowed, true);
+  assert.equal(limiter.check('b').allowed, true);
+
+  limiter.release('a');
+  // One attempt of 'a' is left, so one more is allowed and then the limit holds again.
+  assert.equal(limiter.check('a').allowed, true);
+  assert.equal(limiter.check('a').allowed, false);
+  assert.equal(limiter.check('b').allowed, true);
+  // Releasing a key with no attempts is harmless.
+  assert.doesNotThrow(() => limiter.release('never-seen'));
+});
+
 test('rejects invalid configuration', () => {
   assert.throws(() => createRateLimiter({ limit: 0, windowMs: 1_000 }), RangeError);
   assert.throws(() => createRateLimiter({ limit: 1, windowMs: 0 }), RangeError);

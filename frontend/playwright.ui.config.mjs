@@ -43,7 +43,7 @@ export default defineConfig({
     },
     {
       role: 'website',
-      command: 'node node_modules/next/dist/bin/next start --hostname 127.0.0.1 --port 4175',
+      command: 'node scripts/serve-static-export.mjs --directory out --host 127.0.0.1 --port 4175',
       cwd: directory,
       url: 'http://127.0.0.1:4175',
       reuseExistingServer: true,
