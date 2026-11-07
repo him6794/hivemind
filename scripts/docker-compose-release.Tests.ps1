@@ -370,6 +370,15 @@ try {
     }
 
     $resolvedCompose = (($composeResult.Output -join "`n") | ConvertFrom-Json)
+    foreach ($service in $resolvedCompose.services.PSObject.Properties) {
+        if ($null -eq $service.Value.build) { continue }
+        $dockerfile = $service.Value.build.dockerfile
+        if ([string]::IsNullOrWhiteSpace($dockerfile)) { $dockerfile = "Dockerfile" }
+        $buildFile = Join-Path $service.Value.build.context $dockerfile
+        if (!(Test-Path -LiteralPath $buildFile -PathType Leaf)) {
+            throw "Compose service '$($service.Name)' references a missing Dockerfile: $buildFile."
+        }
+    }
     if ($resolvedCompose.services.worker.environment.WORKER_NODEPOOL_TOKEN -ne "") {
         throw "Resolved worker configuration must carry an empty WORKER_NODEPOOL_TOKEN when none is preprovisioned."
     }

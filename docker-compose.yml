@@ -230,11 +230,12 @@ services:
       dockerfile: frontend/Dockerfile
     restart: unless-stopped
     environment:
-      WEBSITE_NODEPOOL_GRPC_ADDR: ${WEBSITE_NODEPOOL_GRPC_ADDR:-nodepool:50051}
+      # Account calls (/api/*) go to the website backend when both values are set. Without them the
+      # site answers those calls with 503, as the Cloudflare Pages function does.
+      API_ORIGIN: ${WEBSITE_API_ORIGIN:-}
+      PROXY_SHARED_SECRET: ${WEBSITE_PROXY_SHARED_SECRET:-}
     ports:
       - "${SITE_HOST_PORT:-8080}:3000"
-    depends_on:
-      - nodepool
     networks:
       - hivemind-network
 
