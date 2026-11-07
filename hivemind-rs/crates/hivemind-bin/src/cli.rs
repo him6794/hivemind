@@ -1404,6 +1404,32 @@ mod tests {
     }
 
     #[test]
+    fn compose_passes_the_signing_public_key_to_nodepool_and_worker() {
+        let compose = include_str!("../../../../docker-compose.yml");
+        let nodepool = compose
+            .split("  nodepool:")
+            .nth(1)
+            .unwrap()
+            .split("\n  master:")
+            .next()
+            .unwrap();
+        assert!(nodepool
+            .contains("WORKER_EXECUTION_PRIVATE_KEY_PEM: ${WORKER_EXECUTION_PRIVATE_KEY_PEM:?"));
+        assert!(nodepool
+            .contains("WORKER_EXECUTION_PUBLIC_KEY_PEM: ${WORKER_EXECUTION_PUBLIC_KEY_PEM:?"));
+        let worker = compose
+            .split("  worker:")
+            .nth(1)
+            .unwrap()
+            .split("\n  master-ui:")
+            .next()
+            .unwrap();
+        assert!(
+            worker.contains("WORKER_EXECUTION_PUBLIC_KEY_PEM: ${WORKER_EXECUTION_PUBLIC_KEY_PEM:?")
+        );
+    }
+
+    #[test]
     fn submit_usage_documents_inline_input_and_rejects_input_file() {
         let args = vec!["hivemind".to_string(), "submit".to_string()];
         let usage = parse_cli_args(&args)

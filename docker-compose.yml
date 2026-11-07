@@ -52,6 +52,7 @@ services:
       REDIS_URL: redis://redis:6379
       JWT_SECRET: ${JWT_SECRET:?JWT_SECRET must be set to a non-default value}
       WORKER_EXECUTION_PRIVATE_KEY_PEM: ${WORKER_EXECUTION_PRIVATE_KEY_PEM:?WORKER_EXECUTION_PRIVATE_KEY_PEM must be set for nodepool execution-token signing}
+      WORKER_EXECUTION_PUBLIC_KEY_PEM: ${WORKER_EXECUTION_PUBLIC_KEY_PEM:?WORKER_EXECUTION_PUBLIC_KEY_PEM must match the nodepool signing key}
       NODEPOOL_GRPC_ADDR: 0.0.0.0:50051
       # Account mail. The default keeps mail in local files. Set MAIL_TRANSPORT=resend with
       # RESEND_API_KEY and MAIL_FROM (in the shell or .env) to send through Resend.
