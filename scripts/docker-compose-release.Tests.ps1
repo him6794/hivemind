@@ -291,6 +291,7 @@ $composeEnvironmentNames = @(
     "WORKER_EXECUTION_PRIVATE_KEY_PEM",
     "WORKER_EXECUTION_PUBLIC_KEY_PEM",
     "WORKER_NODEPOOL_TOKEN",
+    "NEXT_PUBLIC_TURNSTILE_SITE_KEY",
     # Cleared so the assertions below read the compose defaults rather than
     # whatever the invoking shell happens to export.
     "HIVEMIND_ADMIN_USERS"
@@ -337,6 +338,7 @@ $requiredComposeEnvironment = @{
     JWT_SECRET = "compose-test-jwt-secret-with-at-least-32-bytes"
     WORKER_EXECUTION_PRIVATE_KEY_PEM = "compose-test-private-key"
     WORKER_EXECUTION_PUBLIC_KEY_PEM = "compose-test-public-key"
+    NEXT_PUBLIC_TURNSTILE_SITE_KEY = "compose-test-public-turnstile-key"
 }
 
 try {
@@ -377,6 +379,18 @@ try {
         $buildFile = Join-Path $service.Value.build.context $dockerfile
         if (!(Test-Path -LiteralPath $buildFile -PathType Leaf)) {
             throw "Compose service '$($service.Name)' references a missing Dockerfile: $buildFile."
+        }
+    }
+    if ($resolvedCompose.services.site.build.args.NEXT_PUBLIC_TURNSTILE_SITE_KEY -ne $requiredComposeEnvironment.NEXT_PUBLIC_TURNSTILE_SITE_KEY) {
+        throw "The official site build must receive NEXT_PUBLIC_TURNSTILE_SITE_KEY before static export."
+    }
+    $siteDockerfile = Get-Content -LiteralPath (Join-Path $repoRoot "frontend/Dockerfile") -Raw
+    foreach ($requiredBuildSetting in @(
+        'ARG NEXT_PUBLIC_TURNSTILE_SITE_KEY',
+        'ENV NEXT_PUBLIC_TURNSTILE_SITE_KEY=${NEXT_PUBLIC_TURNSTILE_SITE_KEY}'
+    )) {
+        if (!$siteDockerfile.Contains($requiredBuildSetting)) {
+            throw "The official site Dockerfile must configure the public Turnstile key at build time: $requiredBuildSetting."
         }
     }
     if ($resolvedCompose.services.worker.environment.WORKER_NODEPOOL_TOKEN -ne "") {
