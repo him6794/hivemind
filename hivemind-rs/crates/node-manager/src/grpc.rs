@@ -1146,6 +1146,16 @@ impl UserService for GrpcUserService {
                 "Account credentials changed; sign in again",
             ));
         }
+        // Retire recovery grants under the account lock, alongside the new password.
+        sqlx::query(
+            "UPDATE account_tokens SET used_at = NOW()
+             WHERE user_id = $1 AND purpose = $2 AND used_at IS NULL",
+        )
+        .bind(account.id)
+        .bind(account::PURPOSE_PASSWORD_RESET)
+        .execute(&mut *tx)
+        .await
+        .map_err(internal_status)?;
         hivemind_auth::session_store::end_account_sessions(&mut tx, account.id, keep.as_deref())
             .await
             .map_err(internal_status)?;
@@ -8071,6 +8081,180 @@ mod tests {
             .unwrap();
         assert_eq!(stored, new_hash);
         cleanup(&service.state.scheduler, &task_id, &owner).await;
+    }
+
+    #[tokio::test]
+    async fn changing_password_revokes_old_reset_links_but_allows_new_ones() {
+        let lock = grpc_db_lock();
+        let _lock_guard = lock.lock().await;
+        let (service, task_id, _other_token, owner) = test_service()
+            .await
+            .expect("isolated test database required");
+        let pool = service.state.scheduler.database().pool.clone();
+        let outbox = std::env::temp_dir().join(format!(
+            "hivemind-reset-revocation-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let user_service = GrpcUserService::new(service.state.clone())
+            .with_account_settings(account_mail_settings(&outbox));
+        let username = format!("reset-revocation-{}", uuid::Uuid::new_v4());
+        let email = format!("{username}@example.test");
+        assert!(
+            register_account(&user_service, &username, &email)
+                .await
+                .success
+        );
+        assert!(verify_from_outbox(&user_service, &outbox).await.success);
+        let user_id = account::find_active_account(&pool, &username)
+            .await
+            .unwrap()
+            .unwrap()
+            .id;
+        let login = login_response(&user_service, &username, "valid-test-password").await;
+        assert!(login.success);
+        assert!(
+            user_service
+                .request_password_reset(Request::new(RequestPasswordResetRequest { email }))
+                .await
+                .unwrap()
+                .into_inner()
+                .success
+        );
+        let old_token = token_from_outbox(&outbox, "/#/reset-password/");
+
+        let wrong = user_service
+            .change_password(Request::new(ChangePasswordRequest {
+                token: login.token.clone(),
+                current_password: "wrong-password".into(),
+                new_password: "changed-test-password".into(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(!wrong.success);
+        let pending: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM account_tokens WHERE user_id = $1 AND purpose = $2 AND used_at IS NULL",
+        ).bind(user_id).bind(account::PURPOSE_PASSWORD_RESET).fetch_one(&pool).await.unwrap();
+        assert_eq!(
+            pending, 1,
+            "a failed password change must not revoke recovery links"
+        );
+
+        // Another account's reset and email-verification grants must stay untouched.
+        let other_name = format!("other-reset-{}", uuid::Uuid::new_v4());
+        let other_id = account::create_unverified_user(
+            &pool,
+            &other_name,
+            &bcrypt::hash("other-password", 4).unwrap(),
+            &format!("{other_name}@example.test"),
+        )
+        .await
+        .unwrap();
+        let other_reset = account::issue_token(
+            &pool,
+            other_id,
+            account::PURPOSE_PASSWORD_RESET,
+            account::password_reset_ttl(),
+        )
+        .await
+        .unwrap();
+        let other_verification = account::issue_token(
+            &pool,
+            other_id,
+            account::PURPOSE_EMAIL_VERIFICATION,
+            account::email_verification_ttl(),
+        )
+        .await
+        .unwrap();
+
+        let changed = user_service
+            .change_password(Request::new(ChangePasswordRequest {
+                token: login.token.clone(),
+                current_password: "valid-test-password".into(),
+                new_password: "changed-test-password".into(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(changed.success, "{}", changed.status_message);
+        let reset = user_service
+            .reset_password(Request::new(ResetPasswordRequest {
+                reset_token: old_token,
+                new_password: "attacker-password".into(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(
+            !reset.success,
+            "a reset link issued before the password change must be rejected"
+        );
+        assert!(
+            login_response(&user_service, &username, "changed-test-password")
+                .await
+                .success
+        );
+        assert!(
+            !login_response(&user_service, &username, "attacker-password")
+                .await
+                .success
+        );
+        assert!(service
+            .state
+            .auth
+            .validate_session(&login.token)
+            .await
+            .is_ok());
+
+        let mut tx = pool.begin().await.unwrap();
+        assert_eq!(
+            account::consume_token(&mut tx, &other_reset, account::PURPOSE_PASSWORD_RESET)
+                .await
+                .unwrap(),
+            Some(other_id)
+        );
+        assert_eq!(
+            account::consume_token(
+                &mut tx,
+                &other_verification,
+                account::PURPOSE_EMAIL_VERIFICATION
+            )
+            .await
+            .unwrap(),
+            Some(other_id)
+        );
+        tx.rollback().await.unwrap();
+
+        let fresh_token = account::issue_token(
+            &pool,
+            user_id,
+            account::PURPOSE_PASSWORD_RESET,
+            account::password_reset_ttl(),
+        )
+        .await
+        .unwrap();
+        let fresh_reset = user_service
+            .reset_password(Request::new(ResetPasswordRequest {
+                reset_token: fresh_token,
+                new_password: "fresh-reset-password".into(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(fresh_reset.success, "{}", fresh_reset.status_message);
+        assert!(
+            login_response(&user_service, &username, "fresh-reset-password")
+                .await
+                .success
+        );
+        assert!(service
+            .state
+            .auth
+            .validate_session(&login.token)
+            .await
+            .is_err());
+        cleanup(&service.state.scheduler, &task_id, &owner).await;
+        std::fs::remove_dir_all(&outbox).ok();
     }
 
     #[tokio::test]
