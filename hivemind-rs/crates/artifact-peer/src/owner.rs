@@ -25,6 +25,8 @@ use crate::{canonical_id, verify_local_content, GrpcArtifactPeer, PinnedSource};
 const MIME_TYPE: &str = "application/x-safetensors";
 const MAX_TOKEN_BYTES: usize = 8 * 1024;
 const CONTROL_TIMEOUT: Duration = Duration::from_secs(10);
+// Nodepool rate-limits probes by source identity, across registration generations.
+const PROBE_COOLDOWN: Duration = Duration::from_secs(3);
 /// Registrations expire within 60 seconds, and a probe observation lasts 30
 /// seconds. Renewals must land well inside that window.
 pub const MIN_RENEWAL_INTERVAL: Duration = Duration::from_secs(1);
@@ -222,6 +224,7 @@ pub struct HostedArtifact {
     artifact_id: String,
     source_id: String,
     registration_id: String,
+    next_probe_at: tokio::sync::Mutex<tokio::time::Instant>,
 }
 
 impl HostedArtifact {
@@ -257,6 +260,7 @@ impl HostedArtifact {
             artifact_id: manifest.artifact_id,
             source_id: registration.source_id,
             registration_id: registration.registration_id,
+            next_probe_at: tokio::sync::Mutex::new(tokio::time::Instant::now()),
         };
         Ok((hosted, pinned))
     }
@@ -273,13 +277,22 @@ impl HostedArtifact {
 
     /// Probes the current generation. Call only after the listener serves the peer.
     pub async fn probe(&self) -> Result<HcodeSourceAvailability> {
-        self.client.probe(&self.token, &self.source_id).await
+        let mut next = self.next_probe_at.lock().await;
+        tokio::time::sleep_until(*next).await;
+        // Reserve before the await, so cancelling a call cannot erase its cooldown.
+        *next = tokio::time::Instant::now() + CONTROL_TIMEOUT + PROBE_COOLDOWN;
+        let result = self.client.probe(&self.token, &self.source_id).await;
+        *next = tokio::time::Instant::now() + PROBE_COOLDOWN;
+        result
     }
 
     /// Registers a new generation, applies it to the peer, and then probes it.
     /// The order matters. Nodepool must hold the new generation before it probes,
     /// and the peer must accept it before the probe asks the peer for bytes.
     pub async fn renew(&mut self, peer: &GrpcArtifactPeer) -> Result<HcodeSourceAvailability> {
+        // Keep the current observation valid while waiting. Rotating the generation
+        // first would make the source undiscoverable before Nodepool permits a probe.
+        tokio::time::sleep_until(*self.next_probe_at.get_mut()).await;
         let registration = self
             .client
             .register(
@@ -304,7 +317,8 @@ impl HostedArtifact {
     }
 }
 
-/// Renews every hosted artifact once per `every`, starting immediately. The first
+/// Renews every hosted artifact once per `every`, subject to the per-source probe
+/// cooldown, including a probe performed before entering this loop. The first
 /// failure is returned rather than retried, so the host can stop serving instead
 /// of advertising a source it cannot refresh.
 pub async fn keep_published(

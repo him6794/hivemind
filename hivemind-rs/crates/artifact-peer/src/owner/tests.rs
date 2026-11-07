@@ -35,6 +35,7 @@ struct NodepoolState {
     revoked: bool,
     peer_url: String,
     counters: Counters,
+    last_probe_at: Option<tokio::time::Instant>,
 }
 
 /// A loopback Nodepool stand-in. Probes are real: it signs a probe token, dials
@@ -58,6 +59,7 @@ impl Nodepool {
                 revoked: false,
                 peer_url: String::new(),
                 counters: Counters::default(),
+                last_probe_at: None,
             }),
         }
     }
@@ -179,6 +181,13 @@ impl HcodeArtifactProbeService for Nodepool {
             if state.revoked {
                 return Err(Status::failed_precondition("source is revoked"));
             }
+            if state
+                .last_probe_at
+                .is_some_and(|at| at.elapsed() < Duration::from_secs(3))
+            {
+                return Err(Status::resource_exhausted("source probe cooldown"));
+            }
+            state.last_probe_at = Some(tokio::time::Instant::now());
             state.counters.probes += 1;
             (self.registration(&state), state.peer_url.clone())
         };
@@ -475,6 +484,43 @@ async fn keep_published_renews_until_the_caller_stops_it() {
         fixture.nodepool.counters().registers >= 2,
         "the first renewal starts immediately"
     );
+}
+
+#[tokio::test]
+async fn keep_published_respects_probe_cooldown_after_manual_publication() {
+    for every in [1, 2, 20] {
+        let fixture = Fixture::start().await;
+        let (hosted, pinned) = fixture.publish().await;
+        let peer = fixture.serve(pinned).await;
+        hosted.probe().await.unwrap();
+        let first_generation = hosted.registration_id().to_owned();
+        let mut hosted = [hosted];
+
+        let early = tokio::time::timeout(
+            Duration::from_millis(100),
+            keep_published(&peer, &mut hosted, Duration::from_secs(every)),
+        )
+        .await;
+        assert!(early.is_err());
+        assert_eq!(hosted[0].registration_id(), first_generation);
+        assert_eq!(fixture.nodepool.counters().registers, 1);
+
+        let outcome = tokio::time::timeout(
+            Duration::from_millis(6500),
+            keep_published(&peer, &mut hosted, Duration::from_secs(every)),
+        )
+        .await;
+        assert!(
+            outcome.is_err(),
+            "interval {every}: loop must not fail on cooldown"
+        );
+        let expected = if every == 20 { 2 } else { 3 };
+        assert!(fixture.nodepool.counters().probes >= expected);
+        assert_eq!(
+            fixture.nodepool.counters().registers,
+            fixture.nodepool.counters().probes
+        );
+    }
 }
 
 #[tokio::test]
