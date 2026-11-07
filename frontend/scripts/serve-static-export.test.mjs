@@ -75,6 +75,32 @@ test('serves the export with clean URLs the way Pages does', async (t) => {
   assert.equal(missing.body, '<h1>Missing page</h1>');
 });
 
+test('applies the Pages response policy to pages, errors, and account routes', async (t) => {
+  const policy = await fs.readFile(new URL('../public/_headers', import.meta.url), 'utf8');
+  const expected = [...policy.matchAll(/^\s+([\w-]+):\s*(.+)$/gm)].map(([, name, value]) => [
+    name.toLowerCase(),
+    value.trim(),
+  ]);
+  assert.equal(expected.length, 5, 'keep the standalone response policy aligned with Pages');
+  const directory = await makeExport(t);
+  const server = createStaticExportServer({ directory, env: {} });
+  t.after(() => close(server));
+  const base = await listen(server);
+
+  for (const request of [
+    { path: '/' },
+    { path: '/docs/loops', method: 'HEAD' },
+    { path: '/missing' },
+    { path: '/api/account' },
+    { path: '/', method: 'PUT' },
+  ]) {
+    const response = await rawRequest(base, request);
+    for (const [name, value] of expected) {
+      assert.equal(response.headers[name], value, `${request.method ?? 'GET'} ${request.path}: ${name}`);
+    }
+  }
+});
+
 test('never serves a file outside the export directory', async (t) => {
   const directory = await makeExport(t);
   const server = createStaticExportServer({ directory, env: {} });

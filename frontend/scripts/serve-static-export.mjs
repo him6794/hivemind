@@ -26,6 +26,15 @@ const CONTENT_TYPES = {
   '.webmanifest': 'application/manifest+json',
 };
 
+// Match public/_headers when serving outside Cloudflare Pages.
+const RESPONSE_POLICY = {
+  'X-Content-Type-Options': 'nosniff',
+  'X-Frame-Options': 'DENY',
+  'Referrer-Policy': 'strict-origin-when-cross-origin',
+  'Permissions-Policy': 'camera=(), microphone=(), geolocation=(), payment=()',
+  'Content-Security-Policy': "frame-ancestors 'none'; base-uri 'self'; form-action 'self'",
+};
+
 const FORWARDED_METHODS = new Set(['GET', 'POST']);
 // Headers that describe one connection, or that the proxy sets itself. They are never copied.
 const HOP_BY_HOP = new Set([
@@ -217,6 +226,7 @@ async function handleRequest(request, response, options) {
 export function createStaticExportServer({ directory, env = process.env }) {
   const options = { root: path.resolve(directory), env };
   const server = http.createServer((request, response) => {
+    for (const [name, value] of Object.entries(RESPONSE_POLICY)) response.setHeader(name, value);
     handleRequest(request, response, options).catch((error) => {
       // Log the path and error name only. Request bodies can hold passwords.
       console.error('static export request failed', { path: request.url?.split('?')[0], name: error?.name });
