@@ -22,8 +22,8 @@ foreach ($expected in @("official-site", "master-ui", "worker-ui")) {
     }
 }
 
-if (!$joinedOutput.Contains(".next\standalone\server.js")) {
-    throw "build release harness must check the official Next standalone server artifact."
+if (!$joinedOutput.Contains("frontend\out\index.html")) {
+    throw "build release harness must check the official static export (out/index.html)."
 }
 
 if (!$joinedOutput.Contains("master-ui\dist\index.html") -or !$joinedOutput.Contains("worker-ui\dist\index.html")) {

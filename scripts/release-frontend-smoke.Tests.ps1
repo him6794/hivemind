@@ -30,28 +30,17 @@ try {
     Remove-Item Env:\WEBSITE_NODEPOOL_GRPC_ADDR -ErrorAction SilentlyContinue
     Remove-Item Env:\VITE_WORKER_CONTROL_BASE -ErrorAction SilentlyContinue
 
+    # The official site is a static export and reads no runtime variable, so only the Vite surfaces need one.
     $output = & powershell -NoProfile -ExecutionPolicy Bypass -File $scriptPath -SkipBuild -CheckOnly 2>&1
     $exitCode = $LASTEXITCODE
     if ($exitCode -eq 0) {
-        throw "release frontend smoke harness must fail when WEBSITE_NODEPOOL_GRPC_ADDR is missing."
-    }
-
-    $joinedOutput = ($output | Out-String)
-    if (!$joinedOutput.Contains("WEBSITE_NODEPOOL_GRPC_ADDR")) {
-        throw "missing official site env failure must name WEBSITE_NODEPOOL_GRPC_ADDR."
-    }
-    if (!$joinedOutput.Contains("Set WEBSITE_NODEPOOL_GRPC_ADDR")) {
-        throw "missing official site env failure must include an actionable fix."
-    }
-
-    $env:WEBSITE_NODEPOOL_GRPC_ADDR = "127.0.0.1:50051"
-    $missingWorkerOutput = & powershell -NoProfile -ExecutionPolicy Bypass -File $scriptPath -SkipBuild -CheckOnly 2>&1
-    $missingWorkerExitCode = $LASTEXITCODE
-    if ($missingWorkerExitCode -eq 0) {
         throw "release frontend smoke harness must fail when VITE_WORKER_CONTROL_BASE is missing."
     }
 
-    $joinedOutput = ($missingWorkerOutput | Out-String)
+    $joinedOutput = ($output | Out-String)
+    if ($joinedOutput.Contains("WEBSITE_NODEPOOL_GRPC_ADDR")) {
+        throw "the official static site must not require WEBSITE_NODEPOOL_GRPC_ADDR."
+    }
     if (!$joinedOutput.Contains("VITE_WORKER_CONTROL_BASE")) {
         throw "missing worker control env failure must name VITE_WORKER_CONTROL_BASE."
     }
@@ -60,6 +49,14 @@ try {
     }
 
     $env:VITE_WORKER_CONTROL_BASE = "http://127.0.0.1:8083"
+    $readyOutput = & powershell -NoProfile -ExecutionPolicy Bypass -File $scriptPath -SkipBuild -CheckOnly 2>&1
+    $readyText = ($readyOutput | Out-String)
+    if ($LASTEXITCODE -ne 0) {
+        throw "release frontend smoke check-only must pass once every surface has its environment and artifacts. Got: $readyText"
+    }
+    if (!$readyText.Contains("CHECK official-site artifact")) {
+        throw "release frontend smoke check-only must check the official static export artifact."
+    }
     $badTimeoutOutput = & powershell -NoProfile -ExecutionPolicy Bypass -File $scriptPath -SkipBuild -CheckOnly -StartupTimeoutSeconds 0 2>&1
     $badTimeoutExitCode = $LASTEXITCODE
     if ($badTimeoutExitCode -eq 0) {

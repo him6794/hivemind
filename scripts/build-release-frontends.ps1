@@ -9,8 +9,8 @@ $surfaces = @(
     @{
         Name = "official-site"
         Path = "frontend"
-        Artifact = ".next/standalone/server.js"
-        Clean = @(".next")
+        Artifact = "out/index.html"
+        Clean = @(".next", "out")
     },
     @{
         Name = "master-ui"

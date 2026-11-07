@@ -13,9 +13,9 @@ $surfaces = @(
         Name = "official-site"
         Path = "frontend"
         Port = 4173
-        RequiredEnv = @("WEBSITE_NODEPOOL_GRPC_ADDR")
-        Artifact = ".next/standalone/server.js"
-        Framework = "next"
+        RequiredEnv = @()
+        Artifact = "out/index.html"
+        Framework = "static"
         ExpectedContent = "Hivemind"
     },
     @{
@@ -171,10 +171,10 @@ try {
         $port = [string]$surface.Port
         $url = "http://127.0.0.1:$port/"
         Write-Host "START $($surface.Name) preview $url"
-        if ($surface.Framework -eq "next") {
+        if ($surface.Framework -eq "static") {
             $process = Start-Process `
-                -FilePath "npm.cmd" `
-                -ArgumentList @("exec", "--", "next", "start", "--hostname", "127.0.0.1", "--port", $port) `
+                -FilePath "node" `
+                -ArgumentList @("scripts/serve-static-export.mjs", "--directory", "out", "--host", "127.0.0.1", "--port", $port) `
                 -WorkingDirectory $surfacePath `
                 -PassThru `
                 -WindowStyle Hidden
