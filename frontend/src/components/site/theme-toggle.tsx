@@ -1,5 +1,6 @@
 "use client";
 
+import { useEffect, useState } from "react";
 import { useTheme } from "next-themes";
 import { Moon, Sun } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -9,7 +10,13 @@ import { cn } from "@/lib/utils";
 export function ThemeToggle({ className }: { className?: string }) {
   const { theme, setTheme } = useTheme();
   const { locale } = useI18n();
-  const isDark = theme === "dark";
+  // The saved theme is known only in the browser. Until the page has mounted, the toggle shows the light state,
+  // the same as the server render, so the first client render matches the HTML and no hydration error appears.
+  const [mounted, setMounted] = useState(false);
+  useEffect(() => {
+    setMounted(true);
+  }, []);
+  const isDark = mounted && theme === "dark";
 
   return (
     <Button
