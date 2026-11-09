@@ -2327,6 +2327,8 @@ struct ManagedConsensusVote {
     output: String,
     result_json: Vec<u8>,
     result_digest: String,
+    // The Worker's failure code for a replica that did not complete. It explains a task that never reaches quorum.
+    failure_code: Option<String>,
 }
 
 async fn record_managed_consensus_vote(
@@ -2365,6 +2367,7 @@ async fn drain_managed_consensus_workers(
     attempt: &ManagedConsensusAttempt,
     workers: &mut tokio::task::JoinSet<(String, Result<Option<ManagedConsensusVote>>)>,
     drain: Duration,
+    tally: &mut ManagedConsensusTally,
 ) -> Result<()> {
     let drain_deadline = tokio::time::Instant::now() + drain;
     while !workers.is_empty() {
@@ -2379,12 +2382,19 @@ async fn drain_managed_consensus_workers(
         match joined {
             Ok((replica_id, Ok(Some(vote)))) => {
                 match record_managed_consensus_vote(repo, task, attempt, vote).await {
-                    Ok((outcome, _)) => tracing::debug!(
-                        task_id = %task.task_id,
-                        replica_id,
-                        recorded = outcome == crate::task_repository::ManagedConsensusObservationOutcome::Recorded,
-                        "persisted managed consensus result while draining stopped replicas"
-                    ),
+                    Ok((outcome, recorded)) => {
+                        if outcome
+                            == crate::task_repository::ManagedConsensusObservationOutcome::Recorded
+                        {
+                            tally.record(&recorded);
+                        }
+                        tracing::debug!(
+                            task_id = %task.task_id,
+                            replica_id,
+                            recorded = outcome == crate::task_repository::ManagedConsensusObservationOutcome::Recorded,
+                            "persisted managed consensus result while draining stopped replicas"
+                        );
+                    }
                     Err(error) => tracing::warn!(
                         task_id = %task.task_id,
                         replica_id,
@@ -2830,6 +2840,8 @@ async fn execute_managed_consensus_attempt(
     let mut observations = initial_observations;
     let mut outputs = initial_outputs;
     let mut mismatches = 0u32;
+    // Votes recorded by this run, including those collected while draining stopped replicas.
+    let mut tally = ManagedConsensusTally::default();
     if let Ok(certificate) = evaluate_quorum(&binding, policy, &observations) {
         let output = outputs
             .get(&certificate.result_digest)
@@ -3010,6 +3022,7 @@ async fn execute_managed_consensus_attempt(
                 let (outcome, vote) =
                     record_managed_consensus_vote(&repo, &task, &attempt, vote).await?;
                 if outcome == crate::task_repository::ManagedConsensusObservationOutcome::Recorded {
+                    tally.record(&vote);
                     let result_key = vote.observation.result_digest;
                     if vote.observation.success
                         && observations
@@ -3053,6 +3066,7 @@ async fn execute_managed_consensus_attempt(
                             &attempt,
                             &mut workers,
                             Duration::from_secs(escalation.drain_secs),
+                            &mut tally,
                         )
                         .await?;
                         let output = outputs
@@ -3138,10 +3152,14 @@ async fn execute_managed_consensus_attempt(
         &attempt,
         &mut workers,
         Duration::from_secs(escalation.drain_secs),
+        &mut tally,
     )
     .await?;
     workers.abort_all();
-    let reason = "managed consensus quorum was not reached";
+    let reason = managed_consensus_no_quorum_reason(
+        managed_consensus_terminal_result_count(&repo, &task, &attempt).await,
+        &tally,
+    );
     warn!(
         task_id = %task.task_id,
         attempt_id = %attempt.id,
@@ -3159,15 +3177,98 @@ async fn execute_managed_consensus_attempt(
         repo.mark_managed_consensus_no_quorum(
             &task.task_id,
             attempt.id,
-            reason,
+            &reason,
             effective_retry_limit(&task, max_redispatch),
         )
         .await?;
     } else {
-        repo.mark_managed_consensus_stop_pending(&task.task_id, attempt.id, reason)
+        repo.mark_managed_consensus_stop_pending(&task.task_id, attempt.id, &reason)
             .await?;
     }
     Ok(())
+}
+
+const MANAGED_CONSENSUS_NO_QUORUM: &str = "managed consensus quorum was not reached";
+
+/// Votes recorded by one run, used to explain an attempt that ended without quorum.
+#[derive(Default)]
+struct ManagedConsensusTally {
+    successes: usize,
+    failure_codes: Vec<String>,
+}
+
+impl ManagedConsensusTally {
+    fn record(&mut self, vote: &ManagedConsensusVote) {
+        if vote.observation.success {
+            self.successes += 1;
+        } else if let Some(code) = &vote.failure_code {
+            self.failure_codes.push(code.clone());
+        }
+    }
+}
+
+/// Counts the replicas of this attempt that hold a terminal result. `None` means the read failed.
+async fn managed_consensus_terminal_result_count(
+    repo: &TaskRepository,
+    task: &Task,
+    attempt: &ManagedConsensusAttempt,
+) -> Option<usize> {
+    match repo
+        .managed_consensus_replicas(&task.task_id, &attempt.round_id)
+        .await
+    {
+        Ok(replicas) => Some(
+            replicas
+                .iter()
+                .filter(|replica| {
+                    replica.attempt_id == attempt.id
+                        && matches!(replica.state.as_str(), "reported" | "failed")
+                })
+                .count(),
+        ),
+        Err(error) => {
+            warn!(
+                task_id = %task.task_id,
+                attempt_id = %attempt.id,
+                error = %error,
+                "managed consensus replicas could not be read for the no-quorum reason"
+            );
+            None
+        }
+    }
+}
+
+/// The reason an attempt ended without quorum. A failure is named only when this run recorded every terminal
+/// result of the attempt, no replica succeeded, and every answer failed with the same plain code. Results
+/// recovered from an earlier run carry no failure code, so their presence keeps the reason generic.
+/// Worker-reported codes are claims, so only short lowercase identifiers are shown to the task owner.
+fn managed_consensus_no_quorum_reason(
+    terminal_results: Option<usize>,
+    tally: &ManagedConsensusTally,
+) -> String {
+    let recorded = tally.successes + tally.failure_codes.len();
+    let distinct: HashSet<&str> = tally.failure_codes.iter().map(String::as_str).collect();
+    let single_code = match distinct.len() {
+        1 => distinct.iter().next().copied(),
+        _ => None,
+    };
+    match single_code {
+        Some(code)
+            if terminal_results == Some(recorded)
+                && tally.successes == 0
+                && is_plain_failure_code(code) =>
+        {
+            format!("{MANAGED_CONSENSUS_NO_QUORUM}: replicas failed with {code}")
+        }
+        _ => MANAGED_CONSENSUS_NO_QUORUM.to_string(),
+    }
+}
+
+fn is_plain_failure_code(code: &str) -> bool {
+    (1..=40).contains(&code.len())
+        && code
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte == b'_')
 }
 
 async fn execute_managed_consensus_replica(
@@ -3276,11 +3377,13 @@ async fn execute_managed_consensus_replica(
         claimed_usage_units: result.usage_units,
         claimed_executed_ops: result.executed_ops,
     };
+    let failure_code = (!observation.success).then(|| result.error_code.clone());
     Ok(Some(ManagedConsensusVote {
         observation,
         output,
         result_json,
         result_digest,
+        failure_code,
     }))
 }
 
@@ -4720,6 +4823,63 @@ mod tests {
     use super::*;
     use crate::task_repository::MANAGED_CONSENSUS_POLICY_PENDING_MESSAGE;
     use chrono::Utc;
+
+    #[test]
+    fn no_quorum_reason_names_a_failure_only_when_every_answer_shares_one_plain_code() {
+        let generic = "managed consensus quorum was not reached";
+        let tally = |successes: usize, codes: &[&str]| ManagedConsensusTally {
+            successes,
+            failure_codes: codes.iter().map(|code| code.to_string()).collect(),
+        };
+
+        assert_eq!(
+            managed_consensus_no_quorum_reason(
+                Some(2),
+                &tally(0, &["runtime_error", "runtime_error"])
+            ),
+            format!("{generic}: replicas failed with runtime_error")
+        );
+        // Replicas that disagree do not name a single cause.
+        assert_eq!(
+            managed_consensus_no_quorum_reason(Some(2), &tally(0, &["runtime_error", "timeout"])),
+            generic
+        );
+        // A success, recorded in this run or earlier, rules out a failure-only explanation.
+        assert_eq!(
+            managed_consensus_no_quorum_reason(Some(2), &tally(1, &["runtime_error"])),
+            generic
+        );
+        // A terminal result this run did not tally (recovered earlier, or recorded after the tally)
+        // has no code here, so the cause is not named.
+        assert_eq!(
+            managed_consensus_no_quorum_reason(
+                Some(3),
+                &tally(0, &["runtime_error", "runtime_error"])
+            ),
+            generic
+        );
+        // A failed read of the replica table never names a cause.
+        assert_eq!(
+            managed_consensus_no_quorum_reason(
+                None,
+                &tally(0, &["runtime_error", "runtime_error"])
+            ),
+            generic
+        );
+        assert_eq!(
+            managed_consensus_no_quorum_reason(Some(0), &tally(0, &[])),
+            generic
+        );
+        // A Worker-supplied code is a claim, so text that is not a plain identifier is never shown.
+        assert_eq!(
+            managed_consensus_no_quorum_reason(Some(1), &tally(0, &["Pay the operator now"])),
+            generic
+        );
+        assert_eq!(
+            managed_consensus_no_quorum_reason(Some(1), &tally(0, &[""])),
+            generic
+        );
+    }
     use general_compute_runtime::{
         canonical_artifact_root,
         managed_gpu::{
