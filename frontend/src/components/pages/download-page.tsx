@@ -2,7 +2,7 @@
 
 import { useI18n } from "@/store/i18n-store";
 import { getSiteDefinition } from "@/lib/hivemind-site-data.mjs";
-import { isPublishedDownload, releaseDownloads } from "@/lib/downloads.mjs";
+import { downloadFor, isPublishedDownload } from "@/lib/downloads.mjs";
 import { PageSection, Surface } from "./page-primitives";
 
 function StepList({ title, steps }: { title: string; steps: string[] }) {
@@ -30,7 +30,7 @@ export function DownloadPage() {
     <PageSection eyebrow={locale === "zh" ? "下載" : "Download"} title={copy.title} body={copy.intro}>
       <div className="mt-10 grid min-w-0 grid-cols-1 gap-4 lg:grid-cols-2">
         {copy.packages.map((pkg) => {
-          const release = releaseDownloads[pkg.id as keyof typeof releaseDownloads];
+          const release = downloadFor(pkg.id);
           const published = isPublishedDownload(release);
           return (
             <Surface key={pkg.id}>
