@@ -746,10 +746,7 @@ const definitions = {
           submitNote: 'Replace $TOKEN with the token from POST /api/login. This request runs a program that returns the number of rows, which is 3.',
         },
         versions: {
-          runtimeTitle: 'Runtime names',
-          runtimeBody: 'New tasks use the runtime name hcode. The older name managed-function-v1 is retired. It is not an alias for hcode, so submissions with that name are rejected. Tasks recorded under managed-function-v0 remain readable, but they cannot be resumed or submitted again.',
           platformsBody: 'The first public version supports native Windows only.',
-          gpuBody: 'GPU work uses hcode-gpu, a separate runtime with its own request format and operator-provided assets. This page does not cover it.',
         },
       },
       terms: {
@@ -1466,10 +1463,7 @@ const definitions = {
           submitNote: '把 $TOKEN 換成 POST /api/login 回傳的 token。這個請求執行的程式會回傳資料列數，結果為 3。',
         },
         versions: {
-          runtimeTitle: '執行環境名稱',
-          runtimeBody: '新工作使用執行環境名稱 hcode。舊名稱 managed-function-v1 已退役，它不是 hcode 的別名，使用舊名稱送出的工作會被拒絕。以 managed-function-v0 記錄的工作仍可讀取，但不能續跑或重新送出。',
           platformsBody: '首次公開版本只支援原生 Windows。',
-          gpuBody: 'GPU 工作使用 hcode-gpu，這是另一個執行環境，有自己的請求格式，並使用營運者提供的執行資產。本頁不涵蓋 GPU 工作。',
         },
       },
       terms: {

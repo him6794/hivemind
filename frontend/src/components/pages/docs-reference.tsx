@@ -44,7 +44,6 @@ export function referenceSections(name: string, locale: string): { id: string; t
     case "platforms":
       return [
         { id: "support", text: zh ? "平台支援狀態" : "Platform support" },
-        { id: "versions", text: docs.versions.runtimeTitle as string },
       ];
     default:
       return [];
@@ -370,9 +369,6 @@ function PlatformsView({ docs, locale }: { docs: any; locale: string }) {
           </TableRow>
         ))}
       </Table>
-      <Heading id="versions">{sectionTitle(name, locale, "versions")}</Heading>
-      <p className="mt-6 leading-relaxed text-muted-foreground">{docs.versions.runtimeBody}</p>
-      <p className="mt-4 leading-relaxed text-muted-foreground">{docs.versions.gpuBody}</p>
     </>
   );
 }

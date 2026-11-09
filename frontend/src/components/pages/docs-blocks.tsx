@@ -7,7 +7,6 @@ import { useI18n } from "@/store/i18n-store";
 import { getSiteDefinition } from "@/lib/hivemind-site-data.mjs";
 import { EXAMPLES } from "@/lib/docs/examples.mjs";
 import { DocsReference } from "./docs-reference";
-import { DEMOS } from "./docs-demos";
 
 export type DocsBlockData =
   | { type: "p"; text: string }
@@ -20,8 +19,7 @@ export type DocsBlockData =
   | { type: "table"; head: string[]; rows: string[][] }
   | { type: "callout"; tone: "note" | "warning"; text: string }
   | { type: "links"; slugs: string[] }
-  | { type: "reference"; name: string }
-  | { type: "demo"; id: string };
+  | { type: "reference"; name: string };
 
 // Backticks mark inline code in the page text.
 export function renderInline(text: string) {
@@ -239,30 +237,6 @@ function LinksBlock({ slugs }: { slugs: string[] }) {
   );
 }
 
-// A live example from the component pages. The preview is the official component,
-// and the code shown below it is the snippet to copy.
-function DemoBlock({ id }: { id: string }) {
-  const { locale } = useI18n();
-  const zh = locale === "zh";
-  const demo = DEMOS[id];
-  if (!demo) return null;
-  const { Preview } = demo;
-
-  return (
-    <>
-      <figure className="mt-6 overflow-hidden rounded-xl border border-border bg-card">
-        <figcaption className="border-b border-border/60 px-4 py-2 text-xs uppercase tracking-wide text-muted-foreground">
-          {zh ? demo.title.zh : demo.title.en}
-        </figcaption>
-        <div className="flex min-h-[200px] items-center overflow-x-auto p-6 [justify-content:safe_center] sm:p-10">
-          <Preview />
-        </div>
-      </figure>
-      <CodeBlock code={demo.code} lang="tsx" label={zh ? "程式碼" : "Code"} />
-    </>
-  );
-}
-
 export function DocsBlock({ block }: { block: DocsBlockData }) {
   switch (block.type) {
     case "p":
@@ -300,8 +274,6 @@ export function DocsBlock({ block }: { block: DocsBlockData }) {
       return <LinksBlock slugs={block.slugs} />;
     case "reference":
       return <DocsReference name={block.name} />;
-    case "demo":
-      return <DemoBlock id={block.id} />;
     default:
       return null;
   }

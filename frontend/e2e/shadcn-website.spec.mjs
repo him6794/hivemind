@@ -359,14 +359,14 @@ test('a direct documentation address opens the same page of the single-page site
 test('documentation tutorial, template, and reference pages render at desktop and 320px', async ({ page }) => {
   const diagnostics = await prepare(page);
   const pages = [
+    ['first-task', 'Your first task'],
     ['loops', 'Loops and accumulators'],
-    ['templates-numbers', 'Numbers and lists'],
-    ['billing', 'How charges work'],
     ['master-api', 'Submit through the Master API'],
-    ['ui-forms', 'Forms'],
-    ['ui-layout', 'Layout and data'],
-    ['ui-charts', 'Charts'],
-    ['ui-animations', 'Animations'],
+    ['templates-numbers', 'Numbers and lists'],
+    ['templates-records', 'Records and decisions'],
+    ['billing', 'How charges work'],
+    ['limits', 'Limits'],
+    ['api-reference', 'API reference'],
   ];
   for (const width of [1440, 320]) {
     await page.setViewportSize({ width, height: 1000 });

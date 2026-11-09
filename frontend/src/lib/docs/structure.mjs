@@ -1,7 +1,7 @@
 // Shared layout of the documentation pages. Both locales use these group ids,
 // slugs, and order; the text lives in pages-en.mjs and pages-zh.mjs.
 
-export const DOCS_GROUP_IDS = ['start', 'tutorials', 'templates', 'components', 'reference'];
+export const DOCS_GROUP_IDS = ['start', 'tutorials', 'templates', 'reference'];
 
 export const DOCS_PAGE_SLUGS = [
   'introduction',
@@ -18,14 +18,6 @@ export const DOCS_PAGE_SLUGS = [
   'templates-numbers',
   'templates-records',
   'templates-text',
-  'ui-overview',
-  'ui-forms',
-  'ui-feedback',
-  'ui-overlays',
-  'ui-navigation',
-  'ui-layout',
-  'ui-charts',
-  'ui-animations',
   'language',
   'settings',
   'billing',

@@ -565,15 +565,9 @@ test('every page in the route list has a renderer, and every navigation target i
 test('documentation pages follow the shared structure in both locales', () => {
   const blocks = fs.readFileSync(new URL('./src/components/pages/docs-blocks.tsx', import.meta.url), 'utf8');
   const reference = fs.readFileSync(new URL('./src/components/pages/docs-reference.tsx', import.meta.url), 'utf8');
-  const blockTypes = ['p', 'h2', 'list', 'steps', 'code', 'tabs', 'example', 'table', 'callout', 'links', 'reference', 'demo'];
+  const blockTypes = ['p', 'h2', 'list', 'steps', 'code', 'tabs', 'example', 'table', 'callout', 'links', 'reference'];
   const referenceNames = ['flow', 'terms', 'quickstart', 'settings', 'language', 'billing', 'limits', 'failures', 'api', 'platforms'];
   const exampleIds = new Set(EXAMPLES.map((example) => example.id));
-  // Demo entries are keyed by id in the demo source files, each as `"id": { title: ... }`.
-  const demoSource = ['docs-demos.tsx', 'docs-demos-charts.tsx', 'docs-demos-motion.tsx']
-    .map((file) => fs.readFileSync(new URL(`./src/components/pages/${file}`, import.meta.url), 'utf8'))
-    .join('\n');
-  const demoIds = new Set([...demoSource.matchAll(/"([a-z0-9-]+)": \{\s*\n\s*title:/g)].map((match) => match[1]));
-  assert.ok(demoIds.size >= 30, 'the demo sources must define the component examples');
 
   for (const type of blockTypes) {
     assert.match(blocks, new RegExp(`case "${type}":`), `documentation blocks must render "${type}"`);
@@ -595,8 +589,6 @@ test('documentation pages follow the shared structure in both locales', () => {
           return ['example', block.id];
         case 'reference':
           return ['reference', block.name];
-        case 'demo':
-          return ['demo', block.id];
         case 'links':
           return ['links', block.slugs.join(',')];
         case 'tabs':
@@ -637,9 +629,6 @@ test('documentation pages follow the shared structure in both locales', () => {
         if (block.type === 'example') {
           assert.ok(exampleIds.has(block.id), `${locale} ${page.slug} references unknown example "${block.id}"`);
           published.add(block.id);
-        }
-        if (block.type === 'demo') {
-          assert.ok(demoIds.has(block.id), `${locale} ${page.slug} references unknown demo "${block.id}"`);
         }
         if (block.type === 'reference') {
           assert.ok(referenceNames.includes(block.name), `${locale} ${page.slug} references unknown section "${block.name}"`);
