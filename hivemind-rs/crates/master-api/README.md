@@ -34,6 +34,7 @@ Public:
 Authenticated (Bearer user JWT from login):
 
 - `GET /api/tasks`, `POST /api/tasks`, `POST /api/tasks/quote`
+- `POST /api/tasks/dry-run` — runs hcode once on this host and prices the task from its usage; no Nodepool call, no charge
 - `GET /api/tasks/:task_id/log|result`, `POST /api/tasks/:task_id/stop`
 - `GET /api/tasks/:task_id/artifact/download`
 - `GET /api/balance`, `GET /api/workers`

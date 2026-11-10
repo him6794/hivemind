@@ -234,12 +234,13 @@ Usage per replica: 25 units
 Replicas: 3 (the network default; change it with --replicas)
 Reserved usage: 75 CPT
 Platform fee: 7 CPT
-Minimum --max-cpt: 82 CPT
+Minimum --max-cpt for the work: 82 CPT
+The price of any computer requirements (--cpu-score and the other submit resource flags) is not included. `submit --max-cpt auto` uses the larger of the two.
 
 This is an estimate from a run on this machine (interpreter semantics d82fb2679d7f). Nodepool settles on what the Workers report.
 ```
 
-`Minimum --max-cpt` 是讓每個副本都能跑完的最小總上限，也是三個副本全部執行並被接受時的收費；低於它，副本會因 `budget_exhausted` 失敗。它是預估：本機與 Worker 的直譯器版本不同時，用量可能不同，輸出裡的 interpreter semantics 摘要可用來比對。`check` 也接受 `--artifact name=path.safetensors`、`--replicas`（2 到 7）、`--max-usage` 與 `--timeout-secs`（本機試跑自己的上限）。函式在本機就失敗時，語法錯誤會附行與欄，其他錯誤只有代碼與原因。
+`Minimum --max-cpt for the work` 是讓每個副本都能跑完的最小總上限，也是三個副本全部執行並被接受時的工作收費。它不含所選電腦需求的價格：Master 會拒絕低於該價格的上限，所以要設定 `--cpu-score` 等資源時，請用 `submit --max-cpt auto`，它取工作上限與資源價格兩者較大值。低於工作上限時，副本會因 `budget_exhausted` 失敗。它是預估：本機與 Worker 的直譯器版本不同時，用量可能不同，輸出裡的 interpreter semantics 摘要可用來比對。`check` 也接受 `--artifact name=path.safetensors`、`--replicas`（2 到 7）、`--max-usage` 與 `--timeout-secs`（本機試跑自己的上限）。函式在本機就失敗時，語法錯誤會附行與欄，其他錯誤只有代碼與原因。
 
 `submit --max-cpt auto` 會先做同樣的本機試跑，再以預估的總上限送出（若資源報價更高則取報價）；函式在本機失敗時不會送出任何東西。需要 `--input`，並可搭配 `--replicas`。
 

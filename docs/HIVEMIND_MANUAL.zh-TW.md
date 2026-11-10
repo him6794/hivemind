@@ -694,7 +694,8 @@ Identity enrollment credential 的 TTL 為 10 分鐘，DB 保存 hash／expiry�
 | POST | `/api/vpn/bootstrap` | Bearer；本機 bootstrap／readiness |
 | GET | `/api/vpn/status` | Bearer；non-secret local status，不是 Nodepool permission proof |
 | GET | `/api/balance` | Bearer／Nodepool owner account |
-| POST | `/api/tasks/quote` | Bearer；resource quote／preflight 資訊，正式 submission 仍重新檢查 |
+| POST | `/api/tasks/quote` | Bearer；只估算保留資源的價格（每台底價 10 CPT，再依資源累加，乘以主機數），不含程式本身的用量；正式 submission 仍重新檢查，`max_cpt` 低於它會被拒絕 |
+| POST | `/api/tasks/dry-run` | Bearer；在 Master 所在電腦以副本相同的限制執行一次 hcode，回傳輸出、單一副本用量，以及足以支付它的最小 `max_cpt`（預設 3 個副本）。不連線 Nodepool、不扣款；是預估，Nodepool 以 Worker 回報結算。最多同時 2 個，超過回 429 |
 | POST | `/api/tasks` | Bearer；建立 task，**不是同步 execution result** |
 | GET | `/api/tasks` | Bearer／owner-scoped task list；沒有獨立 `GET /api/tasks/{task_id}` |
 | GET | `/api/tasks/{task_id}/log` | Bearer／task owner；stored output |

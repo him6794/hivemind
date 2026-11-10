@@ -408,6 +408,14 @@ hashed, in chunks of at most 1 MiB. Repeat `--artifact` for multiple files:
 hivemind-bin submit inference.hcode --api http://127.0.0.1:8082 --username alice --password "$env:HIVEMIND_PASSWORD" --input "[1.0,2.0]" --artifact model=weights.safetensors --max-cpt 10000
 ```
 
+To price the task before sending it, run the same function and files locally.
+`check` needs no account and prints the usage of one replica and the smallest
+`--max-cpt` that funds it; `--max-cpt auto` on `submit` uses that number:
+
+```powershell
+hivemind-bin check inference.hcode --input "[1.0,2.0]" --artifact model=weights.safetensors
+```
+
 Use the normal CLI authentication options. The name before `=` is the lookup key
 used by `load_tensor`; the path is read by the CLI, never by the hcode program.
 Task artifact IDs use the platform's safe ASCII identifier rules. Tensor names
