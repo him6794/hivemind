@@ -31,9 +31,12 @@ const MAX_CONCURRENT_RUNS: usize = 2;
 /// Output returned in the response. A longer output is cut at a character boundary.
 const OUTPUT_PREVIEW_BYTES: usize = 64 * 1024;
 
-/// Request body limit: the largest source and input a task may carry, plus the JSON framing.
-pub const MAX_REQUEST_BYTES: usize = hivemind_proto::MANAGED_TASK_SOURCE_MAX_BYTES
-    + hivemind_proto::MANAGED_JSON_INPUT_MAX_BYTES
+/// Request body limit. The source and the input travel as JSON strings, and escaping can turn one
+/// byte into six, so the body may be several times larger than the sizes the contract allows. The
+/// contract's own limits are enforced on the decoded text; this one only bounds what is read.
+pub const MAX_REQUEST_BYTES: usize = (hivemind_proto::MANAGED_TASK_SOURCE_MAX_BYTES
+    + hivemind_proto::MANAGED_JSON_INPUT_MAX_BYTES)
+    * 6
     + 64 * 1024;
 
 #[derive(Debug, Deserialize)]
@@ -510,6 +513,51 @@ mod tests {
         assert_eq!(value["success"], false);
         assert_eq!(value["error"]["code"], "parse_error");
         assert_eq!(value["error"]["line"], 1);
+    }
+
+    fn limited_app() -> Router {
+        Router::new().route(
+            "/api/tasks/dry-run",
+            post(dry_run_task).layer(axum::extract::DefaultBodyLimit::max(MAX_REQUEST_BYTES)),
+        )
+    }
+
+    #[tokio::test]
+    async fn an_input_at_the_contract_limit_fits_even_when_escaping_grows_it() {
+        // Newlines written as `\n` are two bytes each in the input, and the request body escapes
+        // the backslash again, so this input (just under the 1 MiB limit) makes a body of 1.5 MiB.
+        let input = format!("\"{}\"", "\\n".repeat(511 * 1024));
+        assert!(input.len() <= hivemind_proto::MANAGED_JSON_INPUT_MAX_BYTES);
+        let body =
+            serde_json::json!({ "task_source": "len(input);", "torrent": input }).to_string();
+        assert!(body.len() > hivemind_proto::MANAGED_JSON_INPUT_MAX_BYTES + 64 * 1024);
+
+        let (status, value) = post_json(
+            limited_app(),
+            serde_json::json!({ "task_source": "len(input);", "torrent": input }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{value}");
+        assert_eq!(value["success"], true);
+        assert_eq!(value["output"], (511 * 1024).to_string());
+    }
+
+    #[tokio::test]
+    async fn a_body_past_the_read_limit_is_refused_with_413() {
+        let response = limited_app()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/tasks/dry-run")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .extension(claims())
+                    .extension(RawToken("dry-run-test-token".into()))
+                    .body(Body::from(vec![b'x'; MAX_REQUEST_BYTES + 1]))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
     }
 
     #[tokio::test]
