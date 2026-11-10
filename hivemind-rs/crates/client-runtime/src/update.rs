@@ -1629,23 +1629,25 @@ fn extract_archive_to_directory(
                 "encrypted entries are not accepted".into(),
             ));
         }
-        if entry.name_raw().contains(&0) || entry.name().contains('\0') {
+        if entry.name_raw().contains(&0) {
             return Err(UpdateError::InvalidArchive(
                 "archive entry contains a NUL byte".into(),
             ));
         }
-        if std::str::from_utf8(entry.name_raw()).is_err() {
-            return Err(UpdateError::InvalidArchive(
-                "archive entry name is not valid UTF-8".into(),
-            ));
-        }
+        // The package checks use the exact UTF-8 bytes stored in the archive. zip 9 decodes a name
+        // without the UTF-8 flag through a legacy code page, so its decoded name is not used here.
+        let name = std::str::from_utf8(entry.name_raw())
+            .map_err(|_| {
+                UpdateError::InvalidArchive("archive entry name is not valid UTF-8".into())
+            })?
+            .to_owned();
         if entry.is_symlink() {
-            return Err(UpdateError::ReparsePoint(entry.name().to_string()));
+            return Err(UpdateError::ReparsePoint(name));
         }
         validate_archive_entry_type(&entry)?;
 
         if entry.is_dir() {
-            let relative = archive_entry_path(entry.name(), true)?;
+            let relative = archive_entry_path(&name, true)?;
             if !manifest_contains_directory(&expected_files, relative) {
                 return Err(UpdateError::PackageMismatch);
             }
@@ -1654,7 +1656,7 @@ fn extract_archive_to_directory(
             continue;
         }
 
-        let relative = archive_entry_path(entry.name(), false)?;
+        let relative = archive_entry_path(&name, false)?;
         if !expected_files.contains(relative) {
             return Err(UpdateError::PackageMismatch);
         }
@@ -1725,7 +1727,9 @@ fn extract_archive_to_directory(
     verify_installed_package(destination, verified)
 }
 
-fn validate_archive_entry_type(entry: &zip::read::ZipFile<'_>) -> Result<(), UpdateError> {
+fn validate_archive_entry_type<R: std::io::Read + ?Sized>(
+    entry: &zip::read::ZipFile<'_, R>,
+) -> Result<(), UpdateError> {
     let file_type = entry.unix_mode().map(|mode| mode & 0o170000);
     if entry.is_dir() {
         if entry.size() != 0 {
@@ -3110,6 +3114,30 @@ mod tests {
         writer.finish().unwrap();
     }
 
+    /// Clears the UTF-8 name flag (bit 11) in each local and central header, so the names are
+    /// stored as legacy-encoded bytes. Returns how many headers had the flag set.
+    fn clear_utf8_name_flags(path: &Path) -> usize {
+        let mut bytes = fs::read(path).unwrap();
+        let mut cleared = 0;
+        for (signature, flags_offset) in [(b"PK\x03\x04", 6usize), (b"PK\x01\x02", 8usize)] {
+            let mut position = 0;
+            while let Some(found) = bytes[position..]
+                .windows(4)
+                .position(|window| window == signature)
+            {
+                let flags = position + found + flags_offset;
+                let value = u16::from_le_bytes(bytes[flags..flags + 2].try_into().unwrap());
+                if value & 0x0800 != 0 {
+                    bytes[flags..flags + 2].copy_from_slice(&(value & !0x0800).to_le_bytes());
+                    cleared += 1;
+                }
+                position += found + 4;
+            }
+        }
+        fs::write(path, bytes).unwrap();
+        cleared
+    }
+
     fn duplicate_first_central_entry(path: &Path) {
         let bytes = fs::read(path).unwrap();
         let end = bytes
@@ -3449,6 +3477,34 @@ mod tests {
                 .sequence,
             1
         );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn non_ascii_archive_names_are_refused_with_or_without_the_utf8_flag() {
+        let root = temp_root("archive-non-ascii-name");
+        fs::create_dir_all(&root).unwrap();
+
+        // With the UTF-8 flag, zip reads the name, and the package path policy refuses it.
+        let flagged = root.join("flagged.zip");
+        write_zip(&flagged, &[("data/fü.bin", b"payload")]);
+        let verified = verified_archive(&flagged, &[("data/fü.bin", b"payload")]);
+        assert!(matches!(
+            extract_verified_zip(&flagged, &root.join("flagged-out"), &verified, &policy()),
+            Err(UpdateError::UnsafePath(_))
+        ));
+
+        // Without the flag, the header scan refuses it before zip parses the name. The flags are
+        // cleared before the manifest records the package digest, so the digest matches the file.
+        let legacy = root.join("legacy.zip");
+        write_zip(&legacy, &[("data/fü.bin", b"payload")]);
+        assert_eq!(clear_utf8_name_flags(&legacy), 2);
+        let verified = verified_archive(&legacy, &[("data/fü.bin", b"payload")]);
+        assert!(matches!(
+            extract_verified_zip(&legacy, &root.join("legacy-out"), &verified, &policy()),
+            Err(UpdateError::InvalidArchive(message))
+                if message == "non-ASCII archive names must use UTF-8"
+        ));
         let _ = fs::remove_dir_all(root);
     }
 
