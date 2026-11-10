@@ -1,3 +1,4 @@
+pub mod dry_run;
 pub mod grpc_client;
 pub mod handlers;
 pub mod middleware;

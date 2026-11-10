@@ -72,6 +72,11 @@ pub fn create_router(state: AppState) -> Router {
         )
         .route("/api/tasks/quote", post(super::handlers::quote_task))
         .route(
+            "/api/tasks/dry-run",
+            post(super::dry_run::dry_run_task)
+                .layer(DefaultBodyLimit::max(super::dry_run::MAX_REQUEST_BYTES)),
+        )
+        .route(
             "/api/tasks",
             post(super::handlers::create_task).layer(DefaultBodyLimit::max(
                 hivemind_proto::MANAGED_GPU_MANIFEST_MAX_BYTES + 1024 * 1024,

@@ -2183,6 +2183,7 @@ dependencies = [
  "hivemind-proto",
  "hivemind-task-scheduler",
  "jsonwebtoken",
+ "managed-function-runtime",
  "serde",
  "serde_json",
  "sqlx",

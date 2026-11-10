@@ -20,6 +20,7 @@ hivemind-models = { path = "../models" }
 hivemind-config = { path = "../config" }
 hivemind-client-runtime = { path = "../client-runtime" }
 general-compute-runtime = { path = "../../../executor-rs/crates/general-compute-runtime" }
+managed-function-runtime = { path = "../../../executor-rs/crates/managed-function-runtime" }
 
 [dev-dependencies]
 tower.workspace = true

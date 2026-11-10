@@ -111,7 +111,7 @@ pub struct RegisterResponse {
     pub message: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CreateTaskBody {
     #[serde(default)]
@@ -283,7 +283,7 @@ fn validate_task_resources(body: &CreateTaskBody) -> Result<(), &'static str> {
     Ok(())
 }
 
-fn validate_runtime_contract(body: &CreateTaskBody) -> Result<(), &'static str> {
+pub(crate) fn validate_runtime_contract(body: &CreateTaskBody) -> Result<(), &'static str> {
     let runtime = body.runtime.as_deref().map(str::trim).unwrap_or_default();
     if runtime == "managed-function-v0" {
         return Err("managed-function-v0 has been retired; use hcode");
