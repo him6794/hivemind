@@ -498,7 +498,7 @@ fn managed_gpu_task_status(status: ManagedGpuStatus) -> &'static str {
     }
 }
 
-const PLATFORM_FEE_BPS: i64 = 1000; // 10%
+const PLATFORM_FEE_BPS: i64 = general_compute_runtime::managed_budget::PLATFORM_FEE_BPS; // 10%
 const GENERAL_COMPUTE_BILLING_VERSION: &str = "billing-v1";
 const GENERAL_COMPUTE_COST_MODEL_VERSION: &str = "cost-v1";
 const MANAGED_CONSENSUS_BILLING_VERSION: &str = "consensus-billing-v1";
@@ -593,35 +593,19 @@ struct ManagedV1SettlementPlan {
     payouts: Vec<ManagedV1ReplicaPayout>,
 }
 
+// The v1 budget arithmetic lives in `general_compute_runtime::managed_budget` so the
+// Master's dry run and the CLI quote with the same functions the scheduler settles with.
 fn managed_v1_fee(amount_cpt: i64) -> Result<i64> {
-    if amount_cpt < 0 {
-        anyhow::bail!("managed v1 settlement amount cannot be negative");
-    }
-    let whole = amount_cpt / 10_000;
-    let remainder = amount_cpt % 10_000;
-    whole
-        .checked_mul(PLATFORM_FEE_BPS)
-        .and_then(|fee| fee.checked_add(remainder * PLATFORM_FEE_BPS / 10_000))
-        .ok_or_else(|| anyhow::anyhow!("managed v1 fee calculation overflowed"))
+    Ok(general_compute_runtime::managed_budget::fee(amount_cpt)?)
 }
 
 /// Calculate the worst-case v1 hold from a per-replica allowance. This is also
 /// the persisted-hold formula used to settle historical in-progress attempts.
 pub fn managed_v1_worst_case_hold(max_cpt: i64, replica_count: u16) -> Result<(i64, i64, i64)> {
-    if max_cpt <= 0 {
-        anyhow::bail!("managed v1 settlement allowance must be positive");
-    }
-    if replica_count == 0 {
-        anyhow::bail!("managed v1 settlement replica count must be positive");
-    }
-    let reserved_usage_cpt = max_cpt
-        .checked_mul(i64::from(replica_count))
-        .ok_or_else(|| anyhow::anyhow!("managed v1 reserved usage calculation overflowed"))?;
-    let reserved_fee_cpt = managed_v1_fee(reserved_usage_cpt)?;
-    let held_total_cpt = reserved_usage_cpt
-        .checked_add(reserved_fee_cpt)
-        .ok_or_else(|| anyhow::anyhow!("managed v1 hold calculation overflowed"))?;
-    Ok((reserved_usage_cpt, reserved_fee_cpt, held_total_cpt))
+    Ok(general_compute_runtime::managed_budget::worst_case_hold(
+        max_cpt,
+        replica_count,
+    )?)
 }
 
 /// Derive the largest equal per-replica allowance that fits a task-total v1
@@ -631,50 +615,10 @@ pub fn managed_v1_total_budget_hold(
     task_max_cpt: i64,
     replica_count: u16,
 ) -> Result<(i64, i64, i64, i64)> {
-    if task_max_cpt <= 0 {
-        anyhow::bail!("managed v1 task-total budget must be positive");
-    }
-    if replica_count == 0 {
-        anyhow::bail!("managed v1 settlement replica count must be positive");
-    }
-    let replica_count_i64 = i64::from(replica_count);
-    let mut low = 1_i64;
-    let mut high = task_max_cpt / replica_count_i64;
-    if high == 0 {
-        anyhow::bail!("managed v1 task-total budget cannot fund a positive replica allowance");
-    }
-    let mut allowance = 0_i64;
-    while low <= high {
-        let candidate = low + (high - low) / 2;
-        let reserved_usage_cpt = candidate
-            .checked_mul(replica_count_i64)
-            .ok_or_else(|| anyhow::anyhow!("managed v1 reserved usage calculation overflowed"))?;
-        let reserved_fee_cpt = managed_v1_fee(reserved_usage_cpt)?;
-        let Some(held_total_cpt) = reserved_usage_cpt.checked_add(reserved_fee_cpt) else {
-            high = candidate - 1;
-            continue;
-        };
-        if held_total_cpt <= task_max_cpt {
-            allowance = candidate;
-            low = candidate + 1;
-        } else {
-            high = candidate - 1;
-        }
-    }
-    if allowance <= 0 {
-        anyhow::bail!("managed v1 task-total budget cannot fund a positive replica allowance");
-    }
-    let (reserved_usage_cpt, reserved_fee_cpt, held_total_cpt) =
-        managed_v1_worst_case_hold(allowance, replica_count)?;
-    if held_total_cpt > task_max_cpt {
-        anyhow::bail!("managed v1 task-total hold exceeds its budget");
-    }
-    Ok((
-        allowance,
-        reserved_usage_cpt,
-        reserved_fee_cpt,
-        held_total_cpt,
-    ))
+    Ok(general_compute_runtime::managed_budget::total_budget_hold(
+        task_max_cpt,
+        replica_count,
+    )?)
 }
 
 fn validate_managed_v1_held_allowance(allowance: ManagedV1HeldAllowance<'_>) -> Result<i64> {
