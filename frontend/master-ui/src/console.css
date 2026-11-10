@@ -526,15 +526,143 @@
   line-height: 1.5;
 }
 
-.submit-form textarea#task-source {
-  font-family: inherit;
-  font-size: 14px;
-}
-
 .field-error {
   margin: 0;
   color: var(--destructive);
   font-size: 12px;
+}
+
+.template-select {
+  width: 100%;
+  max-width: 460px;
+  min-height: 36px;
+  padding: 0 10px;
+  border: 1px solid var(--input);
+  border-radius: var(--radius-md);
+  background: var(--background);
+  color: var(--foreground);
+  font: inherit;
+  font-size: 13px;
+}
+
+.dry-run-panel {
+  display: grid;
+  gap: 12px;
+  padding: 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--muted);
+}
+
+.dry-run-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 14px;
+}
+
+.dry-run-heading h3 {
+  margin: 0 0 4px;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.dry-run-heading p {
+  max-width: 640px;
+  margin: 0;
+  color: var(--muted-foreground);
+  font-size: 11px;
+  line-height: 1.55;
+}
+
+.dry-run-heading button {
+  flex-shrink: 0;
+}
+
+.dry-run-result {
+  display: grid;
+  gap: 10px;
+}
+
+.dry-run-output {
+  display: grid;
+  gap: 6px;
+}
+
+.dry-run-output strong {
+  font-size: 12px;
+}
+
+.dry-run-output pre,
+.task-output-block pre {
+  max-height: 180px;
+  overflow: auto;
+  padding: 10px 12px;
+  margin: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--background);
+  color: var(--foreground);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.dry-run-price {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.5;
+}
+
+.dry-run-note {
+  margin: 0;
+  color: var(--muted-foreground);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.dry-run-actions {
+  display: flex;
+  justify-content: flex-start;
+}
+
+.cap-field {
+  max-width: 360px;
+}
+
+.cap-field input {
+  font-variant-numeric: tabular-nums;
+}
+
+.advanced-fields summary {
+  margin-bottom: 10px;
+  color: var(--muted-foreground);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.task-output-block {
+  display: grid;
+  gap: 6px;
+  margin-top: 10px;
+}
+
+.task-output-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+  font-size: 12px;
+}
+
+.task-output-tools {
+  display: flex;
+  gap: 6px;
 }
 
 .resource-fields {
@@ -545,10 +673,6 @@
 
 .resource-fields input {
   font-variant-numeric: tabular-nums;
-}
-
-.charge-cap-field {
-  grid-column: span 2;
 }
 
 .form-note {
@@ -752,8 +876,8 @@
     grid-template-columns: 1fr;
   }
 
-  .charge-cap-field {
-    grid-column: auto;
+  .dry-run-heading {
+    flex-direction: column;
   }
 }
 

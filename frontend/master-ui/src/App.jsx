@@ -3,10 +3,12 @@ import {
   Activity,
   CheckCircle2,
   CircleDollarSign,
+  Copy,
   Download,
   FileText,
   LogOut,
   Moon,
+  Play,
   RefreshCw,
   Send,
   Sun,
@@ -41,6 +43,16 @@ import {
   taskResponseError,
 } from './taskResponsePolicy.mjs';
 import { normalizeTaskObservability } from './taskObservability.mjs';
+import { SUBMIT_TEMPLATES } from './submitTemplates.mjs';
+import {
+  DRY_RUN_PATH,
+  capToFill,
+  dryRunRequest,
+  dryRunSignature,
+  estimateWarnings,
+  interpretDryRun,
+} from './dryRunPolicy.mjs';
+import { OUTPUT_PREVIEW_CHARS, taskOutputFilename, taskOutputView } from './taskOutputView.mjs';
 import { createBalanceRefreshController, parseCptBalance } from './accountBalance.mjs';
 import { readThemePreference, saveThemePreference } from './themePreference.mjs';
 import {
@@ -59,6 +71,8 @@ const SESSION_KEY = 'hivemind.master.session.v1';
 const API_REQUEST_TIMEOUT_MS = 20_000;
 const COLD_NETWORK_REQUEST_TIMEOUT_MS = 90_000;
 const ARTIFACT_REQUEST_TIMEOUT_MS = 60_000;
+// The Master stops a dry run after 10 seconds, so the request is given longer than that.
+const DRY_RUN_REQUEST_TIMEOUT_MS = 30_000;
 
 function SummaryCard({ icon: Icon, label, value, caption }) {
   return (
@@ -72,6 +86,79 @@ function SummaryCard({ icon: Icon, label, value, caption }) {
         <p className="summary-card-caption">{caption}</p>
       </CardContent>
     </Card>
+  );
+}
+
+// The answer of a dry run, shown under the source it was made for.
+function DryRunResult({ view, maxCpt, balance, onUseCap }) {
+  const { t } = useLocale();
+  if (view.kind === 'busy') {
+    return <p className="dry-run-note" role="status">{t("The Master is running its maximum number of dry runs. Try again in a moment.")}</p>;
+  }
+  if (view.kind === 'rejected') {
+    return <p className="field-error" role="alert">{t('Dry run failed: {detail}', { detail: view.detail })}</p>;
+  }
+  if (view.kind === 'limit') {
+    return (
+      <p className="dry-run-note" role="status">
+        {t(view.cause === 'timed_out'
+          ? 'The dry run stopped at its own time limit before the function finished. That says nothing about the price; set the charge cap yourself.'
+          : 'The dry run stopped at its own usage limit before the function finished. That says nothing about the price; set the charge cap yourself.')}
+      </p>
+    );
+  }
+  if (view.kind === 'program-error') {
+    let position = '';
+    if (view.line !== null) {
+      position = view.column === null
+        ? message(' (line {line})', { line: view.line })
+        : message(' (line {line}, column {column})', { line: view.line, column: view.column });
+    }
+    return (
+      <p className="field-error" role="alert">
+        {t('The function failed: {code}: {detail}{position}', { code: { raw: view.code }, detail: { raw: view.detail }, position })}
+      </p>
+    );
+  }
+  const warnings = estimateWarnings({ requiredMaxCpt: view.requiredMaxCpt, maxCpt, balance });
+  return (
+    <div className="dry-run-result" role="status">
+      <div className="dry-run-output">
+        <strong>{t("Output preview")}</strong>
+        <pre>{view.output ? view.output : t("(The function produced no output)")}</pre>
+        {view.outputTruncated ? (
+          <p className="task-note">{t('The output is {bytes} bytes; only the first part is shown here.', { bytes: view.outputBytes })}</p>
+        ) : null}
+        {view.exceedsConsensusLimit ? (
+          <p className="field-error" role="alert">
+            {t('This output is larger than the {bytes}-byte limit for a consensus result, so Workers cannot report it.', { bytes: view.consensusLimitBytes ?? '' })}
+          </p>
+        ) : null}
+      </div>
+      <p className="dry-run-price">
+        {t('Each replica uses {usage} units. {replicas} replicas use {reserved} CPT, plus a {fee} CPT platform fee: {required} CPT in total.', {
+          usage: view.usageUnits,
+          replicas: view.replicaCount,
+          reserved: view.reservedUsageCpt,
+          fee: view.platformFeeCpt,
+          required: view.requiredMaxCpt,
+        })}
+      </p>
+      {view.replicaCountIsDefault ? (
+        <p className="task-note">{t('{replicas} replicas is the network default.', { replicas: view.replicaCount })}</p>
+      ) : null}
+      {warnings.map((warning, index) => (
+        <p key={index} className="field-error" role="alert">{t(warning)}</p>
+      ))}
+      <div className="dry-run-actions">
+        <Button type="button" size="sm" onClick={() => onUseCap(view.requiredMaxCpt)} disabled={Number(maxCpt) === view.requiredMaxCpt}>
+          {t('Use {required} CPT as the charge cap', { required: view.requiredMaxCpt })}
+        </Button>
+      </div>
+      {view.interpreter ? (
+        <p className="task-note">{t('Estimated with interpreter {digest}. Workers on a different interpreter can report different usage.', { digest: view.interpreter })}</p>
+      ) : null}
+    </div>
   );
 }
 
@@ -118,6 +205,10 @@ export default function MasterApp() {
   const [storageGb, setStorageGb] = useState(0);
   const [hostCount, setHostCount] = useState(1);
   const [maxCpt, setMaxCpt] = useState(0);
+  const [templateId, setTemplateId] = useState('');
+  // The answer is kept with the exact source and input it was made for.
+  const [dryRun, setDryRun] = useState(null);
+  const [dryRunLoading, setDryRunLoading] = useState(false);
 
   const [tasks, setTasks] = useState([]);
   const [selectedTask, setSelectedTask] = useState('');
@@ -433,7 +524,7 @@ export default function MasterApp() {
 
     try {
       if (!taskSource.trim()) {
-        throw localeError('Task instructions are required');
+        throw localeError('Function source is required');
       }
       if (!taskInput.trim()) {
         throw localeError('Input JSON is required');
@@ -480,6 +571,8 @@ export default function MasterApp() {
       setTaskSource('');
       setTaskInput('');
       setSourceError(null);
+      setTemplateId('');
+      setDryRun(null);
       setStatus(message('Task submitted: {id}', { id: validatedTaskId.taskId }));
       void refreshBalanceAfterSubmit(token);
       if (tokenRef.current === token) {
@@ -491,6 +584,78 @@ export default function MasterApp() {
     } finally {
       setSubmitLoading(false);
     }
+  }
+
+  function applyTemplate(id) {
+    setTemplateId(id);
+    const template = SUBMIT_TEMPLATES.find((entry) => entry.id === id);
+    if (!template) return;
+    setTaskSource(template.source);
+    setTaskInput(template.input);
+    setSourceError(null);
+    setDryRun(null);
+  }
+
+  // Runs the function once on the Master host and prices the task from its usage.
+  async function runDryRun() {
+    if (!token || loadedTasksToken !== token) return;
+    const signature = dryRunSignature(taskSource, taskInput);
+    const refuse = (detail) => setDryRun({ signature, view: { kind: 'rejected', detail } });
+    if (!taskSource.trim()) { refuse(message('Function source is required')); return; }
+    if (!taskInput.trim()) { refuse(message('Input JSON is required')); return; }
+    try {
+      JSON.parse(taskInput);
+    } catch {
+      refuse(message('Input must be valid JSON'));
+      return;
+    }
+    setDryRunLoading(true);
+    try {
+      const { ok, status: httpStatus, data } = await api(
+        'POST',
+        DRY_RUN_PATH,
+        dryRunRequest(taskSource, taskInput),
+        token,
+        undefined,
+        DRY_RUN_REQUEST_TIMEOUT_MS,
+      );
+      if (tokenRef.current !== token) return;
+      const view = interpretDryRun({ ok, status: httpStatus, data });
+      setDryRun({ signature, view });
+      const fill = capToFill(view, maxCpt);
+      if (fill !== null) setMaxCpt(fill);
+    } catch (err) {
+      if (tokenRef.current === token) refuse(errorMessage(err, 'The dry run was not accepted.'));
+    } finally {
+      setDryRunLoading(false);
+    }
+  }
+
+  async function copyTaskOutput(task) {
+    const output = typeof task?.output === 'string' ? task.output : '';
+    if (!output) return;
+    try {
+      await window.navigator.clipboard.writeText(output);
+      setStatus(message('Output copied'));
+    } catch {
+      setStatus(message('Could not copy the output. Use Save output instead.'));
+    }
+  }
+
+  function saveTaskOutput(task) {
+    const output = typeof task?.output === 'string' ? task.output : '';
+    if (!output) return;
+    const validatedTaskId = validateTaskId(task?.task_id || task?.TaskID || '');
+    const filename = taskOutputFilename(validatedTaskId.ok ? validatedTaskId.taskId : 'task');
+    const url = window.URL.createObjectURL(new Blob([output], { type: 'text/plain;charset=utf-8' }));
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    window.URL.revokeObjectURL(url);
+    setStatus(message('Output saved: {filename}', { filename }));
   }
 
   async function viewTaskLog(task) {
@@ -696,6 +861,8 @@ export default function MasterApp() {
     setTaskSource('');
     setTaskInput('');
     setSourceError(null);
+    setTemplateId('');
+    setDryRun(null);
     setLastRefresh(null);
   }
 
@@ -705,6 +872,10 @@ export default function MasterApp() {
   }
 
   const taskSnapshotReady = !!token && loadedTasksToken === token;
+  // An answer is shown only for the exact source and input it was made for.
+  const dryRunView = dryRun && dryRun.signature === dryRunSignature(taskSource, taskInput)
+    ? dryRun.view
+    : null;
   const taskSummary = taskSnapshotReady
     ? tasks.reduce((summary, task) => {
         const status = String(task.status || task.Status || '').toUpperCase();
@@ -965,6 +1136,7 @@ export default function MasterApp() {
                           const isResultLoading = resultLoading === id;
                           const isCancelLoading = cancelLoading === id;
                           const isDownloadLoading = downloadLoading === id;
+                          const outputView = isManagedTask ? taskOutputView(task) : null;
 
                           return (
                             <li key={id || `task-${index}`}>
@@ -975,6 +1147,25 @@ export default function MasterApp() {
                                     <Badge variant={statusVariant}>{t(statusText || 'Unknown status')}</Badge>
                                   </div>
                                   {message ? <p className="task-message">{message}</p> : null}
+                                  {outputView ? (
+                                    <div className="task-output-block">
+                                      <div className="task-output-heading">
+                                        <strong>{t("Output")}</strong>
+                                        <span className="task-output-tools">
+                                          <Button type="button" variant="outline" size="sm" onClick={() => void copyTaskOutput(task)}>
+                                            <Copy aria-hidden="true" />{t("Copy output")}
+                                          </Button>
+                                          <Button type="button" variant="outline" size="sm" onClick={() => saveTaskOutput(task)}>
+                                            <Download aria-hidden="true" />{t("Save output")}
+                                          </Button>
+                                        </span>
+                                      </div>
+                                      <pre>{outputView.text}</pre>
+                                      {outputView.truncated ? (
+                                        <p className="task-note">{t('Showing the first {shown} of {total} characters. Save output keeps all of it.', { shown: OUTPUT_PREVIEW_CHARS, total: outputView.totalChars })}</p>
+                                      ) : null}
+                                    </div>
+                                  ) : null}
                                   <div className="task-meta">
                                     <span>{t('Wall {time}', { time: hasWallTime ? `${(wallTimeMs / 1000).toFixed(1)}s` : '—' })}</span>
                                     <span>{observability.billingSettled
@@ -1015,7 +1206,7 @@ export default function MasterApp() {
                                       <FileText aria-hidden="true" />{isLogLoading ? t("Loading…") : t("Log")}
                                     </Button>
                                     {isManagedTask ? (
-                                      <span className="task-output-note">{t("Output in Log")}</span>
+                                      outputView ? null : <span className="task-output-note">{t("Output in Log")}</span>
                                     ) : (
                                       <Button type="button" variant="outline" size="sm" onClick={() => void viewTaskResult(task)} disabled={isResultLoading}>
                                         {isResultLoading ? t("Loading…") : t("Result")}
@@ -1070,6 +1261,23 @@ export default function MasterApp() {
                 <CardContent>
                   <form className="submit-form" onSubmit={(event) => { event.preventDefault(); void submitTask(); }}>
                     <div className="field-stack">
+                      <Label htmlFor="task-template">{t("Start from a template")}</Label>
+                      <select
+                        id="task-template"
+                        className="template-select"
+                        value={templateId}
+                        onChange={(event) => applyTemplate(event.target.value)}
+                      >
+                        <option value="">{t("Choose a template…")}</option>
+                        {SUBMIT_TEMPLATES.map((template) => (
+                          <option key={template.id} value={template.id}>{t(template.label)}</option>
+                        ))}
+                      </select>
+                      {templateId ? (
+                        <p className="form-note">{t(SUBMIT_TEMPLATES.find((entry) => entry.id === templateId)?.summary ?? '')}</p>
+                      ) : null}
+                    </div>
+                    <div className="field-stack">
                       <Label htmlFor="task-id">{t("Task ID")}</Label>
                       <Input
                         id="task-id"
@@ -1079,15 +1287,16 @@ export default function MasterApp() {
                       />
                     </div>
                     <div className="field-stack">
-                      <Label htmlFor="task-source">{t("Task instructions")}</Label>
+                      <Label htmlFor="task-source">{t("Function source (hcode)")}</Label>
                       <Textarea
                         id="task-source"
                         value={taskSource}
                         onChange={(event) => {
                           setTaskSource(event.target.value);
-                          setSourceError(event.target.value.trim() ? null : 'Task instructions are required');
+                          setSourceError(event.target.value.trim() ? null : 'Function source is required');
                         }}
-                        placeholder={t("Describe the small, self-contained task to run")}
+                        placeholder={t("Write an hcode function. It reads its data through the input variable.")}
+                        spellCheck={false}
                         rows={8}
                         aria-invalid={!!sourceError}
                         aria-describedby={sourceError ? 'task-source-error' : undefined}
@@ -1107,36 +1316,58 @@ export default function MasterApp() {
                       />
                     </div>
 
-                    <div className="resource-fields">
-                      <div className="field-stack">
-                        <Label htmlFor="cpu-score">{t("CPU score")}</Label>
-                        <Input id="cpu-score" type="number" min="0" value={cpuScore} onChange={(event) => setCpuScore(event.target.value)} />
+                    <section className="dry-run-panel" aria-label={t("Dry run on this machine")}>
+                      <div className="dry-run-heading">
+                        <div>
+                          <h3>{t("Dry run on this machine")}</h3>
+                          <p>{t("Runs the function once here with the limits a replica uses and prices the task from its usage. It is an estimate: the network settles on what the Workers report.")}</p>
+                        </div>
+                        <Button
+                          type="button"
+                          variant="outline"
+                          onClick={() => void runDryRun()}
+                          disabled={dryRunLoading || loadedTasksToken !== token || !taskSource.trim() || !taskInput.trim()}
+                        >
+                          <Play aria-hidden="true" />{dryRunLoading ? t("Running…") : t("Check and price")}
+                        </Button>
                       </div>
-                      <div className="field-stack">
-                        <Label htmlFor="gpu-score">{t("GPU score")}</Label>
-                        <Input id="gpu-score" type="number" min="0" value={gpuScore} onChange={(event) => setGpuScore(event.target.value)} />
-                      </div>
-                      <div className="field-stack">
-                        <Label htmlFor="memory-gb">{t("Memory GB")}</Label>
-                        <Input id="memory-gb" type="number" min="0" value={memoryGb} onChange={(event) => setMemoryGb(event.target.value)} />
-                      </div>
-                      <div className="field-stack">
-                        <Label htmlFor="gpu-memory-gb">{t("GPU memory GB")}</Label>
-                        <Input id="gpu-memory-gb" type="number" min="0" value={gpuMemoryGb} onChange={(event) => setGpuMemoryGb(event.target.value)} />
-                      </div>
-                      <div className="field-stack">
-                        <Label htmlFor="storage-gb">{t("Storage GB")}</Label>
-                        <Input id="storage-gb" type="number" min="0" value={storageGb} onChange={(event) => setStorageGb(event.target.value)} />
-                      </div>
-                      <div className="field-stack">
-                        <Label htmlFor="host-count">{t("Host count")}</Label>
-                        <Input id="host-count" type="number" min="1" value={hostCount} onChange={(event) => setHostCount(event.target.value)} />
-                      </div>
-                      <div className="field-stack charge-cap-field">
-                        <Label htmlFor="max-cpt">{t("Task charge cap (CPT, fee included)")}</Label>
-                        <Input id="max-cpt" type="number" min="0" value={maxCpt} onChange={(event) => setMaxCpt(event.target.value)} />
-                      </div>
+                      {dryRunView ? (
+                        <DryRunResult view={dryRunView} maxCpt={maxCpt} balance={balance} onUseCap={setMaxCpt} />
+                      ) : null}
+                    </section>
+                    <div className="field-stack cap-field">
+                      <Label htmlFor="max-cpt">{t("Task charge cap (CPT, fee included)")}</Label>
+                      <Input id="max-cpt" type="number" min="0" value={maxCpt} onChange={(event) => setMaxCpt(event.target.value)} />
                     </div>
+                    <details className="advanced-fields">
+                      <summary>{t("Advanced: computer requirements")}</summary>
+                      <div className="resource-fields">
+                        <div className="field-stack">
+                          <Label htmlFor="cpu-score">{t("CPU score")}</Label>
+                          <Input id="cpu-score" type="number" min="0" value={cpuScore} onChange={(event) => setCpuScore(event.target.value)} />
+                        </div>
+                        <div className="field-stack">
+                          <Label htmlFor="gpu-score">{t("GPU score")}</Label>
+                          <Input id="gpu-score" type="number" min="0" value={gpuScore} onChange={(event) => setGpuScore(event.target.value)} />
+                        </div>
+                        <div className="field-stack">
+                          <Label htmlFor="memory-gb">{t("Memory GB")}</Label>
+                          <Input id="memory-gb" type="number" min="0" value={memoryGb} onChange={(event) => setMemoryGb(event.target.value)} />
+                        </div>
+                        <div className="field-stack">
+                          <Label htmlFor="gpu-memory-gb">{t("GPU memory GB")}</Label>
+                          <Input id="gpu-memory-gb" type="number" min="0" value={gpuMemoryGb} onChange={(event) => setGpuMemoryGb(event.target.value)} />
+                        </div>
+                        <div className="field-stack">
+                          <Label htmlFor="storage-gb">{t("Storage GB")}</Label>
+                          <Input id="storage-gb" type="number" min="0" value={storageGb} onChange={(event) => setStorageGb(event.target.value)} />
+                        </div>
+                        <div className="field-stack">
+                          <Label htmlFor="host-count">{t("Host count")}</Label>
+                          <Input id="host-count" type="number" min="1" value={hostCount} onChange={(event) => setHostCount(event.target.value)} />
+                        </div>
+                      </div>
+                    </details>
                     <p className="form-note">{t("Three Worker replicas share this task-wide cap through a deterministic split. It includes the platform fee; automatic paid retries are disabled until a funded platform treasury is available, so retry work is not charged to you.")}</p>
                     <div className="submit-actions">
                       <Button type="submit" disabled={submitLoading || loadedTasksToken !== token || !taskSource.trim() || !!sourceError}>
