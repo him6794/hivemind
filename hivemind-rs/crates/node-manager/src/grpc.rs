@@ -11,6 +11,7 @@ use hivemind_proto::{
     AccountRequestResponse,
     AdminAuditLogEntry,
     AdminWorkerTrustEntry,
+    ApiTokenInfo,
     CacheAnomalyEntry,
     ChangePasswordRequest,
     ChangePasswordResponse,
@@ -20,6 +21,8 @@ use hivemind_proto::{
     CleanupAdminArtifactsResponse,
     CompleteBatchRequest,
     CompleteBatchResponse,
+    CreateApiTokenRequest,
+    CreateApiTokenResponse,
     DownloadTaskArtifactRequest,
     DownloadTaskArtifactResponse,
     ExecutionObservation as ProtoExecutionObservation,
@@ -62,6 +65,8 @@ use hivemind_proto::{
     ListAdminSchedulingCacheAnomaliesResponse,
     ListAdminWorkerTrustRequest,
     ListAdminWorkerTrustResponse,
+    ListApiTokensRequest,
+    ListApiTokensResponse,
     ListWorkersRequest,
     ListWorkersResponse,
     LoginRequest,
@@ -93,6 +98,8 @@ use hivemind_proto::{
     ResetPasswordResponse,
     ResourceObservation as ProtoResourceObservation,
     ResourceSpec as ProtoResourceSpec,
+    RevokeApiTokenRequest,
+    RevokeApiTokenResponse,
     RunningStatusRequest,
     RunningStatusResponse,
     StatusResponse,
@@ -343,6 +350,41 @@ fn account_request_response(
         success,
         status_message: message.into(),
     }))
+}
+
+impl GrpcUserService {
+    /// The claims of a sign-in session. Token management needs one: an API token cannot mint or revoke
+    /// tokens, so a leaked token cannot widen its own reach.
+    async fn session_claims(&self, token: &str) -> Result<hivemind_models::Claims, Status> {
+        if hivemind_auth::api_tokens::is_api_token(token) {
+            return Err(Status::permission_denied(
+                "API token management needs a sign-in session",
+            ));
+        }
+        self.state
+            .auth
+            .validate_session(token)
+            .await
+            .map_err(|_| Status::unauthenticated("Invalid token"))
+    }
+}
+
+fn api_token_info(record: hivemind_auth::api_tokens::ApiTokenRecord) -> ApiTokenInfo {
+    ApiTokenInfo {
+        token_id: record.id.to_string(),
+        name: record.name,
+        token_prefix: record.token_prefix,
+        created_at: record.created_at.to_rfc3339(),
+        expires_at: record.expires_at.to_rfc3339(),
+        last_used_at: record
+            .last_used_at
+            .map(|at| at.to_rfc3339())
+            .unwrap_or_default(),
+        revoked_at: record
+            .revoked_at
+            .map(|at| at.to_rfc3339())
+            .unwrap_or_default(),
+    }
 }
 
 #[tonic::async_trait]
@@ -1298,6 +1340,96 @@ impl UserService for GrpcUserService {
                 status_message: "Could not end the session".into(),
             })),
         }
+    }
+
+    async fn create_api_token(
+        &self,
+        request: Request<CreateApiTokenRequest>,
+    ) -> Result<Response<CreateApiTokenResponse>, Status> {
+        let req = request.into_inner();
+        let claims = self.session_claims(&req.token).await?;
+        let days = if req.expires_in_days == 0 {
+            hivemind_auth::api_tokens::API_TOKEN_DEFAULT_DAYS
+        } else {
+            req.expires_in_days
+        };
+        match self
+            .state
+            .auth
+            .api_tokens()
+            .create(&claims.sub, &req.name, days)
+            .await
+        {
+            Ok(created) => Ok(Response::new(CreateApiTokenResponse {
+                success: true,
+                status_message: "OK".into(),
+                token_id: created.id.to_string(),
+                api_token: created.token,
+                expires_at: created.expires_at.to_rfc3339(),
+            })),
+            // A rule the request broke is an answer, so its message reaches the caller. A database failure is not.
+            Err(hivemind_auth::api_tokens::ApiTokenError::Rejected(message)) => {
+                Ok(Response::new(CreateApiTokenResponse {
+                    success: false,
+                    status_message: message,
+                    token_id: String::new(),
+                    api_token: String::new(),
+                    expires_at: String::new(),
+                }))
+            }
+            Err(hivemind_auth::api_tokens::ApiTokenError::Storage(error)) => {
+                Err(internal_status(error))
+            }
+        }
+    }
+
+    async fn list_api_tokens(
+        &self,
+        request: Request<ListApiTokensRequest>,
+    ) -> Result<Response<ListApiTokensResponse>, Status> {
+        let req = request.into_inner();
+        let claims = self.session_claims(&req.token).await?;
+        let records = self
+            .state
+            .auth
+            .api_tokens()
+            .list(&claims.sub)
+            .await
+            .map_err(internal_status)?;
+        Ok(Response::new(ListApiTokensResponse {
+            success: true,
+            status_message: "OK".into(),
+            tokens: records.into_iter().map(api_token_info).collect(),
+        }))
+    }
+
+    async fn revoke_api_token(
+        &self,
+        request: Request<RevokeApiTokenRequest>,
+    ) -> Result<Response<RevokeApiTokenResponse>, Status> {
+        let req = request.into_inner();
+        let claims = self.session_claims(&req.token).await?;
+        let Ok(id) = uuid::Uuid::parse_str(&req.token_id) else {
+            return Ok(Response::new(RevokeApiTokenResponse {
+                success: false,
+                status_message: "token_id is not valid".into(),
+            }));
+        };
+        let revoked = self
+            .state
+            .auth
+            .api_tokens()
+            .revoke(&claims.sub, id)
+            .await
+            .map_err(internal_status)?;
+        Ok(Response::new(RevokeApiTokenResponse {
+            success: revoked,
+            status_message: if revoked {
+                "OK".into()
+            } else {
+                "Token not found or already revoked".into()
+            },
+        }))
     }
 
     async fn check_email(
@@ -7016,6 +7148,93 @@ mod tests {
 
         assert!(!response.success);
         assert_eq!(response.status_message, "invalid transfer lease request");
+    }
+
+    #[tokio::test]
+    async fn api_tokens_are_managed_by_sign_in_sessions_and_authenticate_reads() {
+        let lock = grpc_db_lock();
+        let _lock_guard = lock.lock().await;
+        let (service, _task_id, _other_token, owner) = match test_service().await {
+            Some(parts) => parts,
+            None => return,
+        };
+        sqlx::query("INSERT INTO users (username, password_hash) VALUES ($1, 'hash')")
+            .bind(&owner)
+            .execute(&service.state.scheduler.database().pool)
+            .await
+            .unwrap();
+        let user_service = GrpcUserService::new(service.state.clone());
+        let session = token_for(&service.state.auth, &owner);
+
+        let created = user_service
+            .create_api_token(Request::new(CreateApiTokenRequest {
+                token: session.clone(),
+                name: "sdk".into(),
+                expires_in_days: 0,
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(created.success, "{}", created.status_message);
+        assert!(created.api_token.starts_with("hmk_"));
+
+        // A token cannot mint, list, or revoke tokens, so a leaked token cannot widen its own reach.
+        let mint = user_service
+            .create_api_token(Request::new(CreateApiTokenRequest {
+                token: created.api_token.clone(),
+                name: "escalate".into(),
+                expires_in_days: 0,
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(mint.code(), tonic::Code::PermissionDenied);
+        let list = user_service
+            .list_api_tokens(Request::new(ListApiTokensRequest {
+                token: created.api_token.clone(),
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(list.code(), tonic::Code::PermissionDenied);
+
+        let listed = user_service
+            .list_api_tokens(Request::new(ListApiTokensRequest {
+                token: session.clone(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(listed.tokens.len(), 1);
+        assert_eq!(listed.tokens[0].token_id, created.token_id);
+        assert!(listed.tokens[0].revoked_at.is_empty());
+
+        // Reads that the account owns work with the token, and the balance belongs to the token's account.
+        let balance = user_service
+            .get_balance(Request::new(GetBalanceRequest {
+                username: String::new(),
+                token: created.api_token.clone(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(balance.success);
+
+        let revoked = user_service
+            .revoke_api_token(Request::new(RevokeApiTokenRequest {
+                token: session.clone(),
+                token_id: created.token_id.clone(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(revoked.success, "{}", revoked.status_message);
+        let after = user_service
+            .get_balance(Request::new(GetBalanceRequest {
+                username: String::new(),
+                token: created.api_token.clone(),
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(after.code(), tonic::Code::Unauthenticated);
     }
 
     #[tokio::test]

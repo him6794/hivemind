@@ -2024,6 +2024,26 @@ async fn run_migrations_inner(pool: &PgPool) -> Result<()> {
          WHERE t.user_id = u.id AND t.purpose = 'email_verification' AND t.email_address IS NULL AND t.used_at IS NULL",
     ).execute(&mut *tx).await?;
 
+    // API tokens hold only the SHA-256 digest of the token. The plain value is returned once, at creation.
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS api_tokens (
+            id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            name VARCHAR(64) NOT NULL,
+            token_prefix VARCHAR(16) NOT NULL,
+            token_hash VARCHAR(64) NOT NULL UNIQUE,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            expires_at TIMESTAMPTZ NOT NULL,
+            last_used_at TIMESTAMPTZ,
+            revoked_at TIMESTAMPTZ
+        );",
+    )
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query("CREATE INDEX IF NOT EXISTS api_tokens_user_idx ON api_tokens (user_id);")
+        .execute(&mut *tx)
+        .await?;
+
     // The system account holds the CPT pool. '!no-login' is not a valid bcrypt hash, so it can
     // never authenticate. ON CONFLICT keeps an existing balance across restarts.
     sqlx::query(

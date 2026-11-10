@@ -153,6 +153,46 @@ message LogoutResponse {
     bool success = 1;
     string status_message = 2;
 }
+
+// API tokens: long-lived bearer credentials. Creating, listing, and revoking them needs a sign-in session.
+message CreateApiTokenRequest {
+    string token = 1;
+    string name = 2;
+    int64 expires_in_days = 3;
+}
+message CreateApiTokenResponse {
+    bool success = 1;
+    string status_message = 2;
+    string token_id = 3;
+    // The plain token. It is returned only here, and Nodepool keeps just its digest.
+    string api_token = 4;
+    string expires_at = 5;
+}
+message ListApiTokensRequest {
+    string token = 1;
+}
+message ApiTokenInfo {
+    string token_id = 1;
+    string name = 2;
+    string token_prefix = 3;
+    string created_at = 4;
+    string expires_at = 5;
+    string last_used_at = 6;
+    string revoked_at = 7;
+}
+message ListApiTokensResponse {
+    bool success = 1;
+    string status_message = 2;
+    repeated ApiTokenInfo tokens = 3;
+}
+message RevokeApiTokenRequest {
+    string token = 1;
+    string token_id = 2;
+}
+message RevokeApiTokenResponse {
+    bool success = 1;
+    string status_message = 2;
+}
 // Whether the address has verified ownership or an unexpired unverified reservation.
 message CheckEmailRequest {
     string email = 1;
@@ -1414,6 +1454,9 @@ service UserService {
     rpc CheckEmail(CheckEmailRequest) returns (CheckEmailResponse);
     rpc IssueEnrollmentCredential(IssueEnrollmentCredentialRequest) returns (IssueEnrollmentCredentialResponse);
     rpc RedeemEnrollmentCredential(RedeemEnrollmentCredentialRequest) returns (RedeemEnrollmentCredentialResponse);
+    rpc CreateApiToken(CreateApiTokenRequest) returns (CreateApiTokenResponse);
+    rpc ListApiTokens(ListApiTokensRequest) returns (ListApiTokensResponse);
+    rpc RevokeApiToken(RevokeApiTokenRequest) returns (RevokeApiTokenResponse);
 }
 
 service NodeManagerService {

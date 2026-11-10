@@ -1,3 +1,4 @@
+pub mod api_tokens;
 pub mod artifact_probe;
 pub mod artifact_read;
 pub mod enrollment;
@@ -7,6 +8,7 @@ pub mod user_repository;
 pub mod worker_execution;
 
 use anyhow::Result;
+use api_tokens::ApiTokenStore;
 use hivemind_database::DatabaseManager;
 use jwt_service::JwtService;
 use session_store::SessionStore;
@@ -17,6 +19,7 @@ pub struct AuthManager {
     jwt: Arc<JwtService>,
     users: Arc<UserRepository>,
     sessions: Arc<SessionStore>,
+    api_tokens: Arc<ApiTokenStore>,
 }
 
 impl Clone for AuthManager {
@@ -25,6 +28,7 @@ impl Clone for AuthManager {
             jwt: self.jwt.clone(),
             users: self.users.clone(),
             sessions: self.sessions.clone(),
+            api_tokens: self.api_tokens.clone(),
         }
     }
 }
@@ -35,7 +39,13 @@ impl AuthManager {
             jwt: Arc::new(JwtService::new(jwt_secret, token_expiry_hours)),
             users: Arc::new(UserRepository::new(db.pool.clone())),
             sessions: Arc::new(SessionStore::new(db.pool.clone())),
+            api_tokens: Arc::new(ApiTokenStore::new(db.pool.clone())),
         }
+    }
+
+    /// API token management. Callers must check that the request came from a sign-in session.
+    pub fn api_tokens(&self) -> &ApiTokenStore {
+        &self.api_tokens
     }
 
     /// Authenticate username/password, return JWT token on success
@@ -86,8 +96,25 @@ impl AuthManager {
     }
 
     /// Validate a token. A sign-in session must not have ended. A token with no session must have been issued
-    /// after the account's last password change.
+    /// after the account's last password change. An API token is valid while it is not revoked, not expired,
+    /// and its account is active; a password change revokes it.
     pub async fn validate_session(&self, token: &str) -> Result<hivemind_models::Claims> {
+        if api_tokens::is_api_token(token) {
+            let owner = self
+                .api_tokens
+                .validate(token)
+                .await?
+                .ok_or_else(|| anyhow::anyhow!("API token is not valid"))?;
+            return Ok(hivemind_models::Claims {
+                sub: owner.username,
+                user_id: owner.user_id.to_string(),
+                role: None,
+                task_id: None,
+                worker_id: None,
+                exp: owner.expires_at.timestamp().max(0) as usize,
+                iat: owner.created_at.timestamp().max(0) as usize,
+            });
+        }
         let claims = self.jwt.validate(token)?;
         match self.jwt.session_id(token)? {
             Some(session_id) => {
@@ -121,7 +148,11 @@ impl AuthManager {
     }
 
     /// The token for a refresh: the same claims and the same session, once the session has been checked.
+    /// An API token has no session to renew; a new token is created instead.
     pub async fn renew_token(&self, token: &str) -> Result<String> {
+        if api_tokens::is_api_token(token) {
+            anyhow::bail!("API tokens are not refreshed; create a new token instead");
+        }
         let claims = self.validate_session(token).await?;
         match self.jwt.session_id(token)? {
             Some(session_id) => self.jwt.encode_session_claims(&claims, &session_id),

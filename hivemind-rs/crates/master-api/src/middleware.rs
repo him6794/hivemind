@@ -58,7 +58,7 @@ pub async fn auth_middleware(
     match auth_header.as_deref().and_then(bearer_token) {
         Some(token) => {
             let token = token.to_string();
-            match decode_user_claims(&token) {
+            match bearer_claims(&token) {
                 Ok(claims) => {
                     // Master is a user-deployed requestor client: it must not require
                     // the platform JWT signing secret. Local claim extraction is only
@@ -124,6 +124,25 @@ fn bearer_token(value: &str) -> Option<&str> {
         return None;
     }
     (!token.is_empty()).then_some(token)
+}
+
+/// The claims a bearer token gives the Master for routing and rate limiting.
+///
+/// A JWT is decoded locally. An API token is opaque here: the Master keeps no account name for it, so its
+/// claims carry an empty subject, and Nodepool resolves the account on every call.
+pub fn bearer_claims(token: &str) -> Result<Claims, jsonwebtoken::errors::Error> {
+    if token.starts_with(hivemind_models::API_TOKEN_PREFIX) {
+        return Ok(Claims {
+            sub: String::new(),
+            user_id: String::new(),
+            role: None,
+            task_id: None,
+            worker_id: None,
+            exp: 0,
+            iat: 0,
+        });
+    }
+    decode_user_claims(token)
 }
 
 /// Decode user claims without the platform signing secret.
@@ -236,5 +255,118 @@ mod tests {
         let token = sample_token("any-secret", "bob", -120);
         let err = decode_user_claims(&token).unwrap_err();
         assert!(err.to_string().to_lowercase().contains("expired"));
+    }
+}
+
+#[cfg(test)]
+mod api_token_gate_tests {
+    use super::{auth_middleware, bearer_claims, AppState};
+    use crate::grpc_client::GrpcClient;
+    use crate::handlers::TaskSubmitRateLimiter;
+    use axum::body::Body;
+    use axum::http::{header, Request, StatusCode};
+    use axum::{middleware, routing::get, Router};
+    use std::sync::Arc;
+    use tower::ServiceExt;
+
+    fn state() -> AppState {
+        AppState {
+            grpc_client: GrpcClient::new("127.0.0.1:50051"),
+            config: hivemind_config::HivemindConfig::default(),
+            task_submit_limiter: Arc::new(tokio::sync::Mutex::new(TaskSubmitRateLimiter::new())),
+        }
+    }
+
+    #[test]
+    fn an_api_token_is_opaque_to_the_master_and_a_garbage_token_is_not() {
+        let claims = bearer_claims("hmk_0123456789abcdef").unwrap();
+        assert!(claims.sub.is_empty());
+        assert!(claims.user_id.is_empty());
+        assert!(bearer_claims("not-a-jwt").is_err());
+    }
+
+    #[tokio::test]
+    async fn an_api_token_reaches_the_handler_and_a_garbage_token_does_not() {
+        // The status route is one the gate skips, so the test does not depend on a reachable website.
+        let app = Router::new()
+            .route("/api/vpn/status", get(|| async { StatusCode::OK }))
+            .layer(middleware::from_fn_with_state(state(), auth_middleware))
+            .with_state(state());
+        let call = |token: &str| {
+            Request::builder()
+                .uri("/api/vpn/status")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap()
+        };
+        let accepted = app
+            .clone()
+            .oneshot(call("hmk_0123456789abcdef"))
+            .await
+            .unwrap();
+        assert_eq!(accepted.status(), StatusCode::OK);
+        let refused = app.oneshot(call("garbage")).await.unwrap();
+        assert_eq!(refused.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn token_routes_refuse_a_request_without_a_bearer() {
+        let app = crate::routes::create_router(state());
+        for (method, uri) in [
+            ("POST", "/api/tokens"),
+            ("GET", "/api/tokens"),
+            ("DELETE", "/api/tokens/00000000-0000-0000-0000-000000000000"),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(method)
+                        .uri(uri)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                response.status(),
+                StatusCode::UNAUTHORIZED,
+                "{method} {uri}"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod rate_limit_key_tests {
+    use crate::handlers::rate_limit_key;
+    use hivemind_models::Claims;
+
+    fn claims(sub: &str) -> Claims {
+        Claims {
+            sub: sub.into(),
+            user_id: String::new(),
+            role: None,
+            task_id: None,
+            worker_id: None,
+            exp: 0,
+            iat: 0,
+        }
+    }
+
+    #[test]
+    fn a_jwt_caller_is_limited_by_its_account_and_an_api_token_by_its_own_digest() {
+        assert_eq!(rate_limit_key(&claims("alice"), "jwt"), "alice");
+
+        let first = rate_limit_key(&claims(""), "hmk_first");
+        let second = rate_limit_key(&claims(""), "hmk_second");
+        assert!(first.starts_with("api-token:"));
+        assert_eq!(first.len(), "api-token:".len() + 64);
+        assert_ne!(first, second);
+        assert_eq!(first, rate_limit_key(&claims(""), "hmk_first"));
+        assert!(
+            !first.contains("hmk_first"),
+            "the key must not contain the token"
+        );
     }
 }

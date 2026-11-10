@@ -4,7 +4,7 @@ use axum::{
     extract::DefaultBodyLimit,
     http::{header, HeaderValue, Method},
     middleware,
-    routing::{get, post, put},
+    routing::{delete, get, post, put},
     Router,
 };
 use tower_http::cors::{AllowOrigin, CorsLayer};
@@ -69,6 +69,14 @@ pub fn create_router(state: AppState) -> Router {
         .route(
             "/api/admin/audit/logs",
             get(super::handlers::list_admin_audit_logs),
+        )
+        .route(
+            "/api/tokens",
+            post(super::handlers::create_api_token).get(super::handlers::list_api_tokens),
+        )
+        .route(
+            "/api/tokens/:token_id",
+            delete(super::handlers::revoke_api_token),
         )
         .route("/api/tasks/quote", post(super::handlers::quote_task))
         .route(

@@ -82,6 +82,8 @@ impl SessionStore {
 
 /// Ends every sign-in session of one account inside the caller's transaction, so a password change commits
 /// together with the sessions it ends. `keep` is the session that made the change, if there is one.
+/// The account's API tokens are revoked in the same transaction: they are credentials for the same account,
+/// and a password change must end them too. Tokens are never kept.
 pub async fn end_account_sessions(
     tx: &mut Transaction<'_, Postgres>,
     user_id: Uuid,
@@ -95,6 +97,13 @@ pub async fn end_account_sessions(
     )
     .bind(user_id)
     .bind(keep)
+    .execute(&mut **tx)
+    .await?;
+    sqlx::query(
+        "UPDATE api_tokens SET revoked_at = NOW()
+         WHERE revoked_at IS NULL AND user_id = $1",
+    )
+    .bind(user_id)
     .execute(&mut **tx)
     .await?;
     Ok(result.rows_affected())

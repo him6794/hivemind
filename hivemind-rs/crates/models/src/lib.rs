@@ -884,3 +884,6 @@ mod tests {
         );
     }
 }
+
+/// Prefix of an API token. A bearer token with this prefix is opaque to the Master: Nodepool validates it.
+pub const API_TOKEN_PREFIX: &str = "hmk_";

@@ -5,8 +5,10 @@ use axum::{
     Json,
 };
 use hivemind_config::HivemindConfig;
+use hivemind_models::Claims;
 use hivemind_proto::ResourceSpec as ProtoResourceSpec;
 use serde::{Deserialize, Serialize};
+use sha2::Digest;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -1413,13 +1415,191 @@ pub async fn quote_task(
     }
 }
 
+/// The key a caller is rate limited under. A JWT caller is its account. An API token has no account name in
+/// the Master, so a digest of the token stands in: each token has its own limit, and the token itself is not
+/// kept.
+pub(crate) fn rate_limit_key(claims: &Claims, token: &str) -> String {
+    if claims.sub.is_empty() {
+        let digest = sha2::Sha256::digest(token.as_bytes());
+        return format!("api-token:{}", hex::encode(digest));
+    }
+    claims.sub.clone()
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CreateApiTokenBody {
+    pub name: String,
+    /// Zero asks for the default lifetime.
+    #[serde(default)]
+    pub expires_in_days: i64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ApiTokenCreatedResponse {
+    pub success: bool,
+    pub message: String,
+    pub token_id: String,
+    /// Shown once. Nodepool keeps only its digest.
+    pub api_token: String,
+    pub expires_at: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ApiTokenView {
+    pub token_id: String,
+    pub name: String,
+    pub token_prefix: String,
+    pub created_at: String,
+    pub expires_at: String,
+    pub last_used_at: String,
+    pub revoked_at: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ApiTokenListResponse {
+    pub success: bool,
+    pub message: String,
+    pub tokens: Vec<ApiTokenView>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ApiTokenStatusResponse {
+    pub success: bool,
+    pub message: String,
+}
+
+/// Maps the status Nodepool answers with to the HTTP status a client should see.
+fn token_status_code(status: &tonic::Status) -> StatusCode {
+    match status.code() {
+        tonic::Code::Unauthenticated => StatusCode::UNAUTHORIZED,
+        tonic::Code::PermissionDenied => StatusCode::FORBIDDEN,
+        tonic::Code::NotFound => StatusCode::NOT_FOUND,
+        tonic::Code::InvalidArgument => StatusCode::BAD_REQUEST,
+        _ => StatusCode::BAD_GATEWAY,
+    }
+}
+
+/// POST /api/tokens
+pub async fn create_api_token(
+    State(state): State<AppState>,
+    AuthUser { token, .. }: AuthUser,
+    Json(body): Json<CreateApiTokenBody>,
+) -> (StatusCode, Json<ApiTokenCreatedResponse>) {
+    let mut grpc = state.grpc_client.clone();
+    match grpc
+        .create_api_token(&token, &body.name, body.expires_in_days)
+        .await
+    {
+        Ok(resp) if resp.success => (
+            StatusCode::CREATED,
+            Json(ApiTokenCreatedResponse {
+                success: true,
+                message: resp.status_message,
+                token_id: resp.token_id,
+                api_token: resp.api_token,
+                expires_at: resp.expires_at,
+            }),
+        ),
+        Ok(resp) => (
+            StatusCode::BAD_REQUEST,
+            Json(ApiTokenCreatedResponse {
+                success: false,
+                message: resp.status_message,
+                token_id: String::new(),
+                api_token: String::new(),
+                expires_at: String::new(),
+            }),
+        ),
+        Err(status) => (
+            token_status_code(&status),
+            Json(ApiTokenCreatedResponse {
+                success: false,
+                message: status.message().to_string(),
+                token_id: String::new(),
+                api_token: String::new(),
+                expires_at: String::new(),
+            }),
+        ),
+    }
+}
+
+/// GET /api/tokens
+pub async fn list_api_tokens(
+    State(state): State<AppState>,
+    AuthUser { token, .. }: AuthUser,
+) -> (StatusCode, Json<ApiTokenListResponse>) {
+    let mut grpc = state.grpc_client.clone();
+    match grpc.list_api_tokens(&token).await {
+        Ok(resp) => (
+            StatusCode::OK,
+            Json(ApiTokenListResponse {
+                success: resp.success,
+                message: resp.status_message,
+                tokens: resp
+                    .tokens
+                    .into_iter()
+                    .map(|t| ApiTokenView {
+                        token_id: t.token_id,
+                        name: t.name,
+                        token_prefix: t.token_prefix,
+                        created_at: t.created_at,
+                        expires_at: t.expires_at,
+                        last_used_at: t.last_used_at,
+                        revoked_at: t.revoked_at,
+                    })
+                    .collect(),
+            }),
+        ),
+        Err(status) => (
+            token_status_code(&status),
+            Json(ApiTokenListResponse {
+                success: false,
+                message: status.message().to_string(),
+                tokens: Vec::new(),
+            }),
+        ),
+    }
+}
+
+/// DELETE /api/tokens/:token_id
+pub async fn revoke_api_token(
+    State(state): State<AppState>,
+    AuthUser { token, .. }: AuthUser,
+    AxumPath(token_id): AxumPath<String>,
+) -> (StatusCode, Json<ApiTokenStatusResponse>) {
+    let mut grpc = state.grpc_client.clone();
+    match grpc.revoke_api_token(&token, &token_id).await {
+        Ok(resp) if resp.success => (
+            StatusCode::OK,
+            Json(ApiTokenStatusResponse {
+                success: true,
+                message: resp.status_message,
+            }),
+        ),
+        Ok(resp) => (
+            StatusCode::NOT_FOUND,
+            Json(ApiTokenStatusResponse {
+                success: false,
+                message: resp.status_message,
+            }),
+        ),
+        Err(status) => (
+            token_status_code(&status),
+            Json(ApiTokenStatusResponse {
+                success: false,
+                message: status.message().to_string(),
+            }),
+        ),
+    }
+}
+
 /// POST /api/tasks
 pub async fn create_task(
     State(state): State<AppState>,
     AuthUser { claims, token }: AuthUser,
     Json(body): Json<CreateTaskBody>,
 ) -> (StatusCode, Json<TaskResponse>) {
-    let owner = claims.sub;
+    let owner = rate_limit_key(&claims, &token);
     if let Some(response) = enforce_task_submit_rate_limit(&state, &owner).await {
         return response;
     }
@@ -1812,6 +1992,16 @@ pub async fn register_worker(
         );
     }
     let owner = claims.sub;
+    if owner.is_empty() {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(StatusResponse {
+                success: false,
+                status_message: "API tokens cannot register computers; sign in on the computer"
+                    .into(),
+            }),
+        );
+    }
     if let Some(u) = body.username.as_deref().map(str::trim) {
         if !u.is_empty() && u != owner {
             return (

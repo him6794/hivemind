@@ -4,25 +4,27 @@ use hivemind_proto::{
     general_compute_artifact_service_client::GeneralComputeArtifactServiceClient,
     master_node_service_client::MasterNodeServiceClient,
     node_manager_service_client::NodeManagerServiceClient, user_service_client::UserServiceClient,
-    CleanupAdminArtifactsRequest, CleanupAdminArtifactsResponse, DownloadTaskArtifactRequest,
-    DownloadTaskArtifactResponse, GeneralComputeArtifactChunkUpload,
-    GeneralComputeArtifactChunkUploadResponse, GetAdminArtifactOverviewRequest,
-    GetAdminArtifactOverviewResponse, GetAdminBillingOverviewRequest,
-    GetAdminBillingOverviewResponse, GetAdminSchedulingCacheAlertRequest,
-    GetAdminSchedulingCacheAlertResponse, GetAdminSchedulingCacheMetricsRequest,
-    GetAdminSchedulingCacheMetricsResponse, GetAllUserTasksRequest, GetAllUserTasksResponse,
-    GetBalanceRequest, GetBalanceResponse, GetProviderEarningsRequest, GetProviderEarningsResponse,
-    GetProviderWorkerSettingsRequest, GetProviderWorkerSettingsResponse, GetTaskResultRequest,
-    GetTaskResultResponse, GetWorkerTrustProfileRequest, GetWorkerTrustProfileResponse,
-    ListAdminAuditLogsRequest, ListAdminAuditLogsResponse,
-    ListAdminSchedulingCacheAnomaliesRequest, ListAdminSchedulingCacheAnomaliesResponse,
-    ListAdminWorkerTrustRequest, ListAdminWorkerTrustResponse, ListWorkersRequest,
+    CleanupAdminArtifactsRequest, CleanupAdminArtifactsResponse, CreateApiTokenRequest,
+    CreateApiTokenResponse, DownloadTaskArtifactRequest, DownloadTaskArtifactResponse,
+    GeneralComputeArtifactChunkUpload, GeneralComputeArtifactChunkUploadResponse,
+    GetAdminArtifactOverviewRequest, GetAdminArtifactOverviewResponse,
+    GetAdminBillingOverviewRequest, GetAdminBillingOverviewResponse,
+    GetAdminSchedulingCacheAlertRequest, GetAdminSchedulingCacheAlertResponse,
+    GetAdminSchedulingCacheMetricsRequest, GetAdminSchedulingCacheMetricsResponse,
+    GetAllUserTasksRequest, GetAllUserTasksResponse, GetBalanceRequest, GetBalanceResponse,
+    GetProviderEarningsRequest, GetProviderEarningsResponse, GetProviderWorkerSettingsRequest,
+    GetProviderWorkerSettingsResponse, GetTaskResultRequest, GetTaskResultResponse,
+    GetWorkerTrustProfileRequest, GetWorkerTrustProfileResponse, ListAdminAuditLogsRequest,
+    ListAdminAuditLogsResponse, ListAdminSchedulingCacheAnomaliesRequest,
+    ListAdminSchedulingCacheAnomaliesResponse, ListAdminWorkerTrustRequest,
+    ListAdminWorkerTrustResponse, ListApiTokensRequest, ListApiTokensResponse, ListWorkersRequest,
     ListWorkersResponse, LoginRequest, LoginResponse, QuoteTaskRequest, QuoteTaskResponse,
     RegisterUserRequest, RegisterUserResponse, RegisterWorkerNodeRequest, RemoveWorkerRequest,
-    ResourceSpec as ProtoResourceSpec, StatusResponse, StopTaskRequest, StopTaskResponse,
-    TasklogRequest, TasklogResponse, UpdateProviderWorkerSettingsRequest,
-    UpdateProviderWorkerSettingsResponse, UpdateWorkerTrustControlRequest,
-    UpdateWorkerTrustControlResponse, UploadTaskRequest, UploadTaskResponse,
+    ResourceSpec as ProtoResourceSpec, RevokeApiTokenRequest, RevokeApiTokenResponse,
+    StatusResponse, StopTaskRequest, StopTaskResponse, TasklogRequest, TasklogResponse,
+    UpdateProviderWorkerSettingsRequest, UpdateProviderWorkerSettingsResponse,
+    UpdateWorkerTrustControlRequest, UpdateWorkerTrustControlResponse, UploadTaskRequest,
+    UploadTaskResponse,
 };
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -219,6 +221,60 @@ impl GrpcClient {
             .await
             .map_err(|_| Status::deadline_exceeded("nodepool login timed out after 10 seconds"))?
             .map(|r| r.into_inner())
+        })
+        .await
+    }
+
+    pub async fn create_api_token(
+        &mut self,
+        token: &str,
+        name: &str,
+        expires_in_days: i64,
+    ) -> Result<CreateApiTokenResponse, tonic::Status> {
+        let token = token.to_string();
+        let name = name.to_string();
+        self.with_clients(|mut clients| async move {
+            clients
+                .user
+                .create_api_token(Request::new(CreateApiTokenRequest {
+                    token,
+                    name,
+                    expires_in_days,
+                }))
+                .await
+                .map(|r| r.into_inner())
+        })
+        .await
+    }
+
+    pub async fn list_api_tokens(
+        &mut self,
+        token: &str,
+    ) -> Result<ListApiTokensResponse, tonic::Status> {
+        let token = token.to_string();
+        self.with_clients(|mut clients| async move {
+            clients
+                .user
+                .list_api_tokens(Request::new(ListApiTokensRequest { token }))
+                .await
+                .map(|r| r.into_inner())
+        })
+        .await
+    }
+
+    pub async fn revoke_api_token(
+        &mut self,
+        token: &str,
+        token_id: &str,
+    ) -> Result<RevokeApiTokenResponse, tonic::Status> {
+        let token = token.to_string();
+        let token_id = token_id.to_string();
+        self.with_clients(|mut clients| async move {
+            clients
+                .user
+                .revoke_api_token(Request::new(RevokeApiTokenRequest { token, token_id }))
+                .await
+                .map(|r| r.into_inner())
         })
         .await
     }
