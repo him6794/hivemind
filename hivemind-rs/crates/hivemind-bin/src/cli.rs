@@ -41,6 +41,12 @@ pub struct BatchCommand {
     pub gpu_memory_gb: Option<i32>,
     pub storage_gb: Option<i64>,
     pub host_count: Option<i32>,
+    /// Replicas to request. The network default applies when this is `None`.
+    pub replicas: Option<u16>,
+    /// Run every input locally first, so failures are found and each task gets its exact cap.
+    pub precheck: bool,
+    /// Submit the inputs that pass the pre-check instead of stopping when any fails.
+    pub skip_invalid: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -876,13 +882,15 @@ const MAX_BATCH_INPUTS: usize = 1000;
 /// task capped at its quote runs out of budget almost at once.
 const DEFAULT_BATCH_TASK_CPT: i64 = 100;
 const BATCH_RESULT_HEADER: &str = "index,task_id,status,output,billed_cpt,message,input";
+/// The status of an input that the local pre-check refused to submit. The message says why.
+const PRECHECK_FAILED: &str = "PRECHECK_FAILED";
 
 fn parse_batch_args(args: &[String]) -> Result<BatchCommand> {
     let source_path = args
         .get(2)
         .ok_or_else(|| {
             anyhow!(
-                "Usage: hivemind batch <function-source> --inputs <inputs.jsonl> --max-total-cpt <cpt> --username <user> [--password <pass>] [--out <results.csv>] [--max-cpt-per-task <cpt>] [--task-prefix <prefix>] [--per-minute <1-60>] [--poll-secs <n>] [--timeout-secs <n>] [--api <url>]"
+                "Usage: hivemind batch <function-source> --inputs <inputs.jsonl> --max-total-cpt <cpt> --username <user> [--password <pass>] [--out <results.csv>] [--max-cpt-per-task <cpt>] [--replicas <2-7>] [--no-precheck] [--skip-invalid] [--task-prefix <prefix>] [--per-minute <1-60>] [--poll-secs <n>] [--timeout-secs <n>] [--api <url>]"
             )
         })?
         .clone();
@@ -906,12 +914,29 @@ fn parse_batch_args(args: &[String]) -> Result<BatchCommand> {
         gpu_memory_gb: None,
         storage_gb: None,
         host_count: None,
+        replicas: None,
+        precheck: true,
+        skip_invalid: false,
     };
     let mut max_total_cpt = None;
 
     let mut i = 3;
     while i < args.len() {
         let flag = args[i].as_str();
+        // These two take no value.
+        match flag {
+            "--no-precheck" => {
+                batch.precheck = false;
+                i += 1;
+                continue;
+            }
+            "--skip-invalid" => {
+                batch.skip_invalid = true;
+                i += 1;
+                continue;
+            }
+            _ => {}
+        }
         let value = args
             .get(i + 1)
             .ok_or_else(|| anyhow!("missing value for {}", flag))?;
@@ -933,9 +958,15 @@ fn parse_batch_args(args: &[String]) -> Result<BatchCommand> {
             "--gpu-memory-gb" => batch.gpu_memory_gb = Some(parse_i32_flag(flag, value)?),
             "--storage-gb" => batch.storage_gb = Some(parse_i64_flag(flag, value)?),
             "--host-count" => batch.host_count = Some(parse_i32_flag(flag, value)?),
+            "--replicas" => batch.replicas = Some(check::parse_replicas(flag, value)?),
             _ => return Err(anyhow!("unknown batch flag {}", flag)),
         }
         i += 2;
+    }
+    if batch.skip_invalid && !batch.precheck {
+        return Err(anyhow!(
+            "--skip-invalid needs the local pre-check, which --no-precheck turns off"
+        ));
     }
 
     if batch.username.trim().is_empty() {
@@ -1022,11 +1053,81 @@ fn batch_task_id(prefix: &str, index: usize) -> String {
     format!("{prefix}-{:04}", index + 1)
 }
 
-fn batch_worst_case_cpt(count: usize, per_task_cap: i64) -> Result<i64> {
-    i64::try_from(count)
-        .ok()
-        .and_then(|count| count.checked_mul(per_task_cap))
+fn batch_worst_case_cpt(caps: &[i64]) -> Result<i64> {
+    caps.iter()
+        .try_fold(0_i64, |sum, cap| sum.checked_add(*cap))
         .ok_or_else(|| anyhow!("the batch's worst-case cost is out of range"))
+}
+
+/// Stops the batch when an input cannot run, unless the rest may go ahead without it.
+fn check_refusals(plan: &[std::result::Result<i64, String>], skip_invalid: bool) -> Result<()> {
+    let refused: Vec<(usize, &String)> = plan
+        .iter()
+        .enumerate()
+        .filter_map(|(index, entry)| entry.as_ref().err().map(|reason| (index, reason)))
+        .collect();
+    if !refused.is_empty() && !skip_invalid {
+        return Err(anyhow!("{}", refusal_report(&refused, plan.len())));
+    }
+    if refused.len() == plan.len() {
+        return Err(anyhow!(
+            "none of the {} inputs can run, so nothing was submitted",
+            plan.len()
+        ));
+    }
+    Ok(())
+}
+
+/// Why the batch was stopped, naming the inputs that cannot run.
+fn refusal_report(refused: &[(usize, &String)], total: usize) -> String {
+    const SHOWN: usize = 10;
+    let mut text = format!(
+        "{} of {} inputs cannot run, so nothing was submitted:",
+        refused.len(),
+        total
+    );
+    for (index, reason) in refused.iter().take(SHOWN) {
+        text.push_str(&format!("\n  input {}: {}", index + 1, reason));
+    }
+    if refused.len() > SHOWN {
+        text.push_str(&format!("\n  ... and {} more", refused.len() - SHOWN));
+    }
+    text.push_str("\nFix them, or pass --skip-invalid to submit the rest.");
+    text
+}
+
+/// The line printed once the batch is planned and before the first task is sent.
+fn plan_summary(
+    prefix: &str,
+    caps: &[i64],
+    skipped: usize,
+    worst_case: i64,
+    command: &BatchCommand,
+    out_path: &str,
+) -> String {
+    let (low, high) = caps.iter().fold((i64::MAX, i64::MIN), |(low, high), cap| {
+        (low.min(*cap), high.max(*cap))
+    });
+    let per_task = if low == high {
+        format!("{low} CPT each")
+    } else {
+        format!("{low} to {high} CPT each")
+    };
+    let basis = if command.precheck && command.max_cpt_per_task.is_none() {
+        ", the exact need of each input from a local run"
+    } else {
+        ""
+    };
+    let skipped = if skipped == 0 {
+        String::new()
+    } else {
+        format!(" ({skipped} inputs skipped)")
+    };
+    format!(
+        "Batch {prefix}: {} tasks{skipped} at {per_task}{basis}, at most {worst_case} CPT in total (cap {}). Results: {out_path}",
+        caps.len(),
+        command.max_total_cpt
+    )
 }
 
 /// The per-minute submission limit is applied per owner. Pacing below it keeps a batch from tripping the limit.
@@ -1067,8 +1168,15 @@ struct BatchRow {
 impl BatchRow {
     // A row still needs polling when its task was accepted and has not reached a final state.
     fn is_open(&self) -> bool {
-        !matches!(self.status.as_str(), "SUBMIT_FAILED" | "NOT_SUBMITTED")
-            && !is_terminal_task_status(&self.status)
+        !self.was_never_accepted() && !is_terminal_task_status(&self.status)
+    }
+
+    // These rows have no task on the network, so there is nothing to look up for them.
+    fn was_never_accepted(&self) -> bool {
+        matches!(
+            self.status.as_str(),
+            "SUBMIT_FAILED" | "NOT_SUBMITTED" | PRECHECK_FAILED
+        )
     }
 }
 
@@ -1122,6 +1230,11 @@ fn batch_request_body(
     }
     if let Some(v) = command.host_count {
         body.insert("host_count".into(), v.into());
+    }
+    if let Some(replicas) = command.replicas {
+        // A policy needs both numbers: a replica count with the default quorum can be invalid.
+        body.insert("managed_replica_count".into(), replicas.into());
+        body.insert("managed_quorum".into(), check::majority(replicas).into());
     }
     body
 }
@@ -1288,7 +1401,10 @@ fn apply_batch_snapshots(
     rows: &mut [BatchRow],
     snapshots: &std::collections::HashMap<String, serde_json::Value>,
 ) {
-    for row in rows.iter_mut().filter(|row| row.status != "SUBMIT_FAILED") {
+    for row in rows
+        .iter_mut()
+        .filter(|row| row.status != "SUBMIT_FAILED" && row.status != PRECHECK_FAILED)
+    {
         let Some(task) = snapshots.get(&row.task_id) else {
             continue;
         };
@@ -1343,6 +1459,33 @@ pub async fn run_batch(command: BatchCommand) -> Result<()> {
         .clone()
         .unwrap_or_else(|| format!("{prefix}-results.csv"));
 
+    // A local run of every input finds the ones that cannot run and prices each, before anything
+    // is sent.
+    let replicas = command.replicas.unwrap_or(check::DEFAULT_REPLICAS);
+    let outcomes = if command.precheck {
+        println!("Checking {} inputs with a local run...", inputs.len());
+        let (check_source, check_inputs) = (source.clone(), inputs.clone());
+        let outcomes = tokio::task::spawn_blocking(move || {
+            check::precheck_inputs(
+                &check_source,
+                &check_inputs,
+                replicas,
+                check::default_limits(),
+            )
+        })
+        .await
+        .map_err(|e| anyhow!("the local run stopped unexpectedly: {}", e))?;
+        // Whether an input can run does not depend on the price, so this is settled before
+        // signing in and a batch that cannot go ahead costs no request at all.
+        check_refusals(
+            &check::plan_caps(&outcomes, command.max_cpt_per_task, 0),
+            command.skip_invalid,
+        )?;
+        Some(outcomes)
+    } else {
+        None
+    };
+
     let client = reqwest::Client::new();
     let token = login(
         &client,
@@ -1354,58 +1497,71 @@ pub async fn run_batch(command: BatchCommand) -> Result<()> {
 
     // The price depends on the resources and host count, not on the input, so one quote prices the batch.
     let unit_cpt = quote_batch_price(&client, &command, &token, &source, &inputs[0]).await?;
-    let per_task_cap = match command.max_cpt_per_task {
-        Some(cap) if cap < unit_cpt => {
+    if let Some(cap) = command.max_cpt_per_task {
+        if cap < unit_cpt {
             return Err(anyhow!(
                 "--max-cpt-per-task {} is below the quoted price of {} CPT per task",
                 cap,
                 unit_cpt
             ));
         }
-        Some(cap) => cap,
-        None => DEFAULT_BATCH_TASK_CPT.max(unit_cpt),
+    }
+    let plan: Vec<std::result::Result<i64, String>> = match &outcomes {
+        Some(outcomes) => check::plan_caps(outcomes, command.max_cpt_per_task, unit_cpt),
+        None => {
+            let cap = command
+                .max_cpt_per_task
+                .unwrap_or_else(|| DEFAULT_BATCH_TASK_CPT.max(unit_cpt));
+            vec![Ok(cap); inputs.len()]
+        }
     };
-    let worst_case = batch_worst_case_cpt(inputs.len(), per_task_cap)?;
+    let skipped = plan.iter().filter(|entry| entry.is_err()).count();
+    let caps: Vec<i64> = plan
+        .iter()
+        .filter_map(|entry| entry.as_ref().ok().copied())
+        .collect();
+    let worst_case = batch_worst_case_cpt(&caps)?;
     if worst_case > command.max_total_cpt {
         return Err(anyhow!(
-            "{} tasks can spend up to {} CPT at {} CPT each, above --max-total-cpt {}; raise the cap or split the inputs",
-            inputs.len(),
+            "{} tasks can spend up to {} CPT, above --max-total-cpt {}; raise the cap or split the inputs",
+            caps.len(),
             worst_case,
-            per_task_cap,
             command.max_total_cpt
         ));
     }
     println!(
-        "Batch {}: {} tasks at {} CPT each, at most {} CPT in total (cap {}). Results: {}",
-        prefix,
-        inputs.len(),
-        per_task_cap,
-        worst_case,
-        command.max_total_cpt,
-        out_path
+        "{}",
+        plan_summary(&prefix, &caps, skipped, worst_case, &command, &out_path)
     );
 
     let mut rows: Vec<BatchRow> = inputs
         .iter()
         .enumerate()
-        .map(|(index, input)| BatchRow {
-            index: index + 1,
-            task_id: task_ids[index].clone(),
-            input: input.clone(),
-            status: "NOT_SUBMITTED".into(),
-            output: String::new(),
-            billed_cpt: None,
-            message: String::new(),
+        .map(|(index, input)| {
+            let (status, message) = match &plan[index] {
+                Ok(_) => ("NOT_SUBMITTED", String::new()),
+                Err(reason) => (PRECHECK_FAILED, reason.clone()),
+            };
+            BatchRow {
+                index: index + 1,
+                task_id: task_ids[index].clone(),
+                input: input.clone(),
+                status: status.into(),
+                output: String::new(),
+                billed_cpt: None,
+                message,
+            }
         })
         .collect();
 
     let interval = submit_interval(command.per_minute);
     let mut next_submit_at = Instant::now();
     for index in 0..rows.len() {
+        let Ok(cap) = plan[index] else { continue };
         let body = serde_json::Value::Object({
             let mut body = batch_request_body(&command, &source, &inputs[index]);
             body.insert("task_id".into(), rows[index].task_id.clone().into());
-            body.insert("max_cpt".into(), per_task_cap.into());
+            body.insert("max_cpt".into(), cap.into());
             body
         });
         match submit_batch_task(
@@ -2032,6 +2188,542 @@ mod tests {
         }
     }
 
+    fn batch_command(extra: &[&str]) -> Result<BatchCommand> {
+        let mut args: Vec<String> = [
+            "hivemind",
+            "batch",
+            "sum.hmf",
+            "--inputs",
+            "inputs.jsonl",
+            "--username",
+            "alice",
+            "--password",
+            "secret",
+        ]
+        .iter()
+        .map(|part| (*part).to_owned())
+        .collect();
+        args.extend(extra.iter().map(|part| (*part).to_owned()));
+        match parse_cli_args(&args)? {
+            CliCommand::Batch(batch) => Ok(batch),
+            _ => panic!("expected batch command"),
+        }
+    }
+
+    #[test]
+    fn batch_pre_check_flags_parse() {
+        let defaults = batch_command(&["--max-total-cpt", "500"]).unwrap();
+        assert!(defaults.precheck);
+        assert!(!defaults.skip_invalid);
+        assert_eq!(defaults.replicas, None);
+
+        let off = batch_command(&["--max-total-cpt", "500", "--no-precheck"]).unwrap();
+        assert!(!off.precheck);
+
+        let skip = batch_command(&[
+            "--skip-invalid",
+            "--max-total-cpt",
+            "500",
+            "--replicas",
+            "5",
+        ])
+        .unwrap();
+        assert!(skip.skip_invalid && skip.precheck);
+        assert_eq!(skip.replicas, Some(5));
+
+        let err = batch_command(&["--max-total-cpt", "500", "--no-precheck", "--skip-invalid"])
+            .unwrap_err();
+        assert!(err.to_string().contains("--skip-invalid needs"), "{err}");
+        assert!(batch_command(&["--max-total-cpt", "500", "--replicas", "1"]).is_err());
+    }
+
+    #[test]
+    fn batch_requests_carry_the_replica_policy_only_when_one_was_asked_for() {
+        let plain = batch_command(&["--max-total-cpt", "500"]).unwrap();
+        let body = batch_request_body(&plain, "1;", "{}");
+        assert!(body.get("managed_replica_count").is_none());
+        assert!(body.get("managed_quorum").is_none());
+
+        let five = batch_command(&["--max-total-cpt", "500", "--replicas", "5"]).unwrap();
+        let body = batch_request_body(&five, "1;", "{}");
+        assert_eq!(
+            body.get("managed_replica_count"),
+            Some(&serde_json::json!(5))
+        );
+        assert_eq!(body.get("managed_quorum"), Some(&serde_json::json!(3)));
+    }
+
+    #[test]
+    fn the_refusal_report_names_the_inputs_and_how_to_go_on() {
+        let reasons: Vec<String> = (0..12).map(|n| format!("reason {n}")).collect();
+        let refused: Vec<(usize, &String)> = reasons
+            .iter()
+            .enumerate()
+            .map(|(index, reason)| (index * 2, reason))
+            .collect();
+        let text = refusal_report(&refused, 40);
+        assert!(text.starts_with("12 of 40 inputs cannot run, so nothing was submitted:"));
+        assert!(text.contains("\n  input 1: reason 0"));
+        assert!(text.contains("\n  input 19: reason 9"));
+        assert!(!text.contains("reason 10"), "{text}");
+        assert!(text.contains("... and 2 more"));
+        assert!(text.ends_with("pass --skip-invalid to submit the rest."));
+
+        let one = refusal_report(&[(4, &reasons[0])], 5);
+        assert!(!one.contains("more"));
+    }
+
+    #[test]
+    fn refusals_stop_the_batch_unless_the_rest_may_go_ahead() {
+        let all_fine: Vec<std::result::Result<i64, String>> = vec![Ok(82), Ok(122)];
+        assert!(check_refusals(&all_fine, false).is_ok());
+
+        let one_bad: Vec<std::result::Result<i64, String>> =
+            vec![Ok(82), Err("runtime_error: x".into())];
+        let error = check_refusals(&one_bad, false).unwrap_err().to_string();
+        assert!(error.contains("1 of 2 inputs cannot run"), "{error}");
+        assert!(check_refusals(&one_bad, true).is_ok());
+
+        let all_bad: Vec<std::result::Result<i64, String>> = vec![Err("a".into()), Err("b".into())];
+        let error = check_refusals(&all_bad, true).unwrap_err().to_string();
+        assert!(error.contains("none of the 2 inputs can run"), "{error}");
+    }
+
+    #[test]
+    fn the_plan_summary_states_the_caps_and_what_they_are_based_on() {
+        let exact = batch_command(&["--max-total-cpt", "500"]).unwrap();
+        let text = plan_summary("t", &[82, 82], 0, 164, &exact, "t.csv");
+        assert_eq!(
+            text,
+            "Batch t: 2 tasks at 82 CPT each, the exact need of each input from a local run, at most 164 CPT in total (cap 500). Results: t.csv"
+        );
+        let mixed = plan_summary("t", &[82, 122], 1, 204, &exact, "t.csv");
+        assert!(
+            mixed.contains("2 tasks (1 inputs skipped) at 82 to 122 CPT each"),
+            "{mixed}"
+        );
+
+        let fixed =
+            batch_command(&["--max-total-cpt", "500", "--max-cpt-per-task", "100"]).unwrap();
+        assert!(!plan_summary("t", &[100], 0, 100, &fixed, "t.csv").contains("exact"));
+        let unchecked = batch_command(&["--max-total-cpt", "500", "--no-precheck"]).unwrap();
+        assert!(!plan_summary("t", &[100], 0, 100, &unchecked, "t.csv").contains("exact"));
+    }
+
+    #[test]
+    fn a_pre_check_failure_row_has_no_task_to_look_up() {
+        let row = BatchRow {
+            index: 3,
+            task_id: "t-0003".into(),
+            input: "{}".into(),
+            status: PRECHECK_FAILED.into(),
+            output: String::new(),
+            billed_cpt: None,
+            message: "parse_error: x (line 1)".into(),
+        };
+        assert!(!row.is_open());
+        assert!(row.was_never_accepted());
+        let mut rows = vec![row];
+        let mut snapshots = std::collections::HashMap::new();
+        snapshots.insert(
+            "t-0003".to_owned(),
+            serde_json::json!({"status": "COMPLETED", "output": "stale"}),
+        );
+        apply_batch_snapshots(&mut rows, &snapshots);
+        assert_eq!(rows[0].status, PRECHECK_FAILED);
+        assert!(rows[0].output.is_empty());
+        assert!(
+            render_batch_csv(&rows).contains("t-0003,PRECHECK_FAILED,,,parse_error: x (line 1),{}")
+        );
+    }
+
+    #[derive(Clone, Debug)]
+    struct SeenRequest {
+        method: String,
+        path: String,
+        body: serde_json::Value,
+    }
+
+    #[derive(Default)]
+    struct MockState {
+        quote_cpt: i64,
+        /// Task id to its output, for tasks that exist on the network.
+        tasks: std::collections::BTreeMap<String, String>,
+        seen: Vec<SeenRequest>,
+    }
+
+    /// A stand-in for the Master HTTP API that records what a batch sends it.
+    struct MockMaster {
+        api: String,
+        state: std::sync::Arc<std::sync::Mutex<MockState>>,
+    }
+
+    impl MockMaster {
+        fn seen(&self) -> Vec<SeenRequest> {
+            self.state.lock().unwrap().seen.clone()
+        }
+
+        fn submitted(&self) -> Vec<serde_json::Value> {
+            self.seen()
+                .into_iter()
+                .filter(|request| request.method == "POST" && request.path == "/api/tasks")
+                .map(|request| request.body)
+                .collect()
+        }
+    }
+
+    async fn read_mock_request(
+        socket: &mut tokio::net::TcpStream,
+    ) -> Option<(String, String, Vec<u8>)> {
+        use tokio::io::AsyncReadExt;
+        let mut buffer = Vec::new();
+        let mut chunk = [0_u8; 4096];
+        let header_end = loop {
+            if let Some(position) = buffer.windows(4).position(|bytes| bytes == b"\r\n\r\n") {
+                break position + 4;
+            }
+            let read = socket.read(&mut chunk).await.ok()?;
+            if read == 0 {
+                return None;
+            }
+            buffer.extend_from_slice(&chunk[..read]);
+        };
+        let head = String::from_utf8_lossy(&buffer[..header_end]).into_owned();
+        let mut request_line = head.lines().next()?.split_whitespace();
+        let method = request_line.next()?.to_owned();
+        let target = request_line.next()?.to_owned();
+        let content_length = head
+            .lines()
+            .find_map(|line| {
+                let (name, value) = line.split_once(':')?;
+                name.eq_ignore_ascii_case("content-length")
+                    .then(|| value.trim().parse::<usize>().ok())
+                    .flatten()
+            })
+            .unwrap_or(0);
+        while buffer.len() < header_end + content_length {
+            let read = socket.read(&mut chunk).await.ok()?;
+            if read == 0 {
+                break;
+            }
+            buffer.extend_from_slice(&chunk[..read]);
+        }
+        let end = (header_end + content_length).min(buffer.len());
+        Some((method, target, buffer[header_end..end].to_vec()))
+    }
+
+    fn mock_reply(
+        state: &mut MockState,
+        method: &str,
+        target: &str,
+        body: &[u8],
+    ) -> (u16, serde_json::Value) {
+        let (path, query) = target.split_once('?').unwrap_or((target, ""));
+        let json: serde_json::Value =
+            serde_json::from_slice(body).unwrap_or(serde_json::Value::Null);
+        state.seen.push(SeenRequest {
+            method: method.to_owned(),
+            path: path.to_owned(),
+            body: json.clone(),
+        });
+        match (method, path) {
+            ("POST", "/api/login") => (
+                200,
+                serde_json::json!({"success": true, "token": "mock-token"}),
+            ),
+            ("POST", "/api/tasks/quote") => (
+                200,
+                serde_json::json!({"success": true, "quoted_cpt": state.quote_cpt, "currency": "CPT"}),
+            ),
+            ("POST", "/api/tasks") => {
+                let id = json["task_id"].as_str().unwrap_or_default().to_owned();
+                match state.tasks.entry(id) {
+                    std::collections::btree_map::Entry::Occupied(_) => (
+                        409,
+                        serde_json::json!({"success": false, "message": "task_id already exists"}),
+                    ),
+                    std::collections::btree_map::Entry::Vacant(slot) => {
+                        slot.insert("done".to_owned());
+                        (201, serde_json::json!({"success": true, "message": "ok"}))
+                    }
+                }
+            }
+            ("GET", "/api/tasks") => {
+                let ids = query
+                    .split('&')
+                    .find_map(|pair| pair.strip_prefix("task_ids="))
+                    .unwrap_or_default()
+                    .replace("%2C", ",");
+                let tasks: Vec<serde_json::Value> = ids
+                    .split(',')
+                    .filter_map(|id| {
+                        state.tasks.get(id).map(|output| {
+                            serde_json::json!({
+                                "task_id": id,
+                                "status": "COMPLETED",
+                                "output": output,
+                                "billed_amount": 10,
+                                "status_message": "",
+                            })
+                        })
+                    })
+                    .collect();
+                (200, serde_json::json!({"success": true, "tasks": tasks}))
+            }
+            _ => (
+                404,
+                serde_json::json!({"success": false, "message": "not mocked"}),
+            ),
+        }
+    }
+
+    async fn mock_master(quote_cpt: i64, existing: &[&str]) -> MockMaster {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let api = format!("http://{}", listener.local_addr().unwrap());
+        let state = std::sync::Arc::new(std::sync::Mutex::new(MockState {
+            quote_cpt,
+            tasks: existing
+                .iter()
+                .map(|id| ((*id).to_owned(), "earlier".to_owned()))
+                .collect(),
+            seen: Vec::new(),
+        }));
+        let shared = std::sync::Arc::clone(&state);
+        tokio::spawn(async move {
+            use tokio::io::AsyncWriteExt;
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    return;
+                };
+                let Some((method, target, body)) = read_mock_request(&mut socket).await else {
+                    continue;
+                };
+                let (status, reply) =
+                    mock_reply(&mut shared.lock().unwrap(), &method, &target, &body);
+                let payload = reply.to_string();
+                let response = format!(
+                    "HTTP/1.1 {status} Mock\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{payload}",
+                    payload.len()
+                );
+                let _ = socket.write_all(response.as_bytes()).await;
+            }
+        });
+        MockMaster { api, state }
+    }
+
+    const SUM_SOURCE: &str = "let total = 0;\nfor value in get(input, \"values\") {\n  let total = total + value;\n}\ntotal;";
+    const INPUT_25: &str = "{\"values\":[10,20,30]}";
+    const INPUT_37: &str = "{\"values\":[1,2,3,4,5,6]}";
+    /// `for` over a number fails at run time.
+    const INPUT_BROKEN: &str = "{\"values\":5}";
+
+    struct BatchRun {
+        result: Result<()>,
+        csv: String,
+    }
+
+    async fn run_test_batch(master: &MockMaster, inputs: &[&str], extra: &[&str]) -> BatchRun {
+        let dir = std::env::temp_dir().join(format!(
+            "hivemind-batch-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (source, list, out) = (
+            dir.join("sum.hmf"),
+            dir.join("inputs.jsonl"),
+            dir.join("out.csv"),
+        );
+        std::fs::write(&source, SUM_SOURCE).unwrap();
+        std::fs::write(&list, inputs.join("\n")).unwrap();
+        let mut args: Vec<String> = [
+            "hivemind",
+            "batch",
+            source.to_str().unwrap(),
+            "--inputs",
+            list.to_str().unwrap(),
+            "--username",
+            "alice",
+            "--password",
+            "secret",
+            "--api",
+            &master.api,
+            "--out",
+            out.to_str().unwrap(),
+            "--task-prefix",
+            "t",
+            "--poll-secs",
+            "1",
+        ]
+        .iter()
+        .map(|part| (*part).to_owned())
+        .collect();
+        args.extend(extra.iter().map(|part| (*part).to_owned()));
+        let CliCommand::Batch(mut command) = parse_cli_args(&args).unwrap() else {
+            panic!("expected batch command");
+        };
+        // Pacing exists to stay under the Master's rate limit, which a mock does not have.
+        command.per_minute = 60_000;
+        let result = run_batch(command).await;
+        let csv = std::fs::read_to_string(&out).unwrap_or_default();
+        std::fs::remove_dir_all(&dir).ok();
+        BatchRun { result, csv }
+    }
+
+    #[tokio::test]
+    async fn batch_prices_each_input_from_its_own_run() {
+        let master = mock_master(5, &[]).await;
+        let run = run_test_batch(&master, &[INPUT_25, INPUT_37], &["--max-total-cpt", "300"]).await;
+        run.result.unwrap();
+        let submitted = master.submitted();
+        assert_eq!(submitted.len(), 2);
+        // 25 units: 3 x 25 + 7 fee. 37 units: 3 x 37 + 11 fee.
+        assert_eq!(submitted[0]["max_cpt"], 82);
+        assert_eq!(submitted[1]["max_cpt"], 122);
+        assert_eq!(submitted[0]["task_id"], "t-0001");
+        assert!(submitted[0].get("managed_replica_count").is_none());
+        assert!(run.csv.contains("t-0001,COMPLETED"), "{}", run.csv);
+        assert!(run.csv.contains("t-0002,COMPLETED"), "{}", run.csv);
+    }
+
+    #[tokio::test]
+    async fn batch_stops_before_any_request_when_an_input_cannot_run() {
+        let master = mock_master(5, &[]).await;
+        let run = run_test_batch(
+            &master,
+            &[INPUT_25, INPUT_37, INPUT_BROKEN],
+            &["--max-total-cpt", "300"],
+        )
+        .await;
+        let error = run.result.unwrap_err().to_string();
+        assert!(
+            error.contains("1 of 3 inputs cannot run, so nothing was submitted"),
+            "{error}"
+        );
+        assert!(error.contains("input 3:"), "{error}");
+        assert!(error.contains("--skip-invalid"), "{error}");
+        // The pre-check needs no network, so not even a sign-in happened.
+        assert!(master.seen().is_empty(), "{:?}", master.seen());
+        assert!(run.csv.is_empty());
+    }
+
+    #[tokio::test]
+    async fn batch_skips_only_the_inputs_that_cannot_run_when_asked() {
+        let master = mock_master(5, &[]).await;
+        let run = run_test_batch(
+            &master,
+            &[INPUT_25, INPUT_BROKEN, INPUT_37],
+            &["--max-total-cpt", "300", "--skip-invalid"],
+        )
+        .await;
+        let error = run.result.unwrap_err().to_string();
+        assert!(error.contains("1 of 3 tasks did not complete"), "{error}");
+        let ids: Vec<String> = master
+            .submitted()
+            .iter()
+            .map(|body| body["task_id"].as_str().unwrap().to_owned())
+            .collect();
+        assert_eq!(ids, vec!["t-0001", "t-0003"]);
+        assert!(run.csv.contains("t-0002,PRECHECK_FAILED"), "{}", run.csv);
+        assert!(run.csv.contains("t-0001,COMPLETED"), "{}", run.csv);
+        assert!(run.csv.contains("t-0003,COMPLETED"), "{}", run.csv);
+    }
+
+    #[tokio::test]
+    async fn batch_total_is_the_sum_of_the_exact_caps() {
+        let master = mock_master(5, &[]).await;
+        // 82 + 122 = 204.
+        let run = run_test_batch(&master, &[INPUT_25, INPUT_37], &["--max-total-cpt", "203"]).await;
+        let error = run.result.unwrap_err().to_string();
+        assert!(
+            error.contains("2 tasks can spend up to 204 CPT, above --max-total-cpt 203"),
+            "{error}"
+        );
+        assert!(master.submitted().is_empty());
+
+        let master = mock_master(5, &[]).await;
+        run_test_batch(&master, &[INPUT_25, INPUT_37], &["--max-total-cpt", "204"])
+            .await
+            .result
+            .unwrap();
+        assert_eq!(master.submitted().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn batch_cap_is_never_below_the_resource_price() {
+        let master = mock_master(200, &[]).await;
+        run_test_batch(&master, &[INPUT_25], &["--max-total-cpt", "300"])
+            .await
+            .result
+            .unwrap();
+        assert_eq!(master.submitted()[0]["max_cpt"], 200);
+    }
+
+    #[tokio::test]
+    async fn a_fixed_cap_refuses_inputs_that_need_more() {
+        let master = mock_master(5, &[]).await;
+        let run = run_test_batch(
+            &master,
+            &[INPUT_25, INPUT_37],
+            &["--max-total-cpt", "300", "--max-cpt-per-task", "100"],
+        )
+        .await;
+        let error = run.result.unwrap_err().to_string();
+        assert!(
+            error.contains("input 2: needs 122 CPT, above --max-cpt-per-task 100"),
+            "{error}"
+        );
+        assert!(master.submitted().is_empty());
+
+        let master = mock_master(5, &[]).await;
+        run_test_batch(
+            &master,
+            &[INPUT_25],
+            &["--max-total-cpt", "300", "--max-cpt-per-task", "100"],
+        )
+        .await
+        .result
+        .unwrap();
+        assert_eq!(master.submitted()[0]["max_cpt"], 100);
+    }
+
+    #[tokio::test]
+    async fn without_the_pre_check_every_task_gets_the_flat_cap() {
+        let master = mock_master(5, &[]).await;
+        let run = run_test_batch(
+            &master,
+            &[INPUT_25, INPUT_BROKEN],
+            &["--max-total-cpt", "300", "--no-precheck"],
+        )
+        .await;
+        // The broken input is not looked at; its task is submitted and the outcome is left to the network.
+        run.result.unwrap();
+        let caps: Vec<i64> = master
+            .submitted()
+            .iter()
+            .map(|body| body["max_cpt"].as_i64().unwrap())
+            .collect();
+        assert_eq!(caps, vec![100, 100]);
+    }
+
+    #[tokio::test]
+    async fn a_requested_replica_count_prices_the_cap_and_is_sent() {
+        let master = mock_master(5, &[]).await;
+        run_test_batch(
+            &master,
+            &[INPUT_25],
+            &["--max-total-cpt", "300", "--replicas", "5"],
+        )
+        .await
+        .result
+        .unwrap();
+        let body = &master.submitted()[0];
+        // 5 x 25 = 125, plus a 12 CPT fee.
+        assert_eq!(body["max_cpt"], 137);
+        assert_eq!(body["managed_replica_count"], 5);
+        assert_eq!(body["managed_quorum"], 3);
+    }
+
     #[test]
     fn batch_inputs_are_one_compact_json_value_per_line() {
         let inputs = parse_batch_inputs("{\"value\": 1}\n\n  [2, 3]  \n7\n")
@@ -2153,8 +2845,10 @@ mod tests {
         assert_eq!(batch_task_id("sweep-1", 999), "sweep-1-1000");
         assert!(is_safe_task_id(&batch_task_id("ok.prefix_2", 0)));
 
-        assert_eq!(batch_worst_case_cpt(3, 42).unwrap(), 126);
-        assert!(batch_worst_case_cpt(usize::MAX, i64::MAX).is_err());
+        assert_eq!(batch_worst_case_cpt(&[42, 42, 42]).unwrap(), 126);
+        assert_eq!(batch_worst_case_cpt(&[82, 164]).unwrap(), 246);
+        assert_eq!(batch_worst_case_cpt(&[]).unwrap(), 0);
+        assert!(batch_worst_case_cpt(&[i64::MAX, 1]).is_err());
 
         assert_eq!(submit_interval(60), Duration::from_secs(1));
         assert_eq!(submit_interval(50), Duration::from_millis(1200));

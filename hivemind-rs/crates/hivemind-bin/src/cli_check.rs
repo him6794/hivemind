@@ -168,6 +168,51 @@ pub(super) fn budget_for(report: &DryRunSuccess, replicas: u16) -> Result<TaskBu
     required_task_budget(report.receipt.usage_units, replicas).map_err(anyhow::Error::from)
 }
 
+/// What a local run says about one batch input: the budget it needs, or why it cannot run.
+pub(super) type InputOutcome = std::result::Result<TaskBudget, String>;
+
+/// Runs every input as a replica would. Each run is CPU-bound, so the whole pass is meant
+/// to stay on one blocking thread.
+pub(super) fn precheck_inputs(
+    source: &str,
+    inputs: &[String],
+    replicas: u16,
+    limits: DryRunLimits,
+) -> Vec<InputOutcome> {
+    inputs
+        .iter()
+        .map(|input| match run_local(source, input, None, limits) {
+            Ok(report) => required_task_budget(report.receipt.usage_units, replicas)
+                .map_err(|e| e.to_string()),
+            Err(failure) => Err(describe_failure(&failure, limits)),
+        })
+        .collect()
+}
+
+/// The cap each input is submitted with, or the reason it is not submitted.
+///
+/// With no fixed cap, an input gets exactly what its own run needs, but never less than the
+/// resource price, which the Master requires a cap to cover. A fixed cap is used as given, and an
+/// input that needs more than it is refused here instead of failing on a Worker.
+pub(super) fn plan_caps(
+    outcomes: &[InputOutcome],
+    fixed_cap: Option<i64>,
+    resource_price: i64,
+) -> Vec<std::result::Result<i64, String>> {
+    outcomes
+        .iter()
+        .map(|outcome| match (outcome, fixed_cap) {
+            (Err(reason), _) => Err(reason.clone()),
+            (Ok(budget), Some(cap)) if budget.task_budget > cap => Err(format!(
+                "needs {} CPT, above --max-cpt-per-task {}",
+                budget.task_budget, cap
+            )),
+            (Ok(_), Some(cap)) => Ok(cap),
+            (Ok(budget), None) => Ok(budget.task_budget.max(resource_price)),
+        })
+        .collect()
+}
+
 /// The text `hivemind check` prints for a completed run.
 pub(super) fn format_report(
     report: &DryRunSuccess,
@@ -346,6 +391,65 @@ mod tests {
         let text = describe_failure(&spent, tight);
         assert!(text.contains("local limit of 10 usage units"), "{text}");
         assert!(text.contains("--max-usage"), "{text}");
+    }
+
+    #[test]
+    fn every_batch_input_is_run_and_priced_on_its_own() {
+        let inputs = vec![
+            r#"{"values":[10,20,30]}"#.to_owned(),
+            r#"{"values":[1,2,3,4,5,6]}"#.to_owned(),
+            r#"{"values":5}"#.to_owned(),
+        ];
+        let outcomes = precheck_inputs(SUM_LIST, &inputs, 3, limits(1_000_000, 30));
+        assert_eq!(outcomes.len(), 3);
+        assert_eq!(outcomes[0].as_ref().unwrap().task_budget, 82);
+        assert_eq!(outcomes[1].as_ref().unwrap().task_budget, 122);
+        assert!(outcomes[2].is_err());
+
+        // The same inputs on five replicas need more.
+        let five = precheck_inputs(SUM_LIST, &inputs[..1], 5, limits(1_000_000, 30));
+        assert_eq!(five[0].as_ref().unwrap().task_budget, 137);
+    }
+
+    #[test]
+    fn an_input_that_hits_the_local_limit_is_refused_with_the_way_out() {
+        let outcomes = precheck_inputs(
+            SUM_LIST,
+            &[r#"{"values":[10,20,30]}"#.to_owned()],
+            3,
+            limits(10, 30),
+        );
+        let reason = outcomes[0].as_ref().unwrap_err();
+        assert!(reason.contains("--max-usage"), "{reason}");
+    }
+
+    fn budget(usage: u64) -> InputOutcome {
+        required_task_budget(usage, 3).map_err(|e| e.to_string())
+    }
+
+    #[test]
+    fn caps_default_to_the_exact_need_but_never_below_the_resource_price() {
+        let outcomes = vec![budget(25), budget(37), Err("parse_error: x".into())];
+        let plan = plan_caps(&outcomes, None, 5);
+        assert_eq!(plan[0], Ok(82));
+        assert_eq!(plan[1], Ok(122));
+        assert_eq!(plan[2], Err("parse_error: x".into()));
+
+        let priced_higher = plan_caps(&outcomes[..1], None, 200);
+        assert_eq!(priced_higher[0], Ok(200));
+    }
+
+    #[test]
+    fn a_fixed_cap_is_used_as_given_and_inputs_above_it_are_refused() {
+        let outcomes = vec![budget(25), budget(37)];
+        let plan = plan_caps(&outcomes, Some(100), 5);
+        assert_eq!(plan[0], Ok(100));
+        assert_eq!(
+            plan[1],
+            Err("needs 122 CPT, above --max-cpt-per-task 100".to_owned())
+        );
+        // A cap equal to the need is enough.
+        assert_eq!(plan_caps(&outcomes[1..], Some(122), 5)[0], Ok(122));
     }
 
     #[test]
