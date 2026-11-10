@@ -232,7 +232,7 @@ pub(super) fn format_report(
         text.push('\n');
     }
     text.push_str(&format!(
-        "\nUsage per replica: {} units\nReplicas: {}{}\nReserved usage: {} CPT\nPlatform fee: {} CPT\nMinimum --max-cpt: {} CPT\n",
+        "\nUsage per replica: {} units\nReplicas: {}{}\nReserved usage: {} CPT\nPlatform fee: {} CPT\nMinimum --max-cpt for the work: {} CPT\n",
         budget.replica_usage,
         budget.replica_count,
         replicas_note,
@@ -240,6 +240,11 @@ pub(super) fn format_report(
         budget.fee,
         budget.task_budget,
     ));
+    // The Master also refuses a cap below the price of the reserved computer requirements, and
+    // `check` takes none, so that price is not in this number.
+    text.push_str(
+        "The price of any computer requirements (--cpu-score and the other submit resource flags) is not included. `submit --max-cpt auto` uses the larger of the two.\n",
+    );
     if report.output.len() > hivemind_proto::MANAGED_CONSENSUS_RESULT_MAX_BYTES {
         text.push_str(&format!(
             "Warning: the output is {} bytes, above the {} byte limit for a consensus result; Workers cannot report it.\n",
@@ -358,7 +363,11 @@ mod tests {
         assert!(text.contains("Replicas: 3 (the network default"), "{text}");
         assert!(text.contains("Reserved usage: 75 CPT"), "{text}");
         assert!(text.contains("Platform fee: 7 CPT"), "{text}");
-        assert!(text.contains("Minimum --max-cpt: 82 CPT"), "{text}");
+        assert!(
+            text.contains("Minimum --max-cpt for the work: 82 CPT"),
+            "{text}"
+        );
+        assert!(text.contains("is not included"), "{text}");
         assert!(text.contains("estimate"), "{text}");
     }
 
