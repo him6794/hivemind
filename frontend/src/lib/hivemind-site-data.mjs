@@ -467,7 +467,7 @@ const definitions = {
         ],
         quickstart: [
           { step: '01', title: 'Create an account', body: 'Choose a username and a password of at least 8 characters. Sign in to see your CPT balance.' },
-          { step: '02', title: 'Install Master', body: 'Download Master from the download page and run hivemind-master.exe. Sign in with the account you created.' },
+          { step: '02', title: 'Install Master', body: 'Download Master from the download page, run the setup file, and open Hivemind Master from the Start menu. Sign in with the account you created.' },
           { step: '03', title: 'Write the program and its input', body: 'Use the program in the next section. It reads a list from the input, adds the numbers together, and returns the total.' },
           { step: '04', title: 'Set the charge cap and submit', body: 'Paste the program and the input into the submit form. Set Task charge cap (CPT, fee included) to 1000, then press Submit. Replicas can run on computers that another Hivemind user shares, so your own computer is not a guaranteed destination.' },
           { step: '05', title: 'Read the result', body: 'Open Log for the final value and any printed text. If all three replicas succeed and each records 25 usage units, the task is charged 82 CPT: 75 units of usage plus a 7 CPT fee. The unused part of the 999 CPT hold, 917 CPT, is released.' },
@@ -1182,7 +1182,7 @@ const definitions = {
         ],
         quickstart: [
           { step: '01', title: '建立帳號', body: '選擇使用者名稱與至少 8 個字元的密碼。登入後可以查看 CPT 餘額。' },
-          { step: '02', title: '安裝 Master', body: '從下載頁下載 Master，並執行 hivemind-master.exe。使用你建立的帳號登入。' },
+          { step: '02', title: '安裝 Master', body: '從下載頁下載 Master，執行安裝程式，然後從開始功能表開啟 Hivemind Master。使用你建立的帳號登入。' },
           { step: '03', title: '撰寫程式與輸入', body: '使用下一節的程式。它從輸入中讀取一個 list，把數字加總後回傳。' },
           { step: '04', title: '設定收費上限並送出', body: '在送出表單貼上程式與輸入，把「任務收費上限（CPT，含平台費）」設為 1000，然後按下提交。副本可能在其他 Hivemind 使用者分享的電腦上執行，不保證一定使用你自己的電腦。' },
           { step: '05', title: '查看結果', body: '在日誌中查看最終值與印出的文字。若三個副本都成功，且各記錄 25 個 usage unit，工作會收取 82 CPT：75 個用量單位加上 7 CPT 平台費。保留的 999 CPT 中，未使用的 917 CPT 會釋放。' },

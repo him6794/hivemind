@@ -51,7 +51,7 @@ export const docsPagesEn = [
             body: 'Open PowerShell in the folder that holds the download and compare the hash. The output must match the value on the download page.',
             code: { lang: 'powershell', code: 'Get-FileHash .\\<file-name> -Algorithm SHA256' },
           },
-          { title: 'Run Master', body: 'Run hivemind-master.exe. If Windows warns about an app it does not recognize, check the download address and the SHA-256 value again before you continue.' },
+          { title: 'Run Master', body: 'Run the setup file, then open Hivemind Master from the Start menu. If Windows warns about an app it does not recognize, check the download address and the SHA-256 value again before you continue.' },
           { title: 'Sign in', body: 'Enter the account you created. Master uses it to connect to the network.' },
           { title: 'Check the balance', body: 'The balance is shown in CPT. A new account starts at 0.00.' },
         ],

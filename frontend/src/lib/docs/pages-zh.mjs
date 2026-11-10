@@ -50,7 +50,7 @@ export const docsPagesZh = [
             body: '在放置下載檔案的資料夾開啟 PowerShell，比對雜湊值。輸出結果必須與下載頁上的值相同。',
             code: { lang: 'powershell', code: 'Get-FileHash .\\<檔案名稱> -Algorithm SHA256' },
           },
-          { title: '執行 Master', body: '執行 hivemind-master.exe。如果 Windows 警告無法識別的應用程式，請先再次確認下載網址與 SHA-256 值。' },
+          { title: '執行 Master', body: '執行安裝程式，然後從開始功能表開啟 Hivemind Master。如果 Windows 警告無法識別的應用程式，請先再次確認下載網址與 SHA-256 值。' },
           { title: '登入', body: '輸入你建立的帳號。Master 會用這個帳號連線到網路。' },
           { title: '查看餘額', body: '餘額以 CPT 顯示。新帳號的餘額為 0.00。' },
         ],
