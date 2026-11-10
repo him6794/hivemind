@@ -32,6 +32,8 @@ dist/
 .next/
 .vite/
 frontend/out/
+# TypeScript incremental build info written by next build
+*.tsbuildinfo
 
 # Python caches
 __pycache__/
