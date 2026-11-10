@@ -7,6 +7,7 @@ import {
   dryRunSignature,
   estimateWarnings,
   interpretDryRun,
+  suggestedCap,
 } from './dryRunPolicy.mjs';
 import { t } from './locale.mjs';
 
@@ -43,6 +44,16 @@ test('an answer is tied to one exact source and input', () => {
   assert.notEqual(base, dryRunSignature('1;', '{ }'));
   // The two fields cannot be shifted into each other.
   assert.notEqual(dryRunSignature('a', 'bc'), dryRunSignature('ab', 'c'));
+});
+
+test('the resources are part of what an answer is made for', () => {
+  const base = dryRunSignature('1;', '{}', { memoryGb: 4 });
+  assert.equal(base, dryRunSignature('1;', '{}', { memoryGb: '4' }));
+  assert.notEqual(base, dryRunSignature('1;', '{}', { memoryGb: 8 }));
+  assert.notEqual(base, dryRunSignature('1;', '{}', { memoryGb: 4, hostCount: 2 }));
+  // A field at zero is not a requirement, so it does not change the answer.
+  assert.equal(base, dryRunSignature('1;', '{}', { memoryGb: 4, cpuScore: 0, hostCount: '' }));
+  assert.equal(dryRunSignature('1;', '{}'), dryRunSignature('1;', '{}', { cpuScore: 0 }));
 });
 
 test('a finished run becomes a quote with the numbers the Master computed', () => {
@@ -175,11 +186,50 @@ test('the cap is filled in only when the user has not entered one', () => {
   assert.equal(capToFill(null, 0), null);
 });
 
+test('the cap covers the price of the resources when that is higher than the work', () => {
+  const view = interpretDryRun({ ok: true, status: 200, data: quoteAnswer });
+  assert.equal(suggestedCap(view), 82);
+  assert.equal(suggestedCap({ ...view, resourcePriceCpt: null }), 82);
+  assert.equal(suggestedCap({ ...view, resourcePriceCpt: 40 }), 82);
+  assert.equal(suggestedCap({ ...view, resourcePriceCpt: 82 }), 82);
+  assert.equal(suggestedCap({ ...view, resourcePriceCpt: 102 }), 102);
+  assert.equal(capToFill({ ...view, resourcePriceCpt: 102 }, 0), 102);
+  assert.equal(suggestedCap({ kind: 'limit' }), null);
+  assert.equal(suggestedCap(null), null);
+
+  // A tiny function: three replicas of 3 units need 9 CPT, but one host is priced at 10.
+  const tiny = interpretDryRun({
+    ok: true,
+    status: 200,
+    data: { ...quoteAnswer, quote: { ...quoteAnswer.quote, replica_usage_units: 3, reserved_usage_cpt: 9, platform_fee_cpt: 0, required_max_cpt: 9 } },
+  });
+  assert.equal(suggestedCap({ ...tiny, resourcePriceCpt: 10 }), 10);
+});
+
+test('a cap that covers the work but not the resources is warned about differently', () => {
+  const [warning] = estimateWarnings({ requiredMaxCpt: 82, resourcePriceCpt: 102, maxCpt: 90, balance: 1000 });
+  assert.equal(
+    t('en', warning),
+    'Your charge cap of 90 CPT is below the 102 CPT price of the computer requirements you chose. The Master will refuse the task.',
+  );
+  // Below the work, the work is what is reported.
+  const [low] = estimateWarnings({ requiredMaxCpt: 82, resourcePriceCpt: 102, maxCpt: 60, balance: 1000 });
+  assert.match(t('en', low), /would run out of budget/);
+  // At or above both, nothing is said.
+  assert.deepEqual(estimateWarnings({ requiredMaxCpt: 82, resourcePriceCpt: 102, maxCpt: 102, balance: 1000 }), []);
+  // The balance has to cover the larger of the two.
+  const [balance] = estimateWarnings({ requiredMaxCpt: 82, resourcePriceCpt: 102, maxCpt: 0, balance: 90 });
+  assert.equal(t('en', balance), 'Your balance of 90.00 CPT is below this estimate of 102 CPT.');
+});
+
 test('every message the panel can show has a Traditional Chinese translation', () => {
   const refused = interpretDryRun({ ok: false, status: 400, data: {} });
   const unreadable = interpretDryRun({ ok: true, status: 200, data: {} });
   const failed = interpretDryRun({ ok: true, status: 200, data: { success: false } });
-  const warnings = estimateWarnings({ requiredMaxCpt: 82, maxCpt: 10, balance: 5 });
+  const warnings = [
+    ...estimateWarnings({ requiredMaxCpt: 82, maxCpt: 10, balance: 5 }),
+    ...estimateWarnings({ requiredMaxCpt: 82, resourcePriceCpt: 102, maxCpt: 90, balance: 1000 }),
+  ];
   for (const entry of [refused.detail, unreadable.detail, failed.detail, ...warnings]) {
     assert.notEqual(t('zh', entry), t('en', entry), JSON.stringify(entry));
   }

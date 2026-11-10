@@ -51,7 +51,14 @@ import {
   dryRunSignature,
   estimateWarnings,
   interpretDryRun,
+  suggestedCap,
 } from './dryRunPolicy.mjs';
+import {
+  QUOTE_PATH,
+  resourceFields,
+  resourcePriceFromQuote,
+  resourceQuoteRequest,
+} from './taskRequest.mjs';
 import { OUTPUT_PREVIEW_CHARS, taskOutputFilename, taskOutputView } from './taskOutputView.mjs';
 import { createBalanceRefreshController, parseCptBalance } from './accountBalance.mjs';
 import { readThemePreference, saveThemePreference } from './themePreference.mjs';
@@ -120,7 +127,13 @@ function DryRunResult({ view, maxCpt, balance, onUseCap }) {
       </p>
     );
   }
-  const warnings = estimateWarnings({ requiredMaxCpt: view.requiredMaxCpt, maxCpt, balance });
+  const warnings = estimateWarnings({
+    requiredMaxCpt: view.requiredMaxCpt,
+    resourcePriceCpt: view.resourcePriceCpt,
+    maxCpt,
+    balance,
+  });
+  const cap = suggestedCap(view);
   return (
     <div className="dry-run-result" role="status">
       <div className="dry-run-output">
@@ -147,12 +160,15 @@ function DryRunResult({ view, maxCpt, balance, onUseCap }) {
       {view.replicaCountIsDefault ? (
         <p className="task-note">{t('{replicas} replicas is the network default.', { replicas: view.replicaCount })}</p>
       ) : null}
+      {cap > view.requiredMaxCpt ? (
+        <p className="dry-run-note">{t('The computer requirements you chose are priced at {price} CPT, which is more than the total above, so the charge cap must be at least {price} CPT.', { price: cap })}</p>
+      ) : null}
       {warnings.map((warning, index) => (
         <p key={index} className="field-error" role="alert">{t(warning)}</p>
       ))}
       <div className="dry-run-actions">
-        <Button type="button" size="sm" onClick={() => onUseCap(view.requiredMaxCpt)} disabled={Number(maxCpt) === view.requiredMaxCpt}>
-          {t('Use {required} CPT as the charge cap', { required: view.requiredMaxCpt })}
+        <Button type="button" size="sm" onClick={() => onUseCap(cap)} disabled={Number(maxCpt) === cap}>
+          {t('Use {required} CPT as the charge cap', { required: cap })}
         </Button>
       </div>
       {view.interpreter ? (
@@ -209,6 +225,7 @@ export default function MasterApp() {
   // The answer is kept with the exact source and input it was made for.
   const [dryRun, setDryRun] = useState(null);
   const [dryRunLoading, setDryRunLoading] = useState(false);
+  const resourceValues = { cpuScore, gpuScore, memoryGb, gpuMemoryGb, storageGb, hostCount };
 
   const [tasks, setTasks] = useState([]);
   const [selectedTask, setSelectedTask] = useState('');
@@ -554,12 +571,7 @@ export default function MasterApp() {
       };
       // hcode tasks carry their JSON input in the `torrent` field.
       if (taskInput.trim()) body.torrent = taskInput;
-      if (cpuScore > 0) body.cpu_score = toNumber(cpuScore);
-      if (gpuScore > 0) body.gpu_score = toNumber(gpuScore);
-      if (memoryGb > 0) body.memory_gb = toNumber(memoryGb);
-      if (gpuMemoryGb > 0) body.gpu_memory_gb = toNumber(gpuMemoryGb);
-      if (storageGb > 0) body.storage_gb = toNumber(storageGb);
-      if (hostCount > 0) body.host_count = toNumber(hostCount);
+      Object.assign(body, resourceFields(resourceValues));
       if (maxCpt > 0) body.max_cpt = toNumber(maxCpt);
 
       const { data } = await api('POST', '/api/tasks', body);
@@ -599,7 +611,7 @@ export default function MasterApp() {
   // Runs the function once on the Master host and prices the task from its usage.
   async function runDryRun() {
     if (!token || loadedTasksToken !== token) return;
-    const signature = dryRunSignature(taskSource, taskInput);
+    const signature = dryRunSignature(taskSource, taskInput, resourceValues);
     const refuse = (detail) => setDryRun({ signature, view: { kind: 'rejected', detail } });
     if (!taskSource.trim()) { refuse(message('Function source is required')); return; }
     if (!taskInput.trim()) { refuse(message('Input JSON is required')); return; }
@@ -620,7 +632,23 @@ export default function MasterApp() {
         DRY_RUN_REQUEST_TIMEOUT_MS,
       );
       if (tokenRef.current !== token) return;
-      const view = interpretDryRun({ ok, status: httpStatus, data });
+      let view = interpretDryRun({ ok, status: httpStatus, data });
+      if (view.kind === 'quote') {
+        // The Master refuses a cap below the price of the reserved resources, so that price
+        // belongs in the answer. If it cannot be read the estimate is still shown without it.
+        let resourcePriceCpt = null;
+        try {
+          resourcePriceCpt = resourcePriceFromQuote(await api(
+            'POST',
+            QUOTE_PATH,
+            resourceQuoteRequest(taskSource, taskInput, resourceValues),
+          ));
+        } catch {
+          resourcePriceCpt = null;
+        }
+        if (tokenRef.current !== token) return;
+        view = { ...view, resourcePriceCpt };
+      }
       setDryRun({ signature, view });
       const fill = capToFill(view, maxCpt);
       if (fill !== null) setMaxCpt(fill);
@@ -872,8 +900,8 @@ export default function MasterApp() {
   }
 
   const taskSnapshotReady = !!token && loadedTasksToken === token;
-  // An answer is shown only for the exact source and input it was made for.
-  const dryRunView = dryRun && dryRun.signature === dryRunSignature(taskSource, taskInput)
+  // An answer is shown only for the exact source, input, and resources it was made for.
+  const dryRunView = dryRun && dryRun.signature === dryRunSignature(taskSource, taskInput, resourceValues)
     ? dryRun.view
     : null;
   const taskSummary = taskSnapshotReady

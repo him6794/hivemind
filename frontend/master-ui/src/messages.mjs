@@ -162,6 +162,8 @@ export const zh = {
   'The dry run failed.': '試跑失敗。',
   'The dry run returned an answer this console cannot read.': '試跑回傳了此控制台無法解讀的內容。',
   'Your charge cap of {cap} CPT is below this estimate of {required} CPT. The task would run out of budget.': '你設定的收費上限 {cap} CPT 低於這次的估算 {required} CPT，任務會因預算用完而失敗。',
+  'Your charge cap of {cap} CPT is below the {price} CPT price of the computer requirements you chose. The Master will refuse the task.': '你設定的收費上限 {cap} CPT 低於所選電腦需求的價格 {price} CPT，Master 會拒絕這個任務。',
+  'The computer requirements you chose are priced at {price} CPT, which is more than the total above, so the charge cap must be at least {price} CPT.': '你選的電腦需求定價 {price} CPT，高於上方的合計，所以收費上限至少要 {price} CPT。',
   'Your balance of {balance} CPT is below this estimate of {required} CPT.': '你的餘額 {balance} CPT 低於這次的估算 {required} CPT。',
   'Output': '輸出',
   'Copy output': '複製輸出',
