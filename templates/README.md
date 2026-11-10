@@ -19,12 +19,22 @@ See `hcode/` for runnable samples. Each sample is a pair:
 
 1. Copy a `.hmf` source file and its matching `.input.json`.
 2. Edit the function source and input for your workload.
-3. Submit with the CLI:
+3. Check it on your machine first. The run needs no account and prints the
+   output, the usage of one replica, and the smallest `--max-cpt` that funds
+   the task:
+
+   ```bash
+   hivemind check templates/hcode/03_batch_sum.hmf \
+     --input '{"items":[{"status":"paid","amount":10},{"status":"pending","amount":7},{"status":"paid","amount":25}]}'
+   ```
+
+4. Submit with the CLI. `--max-cpt auto` runs the same check and uses its
+   estimate as the cap:
 
    ```bash
    hivemind submit templates/hcode/03_batch_sum.hmf \
      --input '{"items":[{"status":"paid","amount":10},{"status":"pending","amount":7},{"status":"paid","amount":25}]}' \
-     --username user --password pass --max-cpt 1000
+     --username user --password pass --max-cpt auto
    ```
 
    The CLI `--input` option takes inline JSON; the matching `.input.json` file

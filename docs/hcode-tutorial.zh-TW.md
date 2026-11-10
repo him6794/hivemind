@@ -220,6 +220,29 @@ hivemind-bin submit ./sum.hdsl \
   --max-cpt 1000
 ```
 
+送出前可以先在本機試跑。`check` 以副本相同的限制執行一次，不需要帳號、不連線、不扣款，並算出這筆輸入需要的任務總上限：
+
+```bash
+hivemind-bin check ./sum.hdsl --input '{"values": [10, 20, 30]}'
+```
+
+```text
+Output:
+60
+
+Usage per replica: 25 units
+Replicas: 3 (the network default; change it with --replicas)
+Reserved usage: 75 CPT
+Platform fee: 7 CPT
+Minimum --max-cpt: 82 CPT
+
+This is an estimate from a run on this machine (interpreter semantics d82fb2679d7f). Nodepool settles on what the Workers report.
+```
+
+`Minimum --max-cpt` 是讓每個副本都能跑完的最小總上限，也是三個副本全部執行並被接受時的收費；低於它，副本會因 `budget_exhausted` 失敗。它是預估：本機與 Worker 的直譯器版本不同時，用量可能不同，輸出裡的 interpreter semantics 摘要可用來比對。`check` 也接受 `--artifact name=path.safetensors`、`--replicas`（2 到 7）、`--max-usage` 與 `--timeout-secs`（本機試跑自己的上限）。函式在本機就失敗時，語法錯誤會附行與欄，其他錯誤只有代碼與原因。
+
+`submit --max-cpt auto` 會先做同樣的本機試跑，再以預估的總上限送出（若資源報價更高則取報價）；函式在本機失敗時不會送出任何東西。需要 `--input`，並可搭配 `--replicas`。
+
 `submit` 只接受 `--input <json>`，不接受 `--input-file`。多筆輸入請改用 `batch`：
 
 ```bash
@@ -231,7 +254,21 @@ hivemind-bin batch ./sum.hdsl \
   --out ./sum-results.csv
 ```
 
-`inputs.jsonl` 每行一個 JSON 值，空行會被略過。`--max-total-cpt` 是必填的總預算上限：命令會先報價，若「任務數 × 每筆上限」超過它就直接拒絕，不會提交任何任務。每筆任務的上限預設為 100 CPT，且不得低於該任務的報價（報價只計算資源預留，不含程式執行的用量，所以上限不能設成報價）。可用 `--max-cpt-per-task` 調整；超過上限的任務會以 `budget_exhausted` 失敗，依目前的計費規則，未達 quorum 的任務不收費。提交速度預設為每分鐘 50 筆，低於 Master 的每分鐘提交上限（預設 60）；遇到 429 會等候視窗重置後再試。全部任務結束或超過 `--timeout-secs`（預設 3600）後，結果寫入 CSV，欄位為 `index,task_id,status,output,billed_cpt,message,input`。只有全部任務都 `COMPLETED` 時命令才以成功結束。
+`inputs.jsonl` 每行一個 JSON 值，空行會被略過，最多 1000 筆。`--max-total-cpt` 是必填的總預算上限：各筆任務的上限相加若超過它，命令直接拒絕，不會提交任何任務。
+
+`batch` 送出前先對每一筆輸入在本機試跑一次（與 `check` 相同，不需要網路），所以下面三件事在花錢之前就已確定：
+
+- **會失敗的輸入。** 語法錯誤、執行錯誤、超過本機試跑上限的輸入，預設會讓整批都不送出；命令列出前 10 筆的序號與原因。加上 `--skip-invalid` 則只送出能跑的輸入，被跳過的在結果 CSV 標為 `PRECHECK_FAILED` 並附原因。
+- **每筆的上限。** 預設是該輸入自己的精確需求（副本數 × 用量，加 10% 平台費），但不低於資源報價（報價只計算資源預留，不含程式執行的用量）。總額是各筆上限相加，再與 `--max-total-cpt` 比較。
+- **固定上限。** 指定 `--max-cpt-per-task` 時，每筆都用這個上限，需要超過它的輸入同樣在預檢被擋下，不會等到 Worker 以 `budget_exhausted` 失敗。
+
+`--replicas`（2 到 7）選擇副本數，並隨任務送給 Nodepool；沒有指定時以網路預設的 3 個副本估算。`--no-precheck` 關閉預檢，此時每筆上限預設為 100 CPT（不低於資源報價），超過上限的任務會以 `budget_exhausted` 失敗，依目前的計費規則，未達 quorum 的任務不收費。
+
+提交速度預設為每分鐘 50 筆，低於 Master 的每分鐘提交上限（預設 60）；遇到 429 會等候視窗重置後再試。全部任務結束或超過 `--timeout-secs`（預設 3600）後，結果寫入 CSV，欄位為 `index,task_id,status,output,billed_cpt,message,input`。只有全部任務都 `COMPLETED` 時命令才以成功結束；被跳過的輸入不算完成，所以使用 `--skip-invalid` 時命令仍以失敗結束，結果檔會標出是哪幾筆。
+
+批次開始時會在結果檔旁寫一個狀態檔（`<--out>.state.json`），記錄函式、每筆輸入的摘要、資源與副本設定，以及每個任務的上限。命令中斷後，用相同的 `--out`、`--task-prefix` 與檔案，加上 `--resume` 重新執行：它先向網路查出已存在的任務，只送出缺少的，上限沿用狀態檔的數字，不會重新報價，也不會重複送出或重複扣款。
+
+函式、任何一筆輸入、資源或副本設定與狀態檔不同時，`--resume` 會拒絕，因為任務 ID 由前綴與序號決定，續跑會把舊的任務 ID 配到不同的資料上。沒有 `--resume` 時，已有狀態檔的批次不會被覆寫；要重跑同一批資料，請換一個 `--task-prefix` 或 `--out`。
 
 密碼可以用 `HIVEMIND_PASSWORD` 環境變數提供，不必出現在命令列。CLI 的 `--password` 仍可能被本機程序檢視工具看見；不要在共享機器的命令列硬寫正式帳密，也不要把命令輸出、token 或私密 input 貼到公開紀錄。原生 Master／Worker UI 執行檔不是這個 CLI。
 

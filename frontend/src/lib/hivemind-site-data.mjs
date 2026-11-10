@@ -728,7 +728,8 @@ const definitions = {
               title: 'Task routes (Master API)',
               note: 'Served by the Master API while Master is running. Every route except /health needs a bearer token.',
               rows: [
-                { method: 'POST', path: '/api/tasks/quote', note: 'Estimate the charge before you submit. The response includes quoted_cpt and a breakdown by component.' },
+                { method: 'POST', path: '/api/tasks/quote', note: 'Price the resources a task reserves, with a breakdown by component. The price does not include the work itself; use /api/tasks/dry-run for that.' },
+                { method: 'POST', path: '/api/tasks/dry-run', note: 'Run a task once on the Master computer. Returns its output, the usage of one replica, and the smallest max_cpt that funds it. An estimate: nothing is charged.' },
                 { method: 'POST', path: '/api/tasks', note: 'Submit a task. Rejected when max_cpt is below the quote.' },
                 { method: 'GET', path: '/api/tasks', note: 'List your tasks with their status and charges.' },
                 { method: 'GET', path: '/api/tasks/{task_id}/log', note: 'Read the log of a task, including its printed output.' },
@@ -1443,7 +1444,8 @@ const definitions = {
               title: '工作路由（Master API）',
               note: 'Master 執行時由 Master API 提供。除了 /health 以外，每個路由都需要 bearer token。',
               rows: [
-                { method: 'POST', path: '/api/tasks/quote', note: '送出前先估價。回傳 quoted_cpt 與各項目的明細。' },
+                { method: 'POST', path: '/api/tasks/quote', note: '估算工作保留資源的價格，附各項目的明細。價格不含運算本身；運算的費用請用 /api/tasks/dry-run。' },
+                { method: 'POST', path: '/api/tasks/dry-run', note: '在 Master 所在的電腦上執行一次工作，回傳輸出、單一副本的用量，以及足以支付它的最小 max_cpt。這是估算，不會扣款。' },
                 { method: 'POST', path: '/api/tasks', note: '送出工作。max_cpt 低於估價時會被拒絕。' },
                 { method: 'GET', path: '/api/tasks', note: '列出你的工作，含狀態與費用。' },
                 { method: 'GET', path: '/api/tasks/{task_id}/log', note: '讀取工作的日誌，包含印出的輸出。' },
