@@ -30,7 +30,7 @@ local-ui = [
 ]
 worker-webview = ["worker", "local-ui"]
 master-webview = ["master", "local-ui"]
-cli = ["dep:reqwest", "dep:general-compute-runtime"]
+cli = ["dep:reqwest", "dep:general-compute-runtime", "dep:managed-function-runtime"]
 
 [[bin]]
 name = "hivemind-bin"
@@ -86,6 +86,7 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 hivemind-common = { path = "../common" }
 hivemind-proto = { path = "../proto" }
 general-compute-runtime = { path = "../../../executor-rs/crates/general-compute-runtime", optional = true }
+managed-function-runtime = { path = "../../../executor-rs/crates/managed-function-runtime", optional = true }
 hivemind-config = { path = "../config" }
 hivemind-client-runtime = { path = "../client-runtime" }
 hivemind-client-core = { path = "../client-core", optional = true }

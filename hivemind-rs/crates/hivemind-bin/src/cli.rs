@@ -5,6 +5,10 @@ use std::time::{Duration, Instant};
 
 #[path = "cli_artifacts.rs"]
 mod artifacts;
+#[path = "cli_check.rs"]
+mod check;
+
+pub use check::{run_check, CheckCommand};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CliCommand {
@@ -13,6 +17,7 @@ pub enum CliCommand {
     Status(TaskLookupCommand),
     Result(TaskLookupCommand),
     Batch(BatchCommand),
+    Check(CheckCommand),
 }
 
 /// One function run over many inputs. Inputs come one JSON value per line of `inputs_path`.
@@ -54,6 +59,10 @@ pub struct SubmitCommand {
     pub storage_gb: Option<i64>,
     pub host_count: Option<i32>,
     pub max_cpt: Option<i64>,
+    /// `--max-cpt auto`: price the task from a local run instead of a number.
+    pub max_cpt_auto: bool,
+    /// Replicas to request. The network default applies when this is `None`.
+    pub replicas: Option<u16>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -81,6 +90,10 @@ pub fn parse_cli_args(args: &[String]) -> Result<CliCommand> {
         return Ok(CliCommand::Batch(parse_batch_args(args)?));
     }
 
+    if command == "check" {
+        return Ok(CliCommand::Check(check::parse_check_args(args)?));
+    }
+
     if command != "submit" {
         return Ok(CliCommand::Service(command.to_string()));
     }
@@ -89,7 +102,7 @@ pub fn parse_cli_args(args: &[String]) -> Result<CliCommand> {
         .get(2)
         .ok_or_else(|| {
             anyhow!(
-                "Usage: hivemind submit <function-source> --username <user> --password <pass> [--input <json>] [--artifact <name=path.safetensors>] [--task-id <id>]"
+                "Usage: hivemind submit <function-source> --username <user> --password <pass> [--input <json>] [--artifact <name=path.safetensors>] [--task-id <id>] [--max-cpt <cpt|auto>] [--replicas <2-7>]"
             )
         })?
         .clone();
@@ -109,6 +122,8 @@ pub fn parse_cli_args(args: &[String]) -> Result<CliCommand> {
         storage_gb: None,
         host_count: None,
         max_cpt: None,
+        max_cpt_auto: false,
+        replicas: None,
     };
 
     let mut i = 3;
@@ -130,7 +145,15 @@ pub fn parse_cli_args(args: &[String]) -> Result<CliCommand> {
             "--gpu-memory-gb" => submit.gpu_memory_gb = Some(parse_i32_flag(flag, value)?),
             "--storage-gb" => submit.storage_gb = Some(parse_i64_flag(flag, value)?),
             "--host-count" => submit.host_count = Some(parse_i32_flag(flag, value)?),
-            "--max-cpt" => submit.max_cpt = Some(parse_i64_flag(flag, value)?),
+            "--max-cpt" if value == "auto" => {
+                submit.max_cpt = None;
+                submit.max_cpt_auto = true;
+            }
+            "--max-cpt" => {
+                submit.max_cpt = Some(parse_i64_flag(flag, value)?);
+                submit.max_cpt_auto = false;
+            }
+            "--replicas" => submit.replicas = Some(check::parse_replicas(flag, value)?),
             _ => return Err(anyhow!("unknown submit flag {}", flag)),
         }
         i += 2;
@@ -317,6 +340,66 @@ async fn login(
     Ok(token)
 }
 
+/// Runs the function once on this machine and returns the task budget its usage needs.
+async fn local_task_budget(
+    submit: &SubmitCommand,
+    task_source: &str,
+) -> Result<general_compute_runtime::managed_budget::TaskBudget> {
+    if submit.input.trim().is_empty() {
+        return Err(anyhow!(
+            "--max-cpt auto needs --input: the local run has to see the data the task will run on"
+        ));
+    }
+    let artifacts = check::load_artifacts(&submit.artifacts)?;
+    let replicas = submit.replicas.unwrap_or(check::DEFAULT_REPLICAS);
+    let limits = check::default_limits();
+    let (source, input) = (task_source.to_owned(), submit.input.clone());
+    let outcome = tokio::task::spawn_blocking(move || {
+        check::run_local(&source, &input, artifacts.as_ref(), limits)
+    })
+    .await
+    .map_err(|e| anyhow!("the local run stopped unexpectedly: {}", e))?;
+    match outcome {
+        Ok(report) => check::budget_for(&report, replicas),
+        Err(failure) => Err(anyhow!(
+            "the function failed in a local run, so nothing was submitted: {}",
+            check::describe_failure(&failure, limits)
+        )),
+    }
+}
+
+/// A quote prices the reserved resources only, but the checks it shares with task creation
+/// still need an input and a positive budget, so it carries a placeholder of 1 CPT.
+fn submit_quote_body(
+    submit: &SubmitCommand,
+    source: &str,
+) -> serde_json::Map<String, serde_json::Value> {
+    let mut body = serde_json::Map::new();
+    body.insert("runtime".into(), "hcode".into());
+    body.insert("task_source".into(), source.into());
+    body.insert("torrent".into(), submit.input.clone().into());
+    if let Some(v) = submit.cpu_score {
+        body.insert("cpu_score".into(), v.into());
+    }
+    if let Some(v) = submit.memory_gb {
+        body.insert("memory_gb".into(), v.into());
+    }
+    if let Some(v) = submit.gpu_score {
+        body.insert("gpu_score".into(), v.into());
+    }
+    if let Some(v) = submit.gpu_memory_gb {
+        body.insert("gpu_memory_gb".into(), v.into());
+    }
+    if let Some(v) = submit.storage_gb {
+        body.insert("storage_gb".into(), v.into());
+    }
+    if let Some(v) = submit.host_count {
+        body.insert("host_count".into(), v.into());
+    }
+    body.insert("max_cpt".into(), 1.into());
+    body
+}
+
 pub async fn run_submit(submit: SubmitCommand) -> Result<()> {
     let task_source = tokio::fs::read_to_string(&submit.source_path)
         .await
@@ -324,6 +407,13 @@ pub async fn run_submit(submit: SubmitCommand) -> Result<()> {
     if task_source.trim().is_empty() {
         return Err(anyhow!("{} is empty", submit.source_path));
     }
+    // `--max-cpt auto` prices the task from a run on this machine. A function that fails
+    // there is stopped before anything is sent.
+    let local_budget = if submit.max_cpt_auto {
+        Some(local_task_budget(&submit, &task_source).await?)
+    } else {
+        None
+    };
     let prepared = artifacts::PreparedArtifacts::prepare(&submit.input, &submit.artifacts).await?;
 
     let client = reqwest::Client::new();
@@ -334,6 +424,24 @@ pub async fn run_submit(submit: SubmitCommand) -> Result<()> {
         &submit.password,
     )
     .await?;
+
+    let mut max_cpt = submit.max_cpt;
+    if let Some(budget) = &local_budget {
+        // The Master refuses a cap below the resource price, so the cap is whichever is larger.
+        let resource_price = post_quote(
+            &client,
+            &submit.api_base,
+            &token,
+            &submit_quote_body(&submit, &task_source),
+        )
+        .await?;
+        let cap = budget.task_budget.max(resource_price);
+        println!(
+            "Using --max-cpt {cap}: {} replicas x {} units, plus a {} CPT platform fee (estimated from a local run)",
+            budget.replica_count, budget.replica_usage, budget.fee
+        );
+        max_cpt = Some(cap);
+    }
 
     // hcode tasks carry their JSON input in the `torrent` field;
     // Nodepool stores it verbatim as the task input reference.
@@ -370,8 +478,13 @@ pub async fn run_submit(submit: SubmitCommand) -> Result<()> {
     if let Some(v) = submit.host_count {
         body["host_count"] = serde_json::Value::from(v);
     }
-    if let Some(v) = submit.max_cpt {
+    if let Some(v) = max_cpt {
         body["max_cpt"] = serde_json::Value::from(v);
+    }
+    if let Some(replicas) = submit.replicas {
+        // A policy needs both numbers: a replica count with the default quorum can be invalid.
+        body["managed_replica_count"] = serde_json::Value::from(replicas);
+        body["managed_quorum"] = serde_json::Value::from(check::majority(replicas));
     }
 
     let create_url = format!("{}/api/tasks", submit.api_base);
@@ -1032,11 +1145,27 @@ async fn quote_batch_price(
     source: &str,
     sample_input: &str,
 ) -> Result<i64> {
-    let url = format!("{}/api/tasks/quote", command.api_base);
+    post_quote(
+        client,
+        &command.api_base,
+        token,
+        &batch_quote_body(command, source, sample_input),
+    )
+    .await
+}
+
+/// Asks the Master for the resource price of a task body.
+async fn post_quote(
+    client: &reqwest::Client,
+    api_base: &str,
+    token: &str,
+    body: &serde_json::Map<String, serde_json::Value>,
+) -> Result<i64> {
+    let url = format!("{}/api/tasks/quote", api_base);
     let response = client
         .post(&url)
         .bearer_auth(token)
-        .json(&batch_quote_body(command, source, sample_input))
+        .json(body)
         .send()
         .await
         .map_err(|e| anyhow!("price quote request failed: {}", e))?;
@@ -1507,6 +1636,108 @@ mod tests {
         assert_eq!(submit.storage_gb, Some(20));
         assert_eq!(submit.host_count, Some(2));
         assert_eq!(submit.max_cpt, Some(500));
+    }
+
+    fn submit_command(extra: &[&str]) -> Result<SubmitCommand> {
+        let mut args: Vec<String> = ["hivemind", "submit", "job.hmf"]
+            .iter()
+            .map(|part| (*part).to_owned())
+            .collect();
+        args.extend(extra.iter().map(|part| (*part).to_owned()));
+        match parse_cli_args(&args)? {
+            CliCommand::Submit(submit) => Ok(submit),
+            _ => panic!("expected submit command"),
+        }
+    }
+
+    #[test]
+    fn submit_can_price_itself_from_a_local_run() {
+        let submit = submit_command(&["--max-cpt", "auto", "--replicas", "5"]).unwrap();
+        assert!(submit.max_cpt_auto);
+        assert_eq!(submit.max_cpt, None);
+        assert_eq!(submit.replicas, Some(5));
+
+        // The last flag wins, so a script can override a default it inherited.
+        let number_last = submit_command(&["--max-cpt", "auto", "--max-cpt", "500"]).unwrap();
+        assert!(!number_last.max_cpt_auto);
+        assert_eq!(number_last.max_cpt, Some(500));
+        let auto_last = submit_command(&["--max-cpt", "500", "--max-cpt", "auto"]).unwrap();
+        assert!(auto_last.max_cpt_auto);
+        assert_eq!(auto_last.max_cpt, None);
+
+        let plain = submit_command(&[]).unwrap();
+        assert!(!plain.max_cpt_auto);
+        assert_eq!(plain.replicas, None);
+    }
+
+    #[test]
+    fn submit_rejects_an_invalid_replica_count_or_cap() {
+        for bad in ["1", "8", "0", "three"] {
+            assert!(submit_command(&["--replicas", bad]).is_err(), "{bad}");
+        }
+        assert!(submit_command(&["--max-cpt", "automatic"]).is_err());
+    }
+
+    #[test]
+    fn the_resource_quote_for_a_submit_carries_a_placeholder_budget() {
+        let submit = submit_command(&[
+            "--input",
+            "{\"n\":1}",
+            "--cpu-score",
+            "250",
+            "--host-count",
+            "2",
+            "--max-cpt",
+            "auto",
+        ])
+        .unwrap();
+        let body = submit_quote_body(&submit, "n;");
+        assert_eq!(body.get("runtime"), Some(&serde_json::json!("hcode")));
+        assert_eq!(body.get("task_source"), Some(&serde_json::json!("n;")));
+        assert_eq!(body.get("torrent"), Some(&serde_json::json!("{\"n\":1}")));
+        assert_eq!(body.get("cpu_score"), Some(&serde_json::json!(250)));
+        assert_eq!(body.get("host_count"), Some(&serde_json::json!(2)));
+        assert_eq!(body.get("max_cpt"), Some(&serde_json::json!(1)));
+        assert!(body.get("memory_gb").is_none());
+    }
+
+    #[tokio::test]
+    async fn auto_budget_prices_a_function_that_runs_locally() {
+        let submit =
+            submit_command(&["--input", "{\"values\": [10, 20, 30]}", "--max-cpt", "auto"])
+                .unwrap();
+        let source = "let total = 0;\nfor value in get(input, \"values\") {\n  let total = total + value;\n}\ntotal;";
+        let budget = local_task_budget(&submit, source).await.unwrap();
+        assert_eq!(budget.replica_usage, 25);
+        assert_eq!(budget.replica_count, 3);
+        assert_eq!(budget.task_budget, 82);
+
+        let five = submit_command(&[
+            "--input",
+            "{\"values\": [10, 20, 30]}",
+            "--max-cpt",
+            "auto",
+            "--replicas",
+            "5",
+        ])
+        .unwrap();
+        assert_eq!(
+            local_task_budget(&five, source).await.unwrap().task_budget,
+            137
+        );
+    }
+
+    #[tokio::test]
+    async fn auto_budget_refuses_before_anything_is_sent() {
+        let without_input = submit_command(&["--max-cpt", "auto"]).unwrap();
+        let error = local_task_budget(&without_input, "1;").await.unwrap_err();
+        assert!(error.to_string().contains("needs --input"), "{error}");
+
+        let broken = submit_command(&["--input", "{}", "--max-cpt", "auto"]).unwrap();
+        let error = local_task_budget(&broken, "let y = ;").await.unwrap_err();
+        let text = error.to_string();
+        assert!(text.contains("nothing was submitted"), "{text}");
+        assert!(text.contains("parse_error"), "{text}");
     }
 
     #[test]

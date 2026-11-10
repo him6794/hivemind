@@ -2060,6 +2060,7 @@ dependencies = [
  "hivemind-vpn-service",
  "hivemind-website-api",
  "hivemind-worker-executor",
+ "managed-function-runtime",
  "reqwest 0.12.28",
  "serde",
  "serde_json",
