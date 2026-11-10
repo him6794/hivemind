@@ -1086,10 +1086,15 @@ struct BatchState {
     rows: Vec<BatchStateRow>,
 }
 
-/// The settings that change what a task asks for. The caps are saved per row instead.
+/// The settings that change what a task asks for, or which inputs the batch sends. The caps
+/// themselves are saved per row, so a resume uses the saved plan and refuses any flag that would
+/// have produced a different one.
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
 struct BatchSettings {
     replicas: Option<u16>,
+    max_cpt_per_task: Option<i64>,
+    precheck: bool,
+    skip_invalid: bool,
     cpu_score: Option<i32>,
     memory_gb: Option<i32>,
     gpu_score: Option<i32>,
@@ -1102,6 +1107,9 @@ impl BatchSettings {
     fn of(command: &BatchCommand) -> Self {
         Self {
             replicas: command.replicas,
+            max_cpt_per_task: command.max_cpt_per_task,
+            precheck: command.precheck,
+            skip_invalid: command.skip_invalid,
             cpu_score: command.cpu_score,
             memory_gb: command.memory_gb,
             gpu_score: command.gpu_score,
@@ -3159,7 +3167,7 @@ mod tests {
             &dir,
             SUM_SOURCE,
             &inputs,
-            &["--max-total-cpt", "300", "--resume"],
+            &["--max-total-cpt", "300", "--skip-invalid", "--resume"],
         )
         .await;
         assert!(second.result.is_err());
@@ -3252,6 +3260,40 @@ mod tests {
         )
         .await;
         assert!(other_replicas
+            .result
+            .unwrap_err()
+            .to_string()
+            .contains("settings differ"));
+
+        let other_cap = run_test_batch_in(
+            &master,
+            &dir,
+            SUM_SOURCE,
+            &[INPUT_25, INPUT_37],
+            &[
+                "--max-total-cpt",
+                "300",
+                "--resume",
+                "--max-cpt-per-task",
+                "500",
+            ],
+        )
+        .await;
+        assert!(other_cap
+            .result
+            .unwrap_err()
+            .to_string()
+            .contains("settings differ"));
+
+        let other_skip = run_test_batch_in(
+            &master,
+            &dir,
+            SUM_SOURCE,
+            &[INPUT_25, INPUT_37],
+            &["--max-total-cpt", "300", "--resume", "--skip-invalid"],
+        )
+        .await;
+        assert!(other_skip
             .result
             .unwrap_err()
             .to_string()
