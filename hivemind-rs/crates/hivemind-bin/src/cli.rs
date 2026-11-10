@@ -47,6 +47,8 @@ pub struct BatchCommand {
     pub precheck: bool,
     /// Submit the inputs that pass the pre-check instead of stopping when any fails.
     pub skip_invalid: bool,
+    /// Continue the batch that `--task-prefix` and `--out` name, submitting only what is missing.
+    pub resume: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -890,7 +892,7 @@ fn parse_batch_args(args: &[String]) -> Result<BatchCommand> {
         .get(2)
         .ok_or_else(|| {
             anyhow!(
-                "Usage: hivemind batch <function-source> --inputs <inputs.jsonl> --max-total-cpt <cpt> --username <user> [--password <pass>] [--out <results.csv>] [--max-cpt-per-task <cpt>] [--replicas <2-7>] [--no-precheck] [--skip-invalid] [--task-prefix <prefix>] [--per-minute <1-60>] [--poll-secs <n>] [--timeout-secs <n>] [--api <url>]"
+                "Usage: hivemind batch <function-source> --inputs <inputs.jsonl> --max-total-cpt <cpt> --username <user> [--password <pass>] [--out <results.csv>] [--max-cpt-per-task <cpt>] [--replicas <2-7>] [--no-precheck] [--skip-invalid] [--task-prefix <prefix>] [--resume] [--per-minute <1-60>] [--poll-secs <n>] [--timeout-secs <n>] [--api <url>]"
             )
         })?
         .clone();
@@ -917,6 +919,7 @@ fn parse_batch_args(args: &[String]) -> Result<BatchCommand> {
         replicas: None,
         precheck: true,
         skip_invalid: false,
+        resume: false,
     };
     let mut max_total_cpt = None;
 
@@ -932,6 +935,11 @@ fn parse_batch_args(args: &[String]) -> Result<BatchCommand> {
             }
             "--skip-invalid" => {
                 batch.skip_invalid = true;
+                i += 1;
+                continue;
+            }
+            "--resume" => {
+                batch.resume = true;
                 i += 1;
                 continue;
             }
@@ -966,6 +974,11 @@ fn parse_batch_args(args: &[String]) -> Result<BatchCommand> {
     if batch.skip_invalid && !batch.precheck {
         return Err(anyhow!(
             "--skip-invalid needs the local pre-check, which --no-precheck turns off"
+        ));
+    }
+    if batch.resume && batch.task_prefix.is_none() {
+        return Err(anyhow!(
+            "--resume needs --task-prefix: it names the batch to continue"
         ));
     }
 
@@ -1059,6 +1072,167 @@ fn batch_worst_case_cpt(caps: &[i64]) -> Result<i64> {
         .ok_or_else(|| anyhow!("the batch's worst-case cost is out of range"))
 }
 
+const BATCH_STATE_VERSION: u32 = 1;
+
+/// What a batch remembers so `--resume` can pick it up again. It records the function, every
+/// input, the settings, and the cap each task was given, so a resume cannot attach the task ids
+/// of one batch to different data or to a different price.
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
+struct BatchState {
+    version: u32,
+    prefix: String,
+    source_sha256: String,
+    settings: BatchSettings,
+    rows: Vec<BatchStateRow>,
+}
+
+/// The settings that change what a task asks for. The caps are saved per row instead.
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
+struct BatchSettings {
+    replicas: Option<u16>,
+    cpu_score: Option<i32>,
+    memory_gb: Option<i32>,
+    gpu_score: Option<i32>,
+    gpu_memory_gb: Option<i32>,
+    storage_gb: Option<i64>,
+    host_count: Option<i32>,
+}
+
+impl BatchSettings {
+    fn of(command: &BatchCommand) -> Self {
+        Self {
+            replicas: command.replicas,
+            cpu_score: command.cpu_score,
+            memory_gb: command.memory_gb,
+            gpu_score: command.gpu_score,
+            gpu_memory_gb: command.gpu_memory_gb,
+            storage_gb: command.storage_gb,
+            host_count: command.host_count,
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
+struct BatchStateRow {
+    input_sha256: String,
+    /// The cap the task is submitted with. Absent for an input the pre-check refused.
+    max_cpt: Option<i64>,
+    /// Why the pre-check refused the input.
+    skipped: Option<String>,
+}
+
+fn batch_state_path(out_path: &str) -> String {
+    format!("{out_path}.state.json")
+}
+
+fn build_batch_state(
+    command: &BatchCommand,
+    prefix: &str,
+    source: &str,
+    inputs: &[String],
+    plan: &[std::result::Result<i64, String>],
+) -> BatchState {
+    BatchState {
+        version: BATCH_STATE_VERSION,
+        prefix: prefix.to_owned(),
+        source_sha256: general_compute_runtime::sha256_digest(source.as_bytes()),
+        settings: BatchSettings::of(command),
+        rows: inputs
+            .iter()
+            .zip(plan)
+            .map(|(input, entry)| BatchStateRow {
+                input_sha256: general_compute_runtime::sha256_digest(input.as_bytes()),
+                max_cpt: entry.as_ref().ok().copied(),
+                skipped: entry.as_ref().err().cloned(),
+            })
+            .collect(),
+    }
+}
+
+/// The plan a saved batch was started with.
+fn plan_from_state(state: &BatchState) -> Vec<std::result::Result<i64, String>> {
+    state
+        .rows
+        .iter()
+        .map(|row| match row.max_cpt {
+            Some(cap) => Ok(cap),
+            None => Err(row
+                .skipped
+                .clone()
+                .unwrap_or_else(|| "skipped by the pre-check".to_owned())),
+        })
+        .collect()
+}
+
+/// Whether a saved batch may be continued with the files and flags given now.
+fn verify_batch_state(
+    state: &BatchState,
+    command: &BatchCommand,
+    prefix: &str,
+    source: &str,
+    inputs: &[String],
+) -> Result<()> {
+    if state.version != BATCH_STATE_VERSION {
+        return Err(anyhow!(
+            "the state file was written by a different version of this command"
+        ));
+    }
+    if state.prefix != prefix {
+        return Err(anyhow!(
+            "the state file belongs to batch {}, not {}",
+            state.prefix,
+            prefix
+        ));
+    }
+    if state.source_sha256 != general_compute_runtime::sha256_digest(source.as_bytes()) {
+        return Err(anyhow!(
+            "the function source changed since the batch started; resuming would attach its task ids to a different function"
+        ));
+    }
+    if state.rows.len() != inputs.len() {
+        return Err(anyhow!(
+            "the inputs file has {} inputs; the batch started with {}",
+            inputs.len(),
+            state.rows.len()
+        ));
+    }
+    if let Some(index) = state.rows.iter().zip(inputs).position(|(row, input)| {
+        row.input_sha256 != general_compute_runtime::sha256_digest(input.as_bytes())
+    }) {
+        return Err(anyhow!(
+            "input {} changed since the batch started; resuming would attach its task id to different data",
+            index + 1
+        ));
+    }
+    if state.settings != BatchSettings::of(command) {
+        return Err(anyhow!(
+            "the resource or replica settings differ from the ones the batch started with"
+        ));
+    }
+    Ok(())
+}
+
+async fn load_batch_state(path: &str) -> Result<BatchState> {
+    let text = tokio::fs::read_to_string(path).await.map_err(|_| {
+        anyhow!(
+            "there is no state file at {path}; a batch can only be resumed with the --out and --task-prefix it started with"
+        )
+    })?;
+    serde_json::from_str(&text).map_err(|e| anyhow!("the state file {path} cannot be read: {e}"))
+}
+
+/// Writes the state through a temporary file, so an interrupted write never leaves half a state.
+async fn save_batch_state(path: &str, state: &BatchState) -> Result<()> {
+    let text = serde_json::to_string_pretty(state)?;
+    let temporary = format!("{path}.tmp");
+    tokio::fs::write(&temporary, text)
+        .await
+        .map_err(|e| anyhow!("failed to write {}: {}", temporary, e))?;
+    tokio::fs::rename(&temporary, path)
+        .await
+        .map_err(|e| anyhow!("failed to write {}: {}", path, e))
+}
+
 /// Stops the batch when an input cannot run, unless the rest may go ahead without it.
 fn check_refusals(plan: &[std::result::Result<i64, String>], skip_invalid: bool) -> Result<()> {
     let refused: Vec<(usize, &String)> = plan
@@ -1098,6 +1272,7 @@ fn refusal_report(refused: &[(usize, &String)], total: usize) -> String {
 
 /// The line printed once the batch is planned and before the first task is sent.
 fn plan_summary(
+    label: &str,
     prefix: &str,
     caps: &[i64],
     skipped: usize,
@@ -1124,7 +1299,7 @@ fn plan_summary(
         format!(" ({skipped} inputs skipped)")
     };
     format!(
-        "Batch {prefix}: {} tasks{skipped} at {per_task}{basis}, at most {worst_case} CPT in total (cap {}). Results: {out_path}",
+        "{label} {prefix}: {} tasks{skipped} at {per_task}{basis}, at most {worst_case} CPT in total (cap {}). Results: {out_path}",
         caps.len(),
         command.max_total_cpt
     )
@@ -1310,6 +1485,7 @@ async fn submit_batch_task(
     body: &serde_json::Value,
     next_submit_at: &mut Instant,
     interval: Duration,
+    conflict_is_ok: bool,
 ) -> Result<()> {
     const MAX_ATTEMPTS: u32 = 5;
     let url = format!("{}/api/tasks", api_base);
@@ -1327,6 +1503,11 @@ async fn submit_batch_task(
         if status.is_success()
             && reply.get("success").and_then(|value| value.as_bool()) == Some(true)
         {
+            return Ok(());
+        }
+        // When resuming, the saved state has already shown that the data behind this task id is
+        // the data of this batch, so a task that is already there is a task that was submitted.
+        if status == reqwest::StatusCode::CONFLICT && conflict_is_ok {
             return Ok(());
         }
         if status == reqwest::StatusCode::TOO_MANY_REQUESTS && attempt < MAX_ATTEMPTS {
@@ -1459,10 +1640,26 @@ pub async fn run_batch(command: BatchCommand) -> Result<()> {
         .clone()
         .unwrap_or_else(|| format!("{prefix}-results.csv"));
 
+    // A batch keeps a state file next to its results. A new batch never overwrites one, and a
+    // resumed batch must match it exactly.
+    let state_path = batch_state_path(&out_path);
+    let saved = if command.resume {
+        let state = load_batch_state(&state_path).await?;
+        verify_batch_state(&state, &command, &prefix, &source, &inputs)?;
+        Some(state)
+    } else {
+        if tokio::fs::try_exists(&state_path).await.unwrap_or(false) {
+            return Err(anyhow!(
+                "{state_path} already exists: pass --resume to continue that batch, or choose another --task-prefix or --out"
+            ));
+        }
+        None
+    };
+
     // A local run of every input finds the ones that cannot run and prices each, before anything
-    // is sent.
+    // is sent. A resumed batch keeps the plan it started with.
     let replicas = command.replicas.unwrap_or(check::DEFAULT_REPLICAS);
-    let outcomes = if command.precheck {
+    let outcomes = if command.precheck && saved.is_none() {
         println!("Checking {} inputs with a local run...", inputs.len());
         let (check_source, check_inputs) = (source.clone(), inputs.clone());
         let outcomes = tokio::task::spawn_blocking(move || {
@@ -1495,24 +1692,31 @@ pub async fn run_batch(command: BatchCommand) -> Result<()> {
     )
     .await?;
 
-    // The price depends on the resources and host count, not on the input, so one quote prices the batch.
-    let unit_cpt = quote_batch_price(&client, &command, &token, &source, &inputs[0]).await?;
-    if let Some(cap) = command.max_cpt_per_task {
-        if cap < unit_cpt {
-            return Err(anyhow!(
-                "--max-cpt-per-task {} is below the quoted price of {} CPT per task",
-                cap,
-                unit_cpt
-            ));
-        }
-    }
-    let plan: Vec<std::result::Result<i64, String>> = match &outcomes {
-        Some(outcomes) => check::plan_caps(outcomes, command.max_cpt_per_task, unit_cpt),
+    let plan: Vec<std::result::Result<i64, String>> = match &saved {
+        Some(state) => plan_from_state(state),
         None => {
-            let cap = command
-                .max_cpt_per_task
-                .unwrap_or_else(|| DEFAULT_BATCH_TASK_CPT.max(unit_cpt));
-            vec![Ok(cap); inputs.len()]
+            // The price depends on the resources and host count, not on the input, so one quote
+            // prices the batch.
+            let unit_cpt =
+                quote_batch_price(&client, &command, &token, &source, &inputs[0]).await?;
+            if let Some(cap) = command.max_cpt_per_task {
+                if cap < unit_cpt {
+                    return Err(anyhow!(
+                        "--max-cpt-per-task {} is below the quoted price of {} CPT per task",
+                        cap,
+                        unit_cpt
+                    ));
+                }
+            }
+            match &outcomes {
+                Some(outcomes) => check::plan_caps(outcomes, command.max_cpt_per_task, unit_cpt),
+                None => {
+                    let cap = command
+                        .max_cpt_per_task
+                        .unwrap_or_else(|| DEFAULT_BATCH_TASK_CPT.max(unit_cpt));
+                    vec![Ok(cap); inputs.len()]
+                }
+            }
         }
     };
     let skipped = plan.iter().filter(|entry| entry.is_err()).count();
@@ -1529,9 +1733,14 @@ pub async fn run_batch(command: BatchCommand) -> Result<()> {
             command.max_total_cpt
         ));
     }
+    let label = if saved.is_some() {
+        "Resuming batch"
+    } else {
+        "Batch"
+    };
     println!(
         "{}",
-        plan_summary(&prefix, &caps, skipped, worst_case, &command, &out_path)
+        plan_summary(label, &prefix, &caps, skipped, worst_case, &command, &out_path)
     );
 
     let mut rows: Vec<BatchRow> = inputs
@@ -1554,10 +1763,41 @@ pub async fn run_batch(command: BatchCommand) -> Result<()> {
         })
         .collect();
 
+    if saved.is_none() {
+        // Written before the first task is sent, so an interrupted batch can always be resumed.
+        save_batch_state(
+            &state_path,
+            &build_batch_state(&command, &prefix, &source, &inputs, &plan),
+        )
+        .await?;
+    } else {
+        // Tasks sent before the interruption are on the network; only the missing ones are sent.
+        let planned_ids: Vec<String> = rows
+            .iter()
+            .zip(&plan)
+            .filter(|(_, entry)| entry.is_ok())
+            .map(|(row, _)| row.task_id.clone())
+            .collect();
+        let snapshots = fetch_task_snapshots(&client, &command.api_base, &token, &planned_ids)
+            .await
+            .map_err(|e| {
+                anyhow!("cannot tell which tasks already exist, so nothing was resubmitted: {e}")
+            })?;
+        apply_batch_snapshots(&mut rows, &snapshots);
+        println!(
+            "{} of {} tasks already exist; submitting the rest",
+            snapshots.len(),
+            planned_ids.len()
+        );
+    }
+
     let interval = submit_interval(command.per_minute);
     let mut next_submit_at = Instant::now();
     for index in 0..rows.len() {
         let Ok(cap) = plan[index] else { continue };
+        if rows[index].status != "NOT_SUBMITTED" {
+            continue;
+        }
         let body = serde_json::Value::Object({
             let mut body = batch_request_body(&command, &source, &inputs[index]);
             body.insert("task_id".into(), rows[index].task_id.clone().into());
@@ -1571,6 +1811,7 @@ pub async fn run_batch(command: BatchCommand) -> Result<()> {
             &body,
             &mut next_submit_at,
             interval,
+            saved.is_some(),
         )
         .await
         {
@@ -2292,12 +2533,12 @@ mod tests {
     #[test]
     fn the_plan_summary_states_the_caps_and_what_they_are_based_on() {
         let exact = batch_command(&["--max-total-cpt", "500"]).unwrap();
-        let text = plan_summary("t", &[82, 82], 0, 164, &exact, "t.csv");
+        let text = plan_summary("Batch", "t", &[82, 82], 0, 164, &exact, "t.csv");
         assert_eq!(
             text,
             "Batch t: 2 tasks at 82 CPT each, the exact need of each input from a local run, at most 164 CPT in total (cap 500). Results: t.csv"
         );
-        let mixed = plan_summary("t", &[82, 122], 1, 204, &exact, "t.csv");
+        let mixed = plan_summary("Batch", "t", &[82, 122], 1, 204, &exact, "t.csv");
         assert!(
             mixed.contains("2 tasks (1 inputs skipped) at 82 to 122 CPT each"),
             "{mixed}"
@@ -2305,9 +2546,13 @@ mod tests {
 
         let fixed =
             batch_command(&["--max-total-cpt", "500", "--max-cpt-per-task", "100"]).unwrap();
-        assert!(!plan_summary("t", &[100], 0, 100, &fixed, "t.csv").contains("exact"));
+        assert!(!plan_summary("Batch", "t", &[100], 0, 100, &fixed, "t.csv").contains("exact"));
+        assert!(
+            plan_summary("Resuming batch", "t", &[100], 0, 100, &fixed, "t.csv")
+                .starts_with("Resuming batch t: 1 tasks at 100 CPT each")
+        );
         let unchecked = batch_command(&["--max-total-cpt", "500", "--no-precheck"]).unwrap();
-        assert!(!plan_summary("t", &[100], 0, 100, &unchecked, "t.csv").contains("exact"));
+        assert!(!plan_summary("Batch", "t", &[100], 0, 100, &unchecked, "t.csv").contains("exact"));
     }
 
     #[test]
@@ -2350,6 +2595,12 @@ mod tests {
         /// Task id to its output, for tasks that exist on the network.
         tasks: std::collections::BTreeMap<String, String>,
         seen: Vec<SeenRequest>,
+        /// Tasks created so far by `POST /api/tasks`.
+        created: usize,
+        /// After this many creations every further one fails with 503.
+        fail_creates_after: Option<usize>,
+        /// Tasks that exist but are missing from the list, as when the list lags behind.
+        hidden: std::collections::BTreeSet<String>,
     }
 
     /// A stand-in for the Master HTTP API that records what a batch sends it.
@@ -2369,6 +2620,21 @@ mod tests {
                 .filter(|request| request.method == "POST" && request.path == "/api/tasks")
                 .map(|request| request.body)
                 .collect()
+        }
+
+        fn quotes(&self) -> usize {
+            self.seen()
+                .iter()
+                .filter(|request| request.path == "/api/tasks/quote")
+                .count()
+        }
+
+        fn fail_creates_after(&self, count: Option<usize>) {
+            self.state.lock().unwrap().fail_creates_after = count;
+        }
+
+        fn hide(&self, id: &str) {
+            self.state.lock().unwrap().hidden.insert(id.to_owned());
         }
     }
 
@@ -2437,6 +2703,15 @@ mod tests {
             ),
             ("POST", "/api/tasks") => {
                 let id = json["task_id"].as_str().unwrap_or_default().to_owned();
+                if state
+                    .fail_creates_after
+                    .is_some_and(|limit| state.created >= limit)
+                {
+                    return (
+                        503,
+                        serde_json::json!({"success": false, "message": "master unavailable"}),
+                    );
+                }
                 match state.tasks.entry(id) {
                     std::collections::btree_map::Entry::Occupied(_) => (
                         409,
@@ -2444,6 +2719,7 @@ mod tests {
                     ),
                     std::collections::btree_map::Entry::Vacant(slot) => {
                         slot.insert("done".to_owned());
+                        state.created += 1;
                         (201, serde_json::json!({"success": true, "message": "ok"}))
                     }
                 }
@@ -2456,6 +2732,7 @@ mod tests {
                     .replace("%2C", ",");
                 let tasks: Vec<serde_json::Value> = ids
                     .split(',')
+                    .filter(|id| !state.hidden.contains(*id))
                     .filter_map(|id| {
                         state.tasks.get(id).map(|output| {
                             serde_json::json!({
@@ -2486,7 +2763,7 @@ mod tests {
                 .iter()
                 .map(|id| ((*id).to_owned(), "earlier".to_owned()))
                 .collect(),
-            seen: Vec::new(),
+            ..MockState::default()
         }));
         let shared = std::sync::Arc::clone(&state);
         tokio::spawn(async move {
@@ -2523,18 +2800,37 @@ mod tests {
     }
 
     async fn run_test_batch(master: &MockMaster, inputs: &[&str], extra: &[&str]) -> BatchRun {
+        let dir = temp_batch_dir();
+        let run = run_test_batch_in(master, &dir, SUM_SOURCE, inputs, extra).await;
+        std::fs::remove_dir_all(&dir).ok();
+        run
+    }
+
+    fn temp_batch_dir() -> std::path::PathBuf {
         let dir = std::env::temp_dir().join(format!(
             "hivemind-batch-{}-{}",
             std::process::id(),
             uuid::Uuid::new_v4().simple()
         ));
         std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// Runs a batch whose files live in `dir`. Running again in the same `dir` sees the first
+    /// run's results and state, which is how a resume is tested.
+    async fn run_test_batch_in(
+        master: &MockMaster,
+        dir: &std::path::Path,
+        source_text: &str,
+        inputs: &[&str],
+        extra: &[&str],
+    ) -> BatchRun {
         let (source, list, out) = (
             dir.join("sum.hmf"),
             dir.join("inputs.jsonl"),
             dir.join("out.csv"),
         );
-        std::fs::write(&source, SUM_SOURCE).unwrap();
+        std::fs::write(&source, source_text).unwrap();
         std::fs::write(&list, inputs.join("\n")).unwrap();
         let mut args: Vec<String> = [
             "hivemind",
@@ -2564,9 +2860,10 @@ mod tests {
         };
         // Pacing exists to stay under the Master's rate limit, which a mock does not have.
         command.per_minute = 60_000;
+        // Waiting for a task that never shows up would otherwise take the default hour.
+        command.timeout_secs = 1;
         let result = run_batch(command).await;
         let csv = std::fs::read_to_string(&out).unwrap_or_default();
-        std::fs::remove_dir_all(&dir).ok();
         BatchRun { result, csv }
     }
 
@@ -2722,6 +3019,299 @@ mod tests {
         assert_eq!(body["max_cpt"], 137);
         assert_eq!(body["managed_replica_count"], 5);
         assert_eq!(body["managed_quorum"], 3);
+    }
+
+    #[test]
+    fn resuming_needs_the_prefix_that_names_the_batch() {
+        let error = batch_command(&["--max-total-cpt", "500", "--resume"]).unwrap_err();
+        assert!(
+            error.to_string().contains("--resume needs --task-prefix"),
+            "{error}"
+        );
+        let command =
+            batch_command(&["--max-total-cpt", "500", "--resume", "--task-prefix", "t"]).unwrap();
+        assert!(command.resume);
+        assert!(!batch_command(&["--max-total-cpt", "500"]).unwrap().resume);
+    }
+
+    #[tokio::test]
+    async fn a_new_batch_saves_its_plan_and_never_overwrites_another() {
+        let master = mock_master(5, &[]).await;
+        let dir = temp_batch_dir();
+        run_test_batch_in(
+            &master,
+            &dir,
+            SUM_SOURCE,
+            &[INPUT_25, INPUT_37],
+            &["--max-total-cpt", "300"],
+        )
+        .await
+        .result
+        .unwrap();
+        let state: BatchState =
+            serde_json::from_str(&std::fs::read_to_string(dir.join("out.csv.state.json")).unwrap())
+                .unwrap();
+        assert_eq!(state.prefix, "t");
+        assert_eq!(state.rows.len(), 2);
+        assert_eq!(state.rows[0].max_cpt, Some(82));
+        assert_eq!(state.rows[1].max_cpt, Some(122));
+        assert!(state.rows.iter().all(|row| row.skipped.is_none()));
+
+        // The same batch again, without --resume, is refused before anything is sent.
+        let before = master.seen().len();
+        let again = run_test_batch_in(
+            &master,
+            &dir,
+            SUM_SOURCE,
+            &[INPUT_25, INPUT_37],
+            &["--max-total-cpt", "300"],
+        )
+        .await;
+        let error = again.result.unwrap_err().to_string();
+        assert!(error.contains("already exists: pass --resume"), "{error}");
+        assert_eq!(master.seen().len(), before);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn an_interrupted_batch_resumes_without_resubmitting_or_repricing() {
+        let master = mock_master(5, &[]).await;
+        let dir = temp_batch_dir();
+        let inputs = [INPUT_25, INPUT_37, INPUT_25];
+
+        // The Master goes away after the first task was created.
+        master.fail_creates_after(Some(1));
+        let first = run_test_batch_in(
+            &master,
+            &dir,
+            SUM_SOURCE,
+            &inputs,
+            &["--max-total-cpt", "400"],
+        )
+        .await;
+        let error = first.result.unwrap_err().to_string();
+        assert!(error.contains("2 of 3 tasks did not complete"), "{error}");
+        assert!(first.csv.contains("t-0001,COMPLETED"), "{}", first.csv);
+        assert!(first.csv.contains("t-0002,SUBMIT_FAILED"), "{}", first.csv);
+        assert_eq!(master.submitted().len(), 3);
+        assert_eq!(master.quotes(), 1);
+
+        // It comes back. Only the two missing tasks are sent, with the caps the batch started with.
+        master.fail_creates_after(None);
+        let second = run_test_batch_in(
+            &master,
+            &dir,
+            SUM_SOURCE,
+            &inputs,
+            &["--max-total-cpt", "400", "--resume"],
+        )
+        .await;
+        second.result.unwrap();
+        let sent: Vec<(String, i64)> = master.submitted()[3..]
+            .iter()
+            .map(|body| {
+                (
+                    body["task_id"].as_str().unwrap().to_owned(),
+                    body["max_cpt"].as_i64().unwrap(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            sent,
+            vec![("t-0002".to_owned(), 122), ("t-0003".to_owned(), 82)]
+        );
+        assert_eq!(master.quotes(), 1, "a resume does not ask for a new quote");
+        for id in ["t-0001", "t-0002", "t-0003"] {
+            assert!(
+                second.csv.contains(&format!("{id},COMPLETED")),
+                "{}",
+                second.csv
+            );
+        }
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn a_resume_keeps_the_inputs_the_pre_check_refused() {
+        let master = mock_master(5, &[]).await;
+        let dir = temp_batch_dir();
+        let inputs = [INPUT_25, INPUT_BROKEN];
+        let first = run_test_batch_in(
+            &master,
+            &dir,
+            SUM_SOURCE,
+            &inputs,
+            &["--max-total-cpt", "300", "--skip-invalid"],
+        )
+        .await;
+        assert!(first.result.is_err());
+        let state: BatchState =
+            serde_json::from_str(&std::fs::read_to_string(dir.join("out.csv.state.json")).unwrap())
+                .unwrap();
+        assert!(state.rows[1].max_cpt.is_none());
+        assert!(state.rows[1]
+            .skipped
+            .as_deref()
+            .is_some_and(|reason| !reason.is_empty()));
+
+        let second = run_test_batch_in(
+            &master,
+            &dir,
+            SUM_SOURCE,
+            &inputs,
+            &["--max-total-cpt", "300", "--resume"],
+        )
+        .await;
+        assert!(second.result.is_err());
+        assert_eq!(
+            master.submitted().len(),
+            1,
+            "the refused input is still not sent"
+        );
+        assert!(
+            second.csv.contains("t-0002,PRECHECK_FAILED"),
+            "{}",
+            second.csv
+        );
+        assert!(second.csv.contains("t-0001,COMPLETED"), "{}", second.csv);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn a_resume_refuses_anything_that_differs_from_the_saved_batch() {
+        let master = mock_master(5, &[]).await;
+        let dir = temp_batch_dir();
+        run_test_batch_in(
+            &master,
+            &dir,
+            SUM_SOURCE,
+            &[INPUT_25, INPUT_37],
+            &["--max-total-cpt", "300"],
+        )
+        .await
+        .result
+        .unwrap();
+        let sent = master.seen().len();
+
+        let changed_input = run_test_batch_in(
+            &master,
+            &dir,
+            SUM_SOURCE,
+            &[INPUT_25, INPUT_25],
+            &["--max-total-cpt", "300", "--resume"],
+        )
+        .await;
+        let error = changed_input.result.unwrap_err().to_string();
+        assert!(
+            error.contains("input 2 changed since the batch started"),
+            "{error}"
+        );
+
+        let changed_source = run_test_batch_in(
+            &master,
+            &dir,
+            "1;",
+            &[INPUT_25, INPUT_37],
+            &["--max-total-cpt", "300", "--resume"],
+        )
+        .await;
+        let error = changed_source.result.unwrap_err().to_string();
+        assert!(error.contains("the function source changed"), "{error}");
+
+        let fewer = run_test_batch_in(
+            &master,
+            &dir,
+            SUM_SOURCE,
+            &[INPUT_25],
+            &["--max-total-cpt", "300", "--resume"],
+        )
+        .await;
+        let error = fewer.result.unwrap_err().to_string();
+        assert!(
+            error.contains("the inputs file has 1 inputs; the batch started with 2"),
+            "{error}"
+        );
+
+        let other_settings = run_test_batch_in(
+            &master,
+            &dir,
+            SUM_SOURCE,
+            &[INPUT_25, INPUT_37],
+            &["--max-total-cpt", "300", "--resume", "--cpu-score", "250"],
+        )
+        .await;
+        let error = other_settings.result.unwrap_err().to_string();
+        assert!(error.contains("settings differ"), "{error}");
+
+        let other_replicas = run_test_batch_in(
+            &master,
+            &dir,
+            SUM_SOURCE,
+            &[INPUT_25, INPUT_37],
+            &["--max-total-cpt", "300", "--resume", "--replicas", "5"],
+        )
+        .await;
+        assert!(other_replicas
+            .result
+            .unwrap_err()
+            .to_string()
+            .contains("settings differ"));
+
+        // None of the refusals reached the network.
+        assert_eq!(master.seen().len(), sent);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn resuming_without_a_saved_batch_is_refused() {
+        let master = mock_master(5, &[]).await;
+        let run = run_test_batch(
+            &master,
+            &[INPUT_25],
+            &["--max-total-cpt", "300", "--resume"],
+        )
+        .await;
+        let error = run.result.unwrap_err().to_string();
+        assert!(error.contains("there is no state file"), "{error}");
+        assert!(master.seen().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_task_that_appeared_after_the_list_was_read_counts_as_submitted() {
+        let master = mock_master(5, &[]).await;
+        let dir = temp_batch_dir();
+        master.fail_creates_after(Some(0));
+        let first = run_test_batch_in(
+            &master,
+            &dir,
+            SUM_SOURCE,
+            &[INPUT_25],
+            &["--max-total-cpt", "300"],
+        )
+        .await;
+        assert!(first.csv.contains("t-0001,SUBMIT_FAILED"), "{}", first.csv);
+
+        // The task is on the network by now, but the list the resume reads does not show it yet.
+        master.fail_creates_after(None);
+        {
+            let mut state = master.state.lock().unwrap();
+            state
+                .tasks
+                .insert("t-0001".to_owned(), "earlier".to_owned());
+        }
+        master.hide("t-0001");
+        let second = run_test_batch_in(
+            &master,
+            &dir,
+            SUM_SOURCE,
+            &[INPUT_25],
+            &["--max-total-cpt", "300", "--resume"],
+        )
+        .await;
+        assert!(second.result.is_err());
+        assert!(second.csv.contains("t-0001,SUBMITTED"), "{}", second.csv);
+        assert!(!second.csv.contains("SUBMIT_FAILED"), "{}", second.csv);
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
