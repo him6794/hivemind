@@ -34,6 +34,7 @@ pub const GPU_SEMANTICS_MANIFEST_SHA256: &str =
 
 pub mod artifacts;
 mod deterministic_math;
+pub mod dry_run;
 mod gpu;
 mod tensor;
 
@@ -469,6 +470,12 @@ impl RuntimeError {
     #[must_use]
     pub fn code(&self) -> &'static str {
         self.code
+    }
+
+    /// The human-readable reason, without the code prefix that `Display` adds.
+    #[must_use]
+    pub fn message(&self) -> &str {
+        &self.message
     }
 
     #[must_use]

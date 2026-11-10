@@ -5,7 +5,11 @@
 //! pages show, so a runtime change that invalidates a published example fails
 //! here instead of on the site.
 
-use managed_function_runtime::{ExecutionLimits, ManagedExecutor, Status, render_output};
+use managed_function_runtime::{
+    ExecutionLimits, ManagedExecutor, Status,
+    dry_run::{DryRunLimits, dry_run},
+    render_output,
+};
 
 /// (id, source, input, result, output, usage units)
 const EXAMPLES: &[(&str, &str, &str, &str, &str, u64)] = &[
@@ -405,6 +409,33 @@ fn published_examples_produce_the_documented_results() {
     assert!(
         mismatches.is_empty(),
         "published examples disagree with the runtime:\n{}",
+        mismatches.join("\n")
+    );
+}
+
+/// The dry run behind `hivemind check` and the Master's cost preview must report
+/// the usage and output the pages publish, since users price their tasks from it.
+#[test]
+fn dry_run_reports_the_published_usage_and_output() {
+    let mut mismatches = Vec::new();
+    for (id, source, input, result, output, usage_units) in EXAMPLES {
+        match dry_run(source, input, DryRunLimits::default()) {
+            Ok(report) => {
+                // A Worker reports printed text when there is any, else the final value.
+                let expected = if output.is_empty() { result } else { output };
+                if report.output != *expected || report.receipt.usage_units != *usage_units {
+                    mismatches.push(format!(
+                        "{id}: output {:?}, usage units {}",
+                        report.output, report.receipt.usage_units
+                    ));
+                }
+            }
+            Err(failure) => mismatches.push(format!("{id}: did not run: {failure:?}")),
+        }
+    }
+    assert!(
+        mismatches.is_empty(),
+        "dry run disagrees with the published examples:\n{}",
         mismatches.join("\n")
     );
 }
