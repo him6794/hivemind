@@ -155,7 +155,7 @@ export function nativeLocaleContract({ role, url, installMockApi }) {
     const before = flow();
     if (role === 'master') {
       await page.getByRole('tab', { name: '提交', exact: true }).click();
-      await page.getByLabel('任務程式', { exact: true }).fill('get(input, "text");');
+      await page.getByLabel('函式原始碼（hcode）', { exact: true }).fill('get(input, "text");');
       await page.getByLabel('輸入資料（JSON）').fill('{"text":"原生語言草稿"}');
     } else {
       await page.getByRole('tab', { name: '電腦', exact: true }).click();
@@ -163,7 +163,7 @@ export function nativeLocaleContract({ role, url, installMockApi }) {
     await page.getByRole('combobox', { name: '語言' }).selectOption('en');
     await settleWrite(page, 5);
     if (role === 'master') {
-      await expect(page.getByLabel('Task instructions')).toHaveValue('get(input, "text");');
+      await expect(page.getByLabel('Function source (hcode)')).toHaveValue('get(input, "text");');
       await expect(page.getByLabel('Input data (JSON)')).toHaveValue('{"text":"原生語言草稿"}');
     } else {
       await expect(page.getByRole('tab', { name: 'Computer', exact: true })).toHaveAttribute('aria-selected', 'true');

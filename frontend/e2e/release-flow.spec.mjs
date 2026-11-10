@@ -169,10 +169,11 @@ test.describe.serial('release browser flow across the official site, Worker cons
 
     await page.getByRole('tab', { name: 'Submit' }).click();
     await page.getByLabel('Task ID').fill(cancelledTaskId);
-    await page.getByLabel('Task instructions').fill(taskSourceCode);
+    await page.getByLabel('Function source (hcode)').fill(taskSourceCode);
     await page.getByLabel('Input data (JSON)').fill(taskInputJson);
+    await page.getByText('Advanced: computer requirements').click();
     await page.getByLabel('CPU score').fill('1201');
-    await page.getByLabel('Max CPT').fill('200');
+    await page.getByLabel('Task charge cap (CPT, fee included)').fill('200');
     await page.getByRole('button', { name: 'Send task' }).click();
     await page.getByRole('tab', { name: 'Tasks' }).click();
     const cancelledRow = page.locator('.task-row').filter({ hasText: cancelledTaskId });
@@ -189,10 +190,11 @@ test.describe.serial('release browser flow across the official site, Worker cons
 
     await page.getByRole('tab', { name: 'Submit' }).click();
     await page.getByLabel('Task ID').fill(completedTaskId);
-    await page.getByLabel('Task instructions').fill(taskSourceCode);
+    await page.getByLabel('Function source (hcode)').fill(taskSourceCode);
     await page.getByLabel('Input data (JSON)').fill(taskInputJson);
+    await page.getByText('Advanced: computer requirements').click();
     await page.getByLabel('CPU score').fill('0');
-    await page.getByLabel('Max CPT').fill('100');
+    await page.getByLabel('Task charge cap (CPT, fee included)').fill('100');
     await page.getByRole('button', { name: 'Send task' }).click();
     await page.getByRole('tab', { name: 'Tasks' }).click();
     const completedRow = page.locator('.task-row').filter({ hasText: completedTaskId });

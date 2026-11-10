@@ -28,6 +28,57 @@ function createTask(taskId, overrides = {}) {
   };
 }
 
+// What the Master answers for a function that finished: 25 units per replica, so 82 CPT in all.
+function dryRunQuote() {
+  return {
+    success: true,
+    message: 'The run completed',
+    output: '60',
+    output_bytes: 2,
+    output_truncated: false,
+    exceeds_consensus_result_limit: false,
+    consensus_result_limit_bytes: 262144,
+    usage_units: 25,
+    quote: {
+      replica_usage_units: 25,
+      replica_count: 3,
+      replica_count_source: 'default',
+      reserved_usage_cpt: 75,
+      platform_fee_cpt: 7,
+      required_max_cpt: 82,
+    },
+    error: null,
+    semantics_manifest_sha256: 'd82fb2679d7fe4247571206a28614cfaf7449091c49d131f67e08a74766658c0',
+  };
+}
+
+function dryRunSyntaxError() {
+  return {
+    success: false,
+    message: 'The program failed',
+    output: '',
+    output_bytes: 0,
+    output_truncated: false,
+    exceeds_consensus_result_limit: false,
+    consensus_result_limit_bytes: 262144,
+    usage_units: null,
+    quote: null,
+    error: { code: 'parse_error', message: 'unexpected token', line: 2, column: 9, cause: 'program', usage_units: null },
+    semantics_manifest_sha256: 'd82fb2679d7fe4247571206a28614cfaf7449091c49d131f67e08a74766658c0',
+  };
+}
+
+// The Nodepool price of the resources a task reserves: 10 CPT per host plus CPU, memory, and so on.
+function resourcePrice(request) {
+  const hosts = Math.max(1, request.host_count || 1);
+  return hosts * (10
+    + Math.floor((request.cpu_score || 0) / 10)
+    + Math.floor((request.gpu_score || 0) / 5)
+    + (request.memory_gb || 0) * 2
+    + (request.gpu_memory_gb || 0) * 3
+    + (request.storage_gb || 0));
+}
+
 function addBrowserDiagnostics(page) {
   const diagnostics = {
     consoleErrors: [],
@@ -58,6 +109,9 @@ async function installMockApi(page, { startupFailure = false } = {}) {
     log: 'Browser fixture output: managed result 42',
     stopCalls: 0,
     submissions: [],
+    dryRuns: [],
+    quotes: [],
+    dryRunAnswer: dryRunQuote,
     logsRead: [],
     unhandledRequests: [],
     tasks: [createTask(existingTaskId)],
@@ -133,6 +187,20 @@ async function installMockApi(page, { startupFailure = false } = {}) {
         max_cpt: payload.max_cpt,
       }));
       await fulfillJson({ success: true, task_id: payload.task_id });
+      return;
+    }
+
+    if (method === 'POST' && pathname === '/api/tasks/dry-run') {
+      const payload = request.postDataJSON();
+      fixture.dryRuns.push(payload);
+      await fulfillJson(fixture.dryRunAnswer(payload));
+      return;
+    }
+
+    if (method === 'POST' && pathname === '/api/tasks/quote') {
+      const payload = request.postDataJSON();
+      fixture.quotes.push(payload);
+      await fulfillJson({ success: true, quoted_cpt: resourcePrice(payload), currency: 'CPT' });
       return;
     }
 
@@ -213,6 +281,94 @@ test.afterEach(async ({ page }, testInfo) => {
 test.describe('production Master shadcn UI regression', () => {
   nativeLocaleContract({ role: 'master', url: masterUiUrl, installMockApi });
 
+  test('starts from a template, prices it with a dry run, and covers the price of the resources', async ({ page }) => {
+    const fixture = await installMockApi(page);
+    await signIn(page);
+    await page.getByRole('tab', { name: 'Submit' }).click();
+
+    await page.getByLabel('Start from a template').selectOption('sum-list');
+    await expect(page.getByLabel('Function source (hcode)')).toHaveValue(/^let total = 0;/);
+    await expect(page.getByLabel('Input data (JSON)')).toHaveValue('{"values": [10, 20, 30]}');
+    await expect(page.getByLabel('CPU score')).toBeHidden();
+
+    await page.getByRole('button', { name: 'Check and price' }).click();
+    await expect(page.getByText('Each replica uses 25 units. 3 replicas use 75 CPT, plus a 7 CPT platform fee: 82 CPT in total.')).toBeVisible();
+    const cap = page.getByLabel('Task charge cap (CPT, fee included)');
+    await expect(cap).toHaveValue('82');
+    expect(fixture.dryRuns).toHaveLength(1);
+    expect(fixture.dryRuns[0].torrent).toBe('{"values": [10, 20, 30]}');
+    expect(fixture.dryRuns[0].task_source).toMatch(/^let total = 0;/);
+    expect(fixture.quotes).toHaveLength(1);
+    expect(fixture.quotes[0]).toMatchObject({ runtime: 'hcode', max_cpt: 1 });
+
+    // Resources that cost more than the work change the cap the task needs, and hide the old answer.
+    await page.getByText('Advanced: computer requirements').click();
+    await page.getByLabel('CPU score').fill('250');
+    await page.getByLabel('Host count').fill('3');
+    await expect(page.getByText('Output preview')).toBeHidden();
+    await page.getByRole('button', { name: 'Check and price' }).click();
+    await expect(page.getByText('The computer requirements you chose are priced at 105 CPT')).toBeVisible();
+    await expect(page.getByText('Your charge cap of 82 CPT is below the 105 CPT price of the computer requirements you chose')).toBeVisible();
+    expect(fixture.quotes[1]).toMatchObject({ cpu_score: 250, host_count: 3 });
+    await page.getByRole('button', { name: 'Use 105 CPT as the charge cap' }).click();
+    await expect(cap).toHaveValue('105');
+
+    await page.getByLabel('Task ID').fill(submittedTaskId);
+    await page.getByRole('button', { name: 'Send task', exact: true }).click();
+    await expect(page.getByText(`Task submitted: ${submittedTaskId}`, { exact: true })).toBeVisible();
+    expect(fixture.submissions).toHaveLength(1);
+    expect(fixture.submissions[0]).toMatchObject({ runtime: 'hcode', max_cpt: 105, cpu_score: 250, host_count: 3 });
+    expect(fixture.unhandledRequests).toEqual([]);
+  });
+
+  test('shows a syntax error with its line and column, and refuses a dry run without an input', async ({ page }) => {
+    const fixture = await installMockApi(page);
+    fixture.dryRunAnswer = dryRunSyntaxError;
+    await signIn(page);
+    await page.getByRole('tab', { name: 'Submit' }).click();
+
+    const check = page.getByRole('button', { name: 'Check and price' });
+    await page.getByLabel('Function source (hcode)').fill('let x = 1;\nlet y = ;');
+    await expect(check).toBeDisabled();
+    await page.getByLabel('Input data (JSON)').fill('{}');
+    await check.click();
+    await expect(page.getByText('The function failed: parse_error: unexpected token (line 2, column 9)')).toBeVisible();
+    await expect(page.getByLabel('Task charge cap (CPT, fee included)')).toHaveValue('0');
+    expect(fixture.quotes).toEqual([]);
+
+    await page.getByLabel('Function source (hcode)').fill('let y = 2;');
+    await expect(page.getByText('The function failed')).toBeHidden();
+    expect(fixture.unhandledRequests).toEqual([]);
+  });
+
+  test('shows the output of a finished task and saves all of it', async ({ page }) => {
+    const fixture = await installMockApi(page);
+    const longOutput = Array.from({ length: 400 }, (_, index) => `line ${index}`).join('\n');
+    fixture.tasks.push(createTask('browser-done-task', {
+      status: 'COMPLETED',
+      status_message: 'Completed',
+      output: longOutput,
+      billed_amount: 82,
+      billing_settled: true,
+    }));
+    await signIn(page);
+
+    const row = page.locator('.task-list > li').filter({ hasText: 'browser-done-task' });
+    await expect(row.locator('.task-output-block pre')).toContainText('line 0');
+    await expect(row.locator('.task-output-block pre')).not.toContainText('line 399');
+    await expect(row.getByText(`Showing the first 1000 of ${longOutput.length} characters.`, { exact: false })).toBeVisible();
+    // A running task has no output yet, so it still points to the log.
+    await expect(page.locator('.task-list > li').filter({ hasText: existingTaskId }).getByText('Output in Log')).toBeVisible();
+
+    const [download] = await Promise.all([
+      page.waitForEvent('download'),
+      row.getByRole('button', { name: 'Save output' }).click(),
+    ]);
+    expect(download.suggestedFilename()).toBe('browser-done-task-output.txt');
+    const saved = await (await import('node:fs/promises')).readFile(await download.path(), 'utf8');
+    expect(saved).toBe(longOutput);
+  });
+
   test('switches to Traditional Chinese without resetting drafts, sessions or raw task output', async ({ page }) => {
     const fixture = await installMockApi(page);
     fixture.log = 'Sign in';
@@ -238,11 +394,11 @@ test.describe('production Master shadcn UI regression', () => {
     const source = 'get(input, "text");';
     const input = '{"text":"繁體中文 Sign in"}';
     await page.getByLabel('任務 ID', { exact: true }).fill('locale-task');
-    await page.getByLabel('任務程式', { exact: true }).fill(source);
+    await page.getByLabel('函式原始碼（hcode）', { exact: true }).fill(source);
     await page.getByLabel('輸入資料（JSON）').fill(input);
     await page.getByLabel('任務收費上限（CPT，含平台費）').fill('1000');
     await page.getByRole('combobox', { name: '語言' }).selectOption('en');
-    await expect(page.getByLabel('Task instructions')).toHaveValue(source);
+    await expect(page.getByLabel('Function source (hcode)')).toHaveValue(source);
     await expect(page.getByLabel('Input data (JSON)')).toHaveValue(input);
     await expect(page.getByLabel('Task ID', { exact: true })).toHaveValue('locale-task');
     expect(fixture.loginCalls).toBe(1);
@@ -306,13 +462,13 @@ test.describe('production Master shadcn UI regression', () => {
     await tasksTab.focus();
     await tasksTab.press('ArrowRight');
     await expect(submitTab).toHaveAttribute('aria-selected', 'true');
-    await page.getByLabel('Task instructions').fill('Draft instructions retained across tabs');
+    await page.getByLabel('Function source (hcode)').fill('Draft instructions retained across tabs');
     await page.getByLabel('Input data (JSON)').fill('{"draft":true}');
     await submitTab.press('ArrowLeft');
     await expect(tasksTab).toHaveAttribute('aria-selected', 'true');
     await tasksTab.press('ArrowRight');
     await expect(submitTab).toHaveAttribute('aria-selected', 'true');
-    await expect(page.getByLabel('Task instructions')).toHaveValue('Draft instructions retained across tabs');
+    await expect(page.getByLabel('Function source (hcode)')).toHaveValue('Draft instructions retained across tabs');
     await expect(page.getByLabel('Input data (JSON)')).toHaveValue('{"draft":true}');
 
     await submitTab.press('ArrowLeft');
@@ -340,7 +496,7 @@ test.describe('production Master shadcn UI regression', () => {
     await tasksTab.press('ArrowRight');
     await expect(submitTab).toHaveAttribute('aria-selected', 'true');
     await page.getByLabel('Task ID').fill(submittedTaskId);
-    await page.getByLabel('Task instructions').fill('return input.value;');
+    await page.getByLabel('Function source (hcode)').fill('return input.value;');
     await page.getByLabel('Input data (JSON)').fill('{"value":42}');
     await page.getByLabel('Task charge cap (CPT, fee included)').fill('12');
     await page.getByRole('button', { name: 'Send task', exact: true }).click();
