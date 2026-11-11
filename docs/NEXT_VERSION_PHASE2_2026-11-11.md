@@ -98,7 +98,7 @@
 - `while`、`break`、`continue`、註解與新 builtin 只在 CPU hcode 生效；frozen v0 不變。新 builtin 名稱加入保留名稱，使用者的 `fn` 不能使用同名（repo 內沒有此類程式）。
 - Job：每個帳號同時最多 10 個進行中的 Job。原計畫未列，已寫入手冊。
 - SDK 方法名稱為 `iter_job_items`、`jobs`、`task_log`，草稿中的 `list_items` 改名。
-- 免費額度：API token 可以領取；所有拒絕都回 409，原因放在 `message`。
+- 免費額度：API token 可以領取；未開放、已領取過與系統池不足都回 409，原因放在 `message`。Token 無效則回 401。
 - 抽樣：`classify` 與憑證中的 `output_digest` 比對；只有 `Verified` 可以顯示為已驗證。
 - 語意摘要（v1 digest）每個語言提交都會改變。目前為 `f7593109a627…`，同步寫在八個檔案與 master console 的 12 字元前綴。Worker 與 Nodepool 必須同版建置與升級。
 
