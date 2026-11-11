@@ -21,7 +21,7 @@ pub const V1_SEMANTICS_MANIFEST_JSON: &str = include_str!("../hcode-semantics.js
 /// SHA-256 of the canonical JSON bytes in [`V1_SEMANTICS_MANIFEST_JSON`],
 /// excluding the file's trailing newline.
 pub const V1_SEMANTICS_MANIFEST_SHA256: &str =
-    "7a5e14cb589d79c2f48f14520711e02c904f42db73305eff03024a6de7a99af0";
+    "abf54dc1c6f9a4d709044def6fbe32775264a17a6d64a6e350655c00a4020340";
 
 /// Versioned metering identity committed by the v1 semantics manifest.
 pub const V1_COST_MODEL_ID: &str = "hcode-execution-cpt-v1";
@@ -910,6 +910,42 @@ fn logical_usize(value: usize) -> Result<u64, RuntimeError> {
 
 fn checked_value_add(left: u64, right: u64) -> Result<u64, RuntimeError> {
     left.checked_add(right).ok_or_else(value_limit_error)
+}
+
+/// Sorts a list whose items are all ints, all floats, or all strings. Floats are finite, so total_cmp orders them
+/// as numbers. Equal items are indistinguishable, so the result does not depend on the sorting algorithm.
+fn sort_hcode_values(values: &mut Vec<Value>) -> Result<(), RuntimeError> {
+    let mut ints = Vec::new();
+    let mut floats = Vec::new();
+    let mut strings = Vec::new();
+    for value in values.drain(..) {
+        match value {
+            Value::Int(number) => ints.push(number),
+            Value::Float(number) => floats.push(number),
+            Value::String(text) => strings.push(text),
+            _ => return Err(sort_type_error()),
+        }
+    }
+    let kinds_present = usize::from(!ints.is_empty())
+        + usize::from(!floats.is_empty())
+        + usize::from(!strings.is_empty());
+    if kinds_present > 1 {
+        return Err(sort_type_error());
+    }
+    ints.sort_unstable();
+    floats.sort_unstable_by(f64::total_cmp);
+    strings.sort_unstable();
+    values.extend(ints.into_iter().map(Value::Int));
+    values.extend(floats.into_iter().map(Value::Float));
+    values.extend(strings.into_iter().map(Value::String));
+    Ok(())
+}
+
+fn sort_type_error() -> RuntimeError {
+    RuntimeError::new(
+        "type_error",
+        "sort expects a list of ints, floats, or strings of one type",
+    )
 }
 
 fn loop_control_outside_loop() -> RuntimeError {
@@ -2032,6 +2068,7 @@ impl Parser {
 /// Builtin names that resolve on the CPU hcode surface. A user function may
 /// not reuse one, because builtins resolve before user functions.
 const HCODE_BUILTIN_NAMES: &[&str] = &[
+    "append",
     "len",
     "get",
     "contains",
@@ -2042,6 +2079,7 @@ const HCODE_BUILTIN_NAMES: &[&str] = &[
     "wrapping_add",
     "wrapping_sub",
     "wrapping_mul",
+    "sort",
     "sqrt",
     "floor",
     "ceil",
@@ -2796,6 +2834,44 @@ impl<'a> Evaluator<'a> {
                     }
                 };
                 Ok(Some(Value::Bool(value)))
+            }
+            "append" if self.surface.hcode_extensions() => {
+                let [list, item] = args else {
+                    return Err(RuntimeError::new(
+                        "arity_error",
+                        "append expects 2 arguments",
+                    ));
+                };
+                let Value::List(mut values) = self.eval_expr(list)? else {
+                    return Err(RuntimeError::new("type_error", "append expects a list"));
+                };
+                let item = self.eval_expr(item)?;
+                // The result is a new list, and its length is the cost of building it.
+                let length = u64::try_from(values.len())
+                    .ok()
+                    .and_then(|length| length.checked_add(1))
+                    .ok_or_else(|| RuntimeError::new("runtime_error", "length is out of range"))?;
+                self.charge(length)?;
+                values.push(item);
+                self.materialize_owned_value(Value::List(values)).map(Some)
+            }
+            "sort" if self.surface.hcode_extensions() => {
+                let [list] = args else {
+                    return Err(RuntimeError::new("arity_error", "sort expects 1 argument"));
+                };
+                let Value::List(mut values) = self.eval_expr(list)? else {
+                    return Err(RuntimeError::new("type_error", "sort expects a list"));
+                };
+                let count = u64::try_from(values.len())
+                    .map_err(|_| RuntimeError::new("runtime_error", "length is out of range"))?;
+                // Charged before any comparison: the count times the bit length of the count.
+                let bits = u64::from(64 - count.leading_zeros());
+                let cost = count.checked_mul(bits).ok_or_else(|| {
+                    RuntimeError::new("budget_exhausted", "execution budget exhausted")
+                })?;
+                self.charge(cost)?;
+                sort_hcode_values(&mut values)?;
+                self.materialize_owned_value(Value::List(values)).map(Some)
             }
             "abs" if self.surface.numeric_builtins() => {
                 let [arg] = args else {
@@ -4392,6 +4468,64 @@ mod tests {
             .is_err()
         );
         assert!(eval_v0("if true { 1; } else { 2; } return 3;", "null").is_err());
+    }
+
+    #[test]
+    fn hcode_append_returns_a_new_list_and_leaves_its_argument_alone() {
+        assert_eq!(
+            eval_hcode("let a = [1]; let b = append(a, 2); return [len(a), len(b), get(b, 1)];")
+                .unwrap(),
+            "[1,2,2]"
+        );
+        assert_eq!(eval_hcode("return append([], \"x\");").unwrap(), "[\"x\"]");
+        assert_eq!(hcode_error_code("return append(1, 2);"), "type_error");
+        assert_eq!(hcode_error_code("return append([1]);"), "arity_error");
+    }
+
+    #[test]
+    fn hcode_sort_orders_one_item_type_and_rejects_mixed_types() {
+        assert_eq!(
+            eval_hcode("return sort([3, -1, 2, 2]);").unwrap(),
+            "[-1,2,2,3]"
+        );
+        assert_eq!(
+            eval_hcode("return sort([2.5, -1.0, 0.5]);").unwrap(),
+            "[-1.0,0.5,2.5]"
+        );
+        // Strings sort by their UTF-8 bytes, so capitals come first.
+        assert_eq!(
+            eval_hcode("return sort([\"b\", \"B\", \"a\"]);").unwrap(),
+            "[\"B\",\"a\",\"b\"]"
+        );
+        assert_eq!(eval_hcode("return sort([]);").unwrap(), "[]");
+        assert_eq!(hcode_error_code("return sort([1, \"a\"]);"), "type_error");
+        assert_eq!(hcode_error_code("return sort(\"abc\");"), "type_error");
+    }
+
+    #[test]
+    fn hcode_sort_and_append_charge_their_documented_costs() {
+        let usage = |source: &str| {
+            ManagedExecutor
+                .execute_json_input(
+                    source,
+                    ExecutionLimits::for_managed_function_budget(u64::MAX),
+                    "null",
+                )
+                .expect("the source must succeed")
+                .receipt
+                .usage_units
+        };
+        // The call and the list literal appear on both sides of each difference, so they cancel. Subtracting the
+        // empty list leaves only the charge that depends on the list length.
+        let sort_delta = |items: &str| {
+            usage(&format!("return sort({items});")) - usage(&format!("return {items};"))
+        };
+        assert_eq!(sort_delta("[3, 1, 2]") - sort_delta("[]"), 3 * 2);
+        assert_eq!(sort_delta("[4, 3, 2, 1]") - sort_delta("[]"), 4 * 3);
+        let append_delta = |items: &str| {
+            usage(&format!("return append({items}, 0);")) - usage(&format!("return {items};"))
+        };
+        assert_eq!(append_delta("[1, 2]") - append_delta("[]"), 2);
     }
 
     fn eval_hcode_json(source: &str, input: &str) -> Result<String, String> {

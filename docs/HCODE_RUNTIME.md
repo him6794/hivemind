@@ -82,7 +82,7 @@ closed interpreter. Its runtime, backend, cost-model, and semantics identities
 are pinned by
 [`executor-rs/crates/managed-function-runtime/hcode-semantics.json`](../executor-rs/crates/managed-function-runtime/hcode-semantics.json)
 and digest
-`7a5e14cb589d79c2f48f14520711e02c904f42db73305eff03024a6de7a99af0`.
+`abf54dc1c6f9a4d709044def6fbe32775264a17a6d64a6e350655c00a4020340`.
 
 - Each managed task is assigned to three distinct Workers by default, with a
   two-replica quorum; at most seven replicas may be configured. A single Worker
@@ -210,6 +210,8 @@ expression;
 CPU hcode also accepts `//` line comments. A comment runs from `//` to the end of its line, and `//` inside a string literal is ordinary text. The frozen v0 surface has no comments.
 
 CPU hcode also has `while`, `break`, `continue`, and `if` statements. `while` checks its bool condition before each pass through its body, and each pass counts as one loop iteration against the same limit as `for`. `break;` ends the innermost loop, and `continue;` ends the current pass. A leading `if` is a statement when its branches are statements, and an expression otherwise, as before. A function body starts a new loop context, so `break` and `continue` outside a loop are parse errors. The frozen v0 surface keeps these words as ordinary names.
+
+CPU hcode also has list builtins. `append(list, value)` returns a new list with the value at the end and leaves its argument unchanged; it costs the length of the new list. `sort(list)` returns a new ascending list whose items are all ints, all floats, or all strings, and it costs the list length times the number of bits in that length, charged before any comparison. Strings sort by their UTF-8 bytes.
 
 Expressions:
 
