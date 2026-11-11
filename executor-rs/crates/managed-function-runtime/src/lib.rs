@@ -21,7 +21,7 @@ pub const V1_SEMANTICS_MANIFEST_JSON: &str = include_str!("../hcode-semantics.js
 /// SHA-256 of the canonical JSON bytes in [`V1_SEMANTICS_MANIFEST_JSON`],
 /// excluding the file's trailing newline.
 pub const V1_SEMANTICS_MANIFEST_SHA256: &str =
-    "d82fb2679d7fe4247571206a28614cfaf7449091c49d131f67e08a74766658c0";
+    "a3a34ebfe508ef280c16b283884aaeca49b99a4b58958e71e66c61f591fc9c04";
 
 /// Versioned metering identity committed by the v1 semantics manifest.
 pub const V1_COST_MODEL_ID: &str = "hcode-execution-cpt-v1";
@@ -1132,8 +1132,20 @@ impl<'a> Lexer<'a> {
     }
 
     fn skip_whitespace(&mut self) {
-        while matches!(self.peek(), Some(b' ' | b'\t' | b'\r' | b'\n')) {
-            self.bump();
+        loop {
+            match self.peek() {
+                Some(b' ' | b'\t' | b'\r' | b'\n') => self.bump(),
+                // On the CPU hcode surface, `//` starts a comment that runs to the end of its line.
+                Some(b'/')
+                    if self.surface.hcode_extensions()
+                        && self.byte_at(self.pos + 1) == Some(b'/') =>
+                {
+                    while !matches!(self.peek(), None | Some(b'\n')) {
+                        self.bump();
+                    }
+                }
+                _ => return,
+            }
         }
     }
 
@@ -4032,6 +4044,43 @@ mod tests {
             eval_hcode("fn twice(n) { return n * 2; } return twice(4);").unwrap(),
             "8"
         );
+    }
+
+    #[test]
+    fn hcode_line_comments_run_to_the_end_of_their_line() {
+        assert_eq!(
+            eval_hcode("// leading note\nreturn 1 + 1; // trailing note").unwrap(),
+            "2"
+        );
+        assert_eq!(
+            eval_hcode("let x = 4; // not a parameter\nreturn x * 2;").unwrap(),
+            "8"
+        );
+        assert_eq!(
+            eval_hcode("return 9; // no newline at the end").unwrap(),
+            "9"
+        );
+        // Inside a string literal, // is text, and a single slash is still division.
+        assert_eq!(eval_hcode(r#"return "a // b";"#).unwrap(), "a // b");
+        assert_eq!(eval_hcode("return 8 / 2;").unwrap(), "4");
+        // The frozen v0 surface has no comments.
+        assert!(eval_v0("return 1; // not a comment", "null").is_err());
+    }
+
+    #[test]
+    fn the_manifest_lists_exactly_the_builtin_names_the_evaluator_reserves() {
+        let manifest: serde_json::Value =
+            serde_json::from_str(crate::V1_SEMANTICS_MANIFEST_JSON).unwrap();
+        let mut listed: Vec<&str> = manifest["semantics"]["reserved_builtin_names"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|name| name.as_str().unwrap())
+            .collect();
+        listed.sort_unstable();
+        let mut reserved = crate::HCODE_BUILTIN_NAMES.to_vec();
+        reserved.sort_unstable();
+        assert_eq!(listed, reserved);
     }
 
     fn eval_hcode_json(source: &str, input: &str) -> Result<String, String> {

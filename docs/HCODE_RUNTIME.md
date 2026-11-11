@@ -82,7 +82,7 @@ closed interpreter. Its runtime, backend, cost-model, and semantics identities
 are pinned by
 [`executor-rs/crates/managed-function-runtime/hcode-semantics.json`](../executor-rs/crates/managed-function-runtime/hcode-semantics.json)
 and digest
-`d82fb2679d7fe4247571206a28614cfaf7449091c49d131f67e08a74766658c0`.
+`a3a34ebfe508ef280c16b283884aaeca49b99a4b58958e71e66c61f591fc9c04`.
 
 - Each managed task is assigned to three distinct Workers by default, with a
   two-replica quorum; at most seven replicas may be configured. A single Worker
@@ -202,6 +202,8 @@ return expression;
 print(expression);
 expression;
 ```
+
+CPU hcode also accepts `//` line comments. A comment runs from `//` to the end of its line, and `//` inside a string literal is ordinary text. The frozen v0 surface has no comments.
 
 Expressions:
 
