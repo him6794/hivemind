@@ -2044,6 +2044,65 @@ async fn run_migrations_inner(pool: &PgPool) -> Result<()> {
         .execute(&mut *tx)
         .await?;
 
+    // Server-side jobs. A job owns its items; each item becomes one task when Nodepool submits it. The
+    // runner advances jobs in transactions that lock the job row, so two Nodepool processes cannot submit the
+    // same item twice.
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS jobs (
+            id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            owner VARCHAR(255) NOT NULL,
+            name VARCHAR(128) NOT NULL DEFAULT '',
+            state VARCHAR(16) NOT NULL,
+            note VARCHAR(255) NOT NULL DEFAULT '',
+            source TEXT NOT NULL,
+            per_item_max_cpt BIGINT NOT NULL,
+            job_max_cpt BIGINT NOT NULL,
+            replica_count INTEGER NOT NULL,
+            cpu_score INTEGER NOT NULL DEFAULT 0,
+            gpu_score INTEGER NOT NULL DEFAULT 0,
+            memory_gb BIGINT NOT NULL DEFAULT 0,
+            gpu_memory_gb BIGINT NOT NULL DEFAULT 0,
+            storage_gb BIGINT NOT NULL DEFAULT 0,
+            host_count INTEGER NOT NULL DEFAULT 1,
+            item_count INTEGER NOT NULL,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            finished_at TIMESTAMPTZ
+        );",
+    )
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS jobs_owner_created_idx ON jobs (owner, created_at DESC);",
+    )
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS jobs_active_idx ON jobs (updated_at)
+         WHERE state IN ('running', 'cancelling');",
+    )
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS job_items (
+            job_id UUID NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+            item_index INTEGER NOT NULL,
+            task_id VARCHAR(255) NOT NULL UNIQUE,
+            input_json TEXT NOT NULL,
+            state VARCHAR(16) NOT NULL,
+            billed_cpt BIGINT NOT NULL DEFAULT 0,
+            output TEXT NOT NULL DEFAULT '',
+            status_message TEXT NOT NULL DEFAULT '',
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            PRIMARY KEY (job_id, item_index)
+        );",
+    )
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query("CREATE INDEX IF NOT EXISTS job_items_state_idx ON job_items (job_id, state);")
+        .execute(&mut *tx)
+        .await?;
+
     // The system account holds the CPT pool. '!no-login' is not a valid bcrypt hash, so it can
     // never authenticate. ON CONFLICT keeps an existing balance across restarts.
     sqlx::query(

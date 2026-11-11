@@ -34,7 +34,7 @@ use hivemind_proto::GENERAL_COMPUTE_CHUNK_RPC_MESSAGE_MAX_BYTES;
 use hivemind_proto::{
     batch_runtime_service_server::BatchRuntimeServiceServer,
     general_compute_artifact_service_server::GeneralComputeArtifactServiceServer,
-    master_node_service_server::MasterNodeServiceServer,
+    job_service_server::JobServiceServer, master_node_service_server::MasterNodeServiceServer,
     node_manager_service_server::NodeManagerServiceServer, user_service_server::UserServiceServer,
     vpn_service_server::VpnServiceServer,
     worker_session_service_server::WorkerSessionServiceServer,
@@ -623,6 +623,13 @@ async fn run_service_inner(
         .max_decoding_message_size(hivemind_node_manager::hcode_probes::HCODE_PROBE_RPC_MAX_BYTES)
         .max_encoding_message_size(hivemind_node_manager::hcode_probes::HCODE_PROBE_RPC_MAX_BYTES);
         let vpn_svc = VpnServiceServer::new(GrpcVpnService::new(vpn));
+        let job_svc = JobServiceServer::new(hivemind_node_manager::jobs::GrpcJobService::new(
+            np_state.clone(),
+        ))
+        .max_decoding_message_size(hivemind_node_manager::jobs::JOB_RPC_MESSAGE_MAX_BYTES)
+        .max_encoding_message_size(hivemind_node_manager::jobs::JOB_RPC_MESSAGE_MAX_BYTES);
+        // Jobs are advanced by Nodepool itself, so the runner lives as long as the server.
+        let _job_runner = hivemind_node_manager::jobs::spawn_job_runner(np_state.clone());
 
         let np_addr = config.server.nodepool_grpc_addr.clone();
         tokio::spawn(async move {
@@ -642,6 +649,7 @@ async fn run_service_inner(
                 .add_service(batch_svc)
                 .add_service(session_svc)
                 .add_service(vpn_svc)
+                .add_service(job_svc)
                 .serve(np_addr.parse().unwrap())
                 .await
             {

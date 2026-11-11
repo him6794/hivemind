@@ -2665,218 +2665,14 @@ pub struct GrpcMasterNodeService {
     state: Arc<NodepoolState>,
 }
 impl GrpcMasterNodeService {
-    pub fn new(state: Arc<NodepoolState>) -> Self {
-        Self { state }
-    }
-}
-
-pub struct GrpcBatchRuntimeService {
-    state: Arc<NodepoolState>,
-}
-
-/// Nodepool artifact control plane and compatibility byte storage.
-/// Uploads require an owner/admin session and immutable manifest coordinates;
-/// hcode reads require an execution token and the current replica assignment.
-pub struct GrpcGeneralComputeArtifactService {
-    state: Arc<NodepoolState>,
-}
-
-impl GrpcGeneralComputeArtifactService {
-    pub fn new(state: Arc<NodepoolState>) -> Self {
-        Self { state }
-    }
-
-    /// Verify the Nodepool-issued execution token against the public key and
-    /// its task binding. Shared by the byte download and the metadata-only
-    /// authorization so neither can accept a token the other would reject.
-    fn hcode_artifact_execution_claims(
+    /// Creates a task owned by `owner`. The caller has authenticated the owner. The RPC and the job runner
+    /// both come through here, so validation and balance checks are the same for both.
+    pub(crate) async fn create_task_for_owner(
         &self,
-        req: &hivemind_proto::HcodeArtifactChunkDownload,
-    ) -> Result<hivemind_auth::worker_execution::WorkerExecutionClaims, Status> {
-        if !is_safe_task_id(&req.task_id)
-            || req.offset < 0
-            || req.token.len() > hivemind_proto::HCODE_ARTIFACT_EXECUTION_TOKEN_MAX_BYTES
-        {
-            return Err(Status::invalid_argument(
-                "invalid hcode artifact chunk request",
-            ));
-        }
-        general_compute_runtime::validate_artifact_id(&req.artifact_id)
-            .map_err(Status::invalid_argument)?;
-        let verifier = hivemind_auth::worker_execution::WorkerExecutionVerifier::from_pem(
-            &self.state.worker_execution_public_key_pem,
-        )
-        .map_err(|_| Status::internal("Worker execution public key is invalid"))?;
-        let claims = verifier
-            .decode_execution_claims(&req.token)
-            .map_err(|_| Status::unauthenticated("Invalid worker execution token"))?;
-        if claims.claims.role.as_deref() != Some("worker-execution")
-            || claims.claims.task_id.as_deref() != Some(req.task_id.as_str())
-        {
-            return Err(Status::permission_denied(
-                "artifact access is not bound to this task",
-            ));
-        }
-        Ok(claims)
-    }
-}
-
-#[tonic::async_trait]
-impl GeneralComputeArtifactService for GrpcGeneralComputeArtifactService {
-    async fn download_hcode_chunk(
-        &self,
-        request: Request<hivemind_proto::HcodeArtifactChunkDownload>,
-    ) -> Result<Response<hivemind_proto::HcodeArtifactChunkDownloadResponse>, Status> {
-        let req = request.into_inner();
-        let claims = self.hcode_artifact_execution_claims(&req)?;
-        let bytes = self
-            .state
-            .scheduler
-            .hcode_artifact_chunk_for_replica(&claims, &req.artifact_id, req.offset)
-            .await
-            .map_err(|error| Status::internal(error.to_string()))?
-            .ok_or_else(|| {
-                Status::permission_denied("artifact or active replica assignment is unavailable")
-            })?;
-        Ok(Response::new(
-            hivemind_proto::HcodeArtifactChunkDownloadResponse { bytes },
-        ))
-    }
-
-    /// Metadata-only authorization for one hcode artifact chunk. It re-runs
-    /// the same live assignment gates as `DownloadHcodeChunk` through the
-    /// shared repository predicate, but returns only immutable manifest
-    /// metadata and no bytes. The reply is not a lease: each later P2P or CAS
-    /// fetch must still pass the live gates on its own.
-    async fn authorize_hcode_chunk(
-        &self,
-        request: Request<hivemind_proto::HcodeArtifactChunkDownload>,
-    ) -> Result<Response<hivemind_proto::HcodeArtifactChunkAuthorization>, Status> {
-        let req = request.into_inner();
-        let claims = self.hcode_artifact_execution_claims(&req)?;
-        let authorization = self
-            .state
-            .scheduler
-            .authorize_hcode_artifact_chunk(&claims, &req.artifact_id, req.offset)
-            .await
-            .map_err(|error| Status::internal(error.to_string()))?
-            .ok_or_else(|| {
-                Status::permission_denied("artifact or active replica assignment is unavailable")
-            })?;
-        Ok(Response::new(
-            hivemind_proto::HcodeArtifactChunkAuthorization {
-                artifact_sha256: authorization.artifact_sha256,
-                artifact_size_bytes: authorization.artifact_size_bytes,
-                chunk_sha256: authorization.chunk_sha256,
-                chunk_size_bytes: authorization.chunk_size_bytes,
-            },
-        ))
-    }
-
-    async fn upload_chunk(
-        &self,
-        request: Request<GeneralComputeArtifactChunkUpload>,
-    ) -> Result<Response<GeneralComputeArtifactChunkUploadResponse>, Status> {
-        let req = request.into_inner();
-        if !is_safe_task_id(&req.task_id) {
-            return Err(Status::invalid_argument("Invalid task_id"));
-        }
-        hivemind_proto::validate_general_compute_artifact_chunk_upload(&req)
-            .map_err(Status::invalid_argument)?;
-        let size_bytes = u64::try_from(req.size_bytes)
-            .map_err(|_| Status::invalid_argument("artifact chunk size is invalid"))?;
-
-        let claims = self
-            .state
-            .auth
-            .validate_session(&req.token)
-            .await
-            .map_err(|_| Status::unauthenticated("Invalid token"))?;
-        let task = self
-            .state
-            .scheduler
-            .get_task(&req.task_id)
-            .await
-            .map_err(|error| Status::internal(error.to_string()))?
-            .ok_or_else(|| Status::not_found("Task not found"))?;
-        if claims.sub != task.owner && !is_admin(&claims.sub) {
-            return Err(Status::permission_denied("Not authorized for task"));
-        }
-        if !matches!(
-            task.status,
-            TaskStatus::Pending | TaskStatus::Queued | TaskStatus::Assigned | TaskStatus::Running
-        ) {
-            return Err(Status::failed_precondition(
-                "task is not accepting artifact chunks",
-            ));
-        }
-        if !matches!(
-            task.runtime.as_deref(),
-            Some("general-compute-v1alpha1" | "hcode")
-        ) {
-            return Err(Status::failed_precondition(
-                "task does not accept input artifacts",
-            ));
-        }
-
-        self.state
-            .scheduler
-            .put_general_compute_artifact_chunk(
-                &req.task_id,
-                &req.artifact_id,
-                u64::try_from(req.offset)
-                    .map_err(|_| Status::invalid_argument("artifact chunk offset is invalid"))?,
-                size_bytes,
-                &req.sha256,
-                &req.bytes,
-            )
-            .await
-            .map_err(|error| {
-                let message = error.to_string();
-                if message.contains("conflicts") {
-                    Status::already_exists(message)
-                } else if message.contains("expired") {
-                    Status::failed_precondition(message)
-                } else if message.contains("manifest")
-                    || message.contains("identity")
-                    || message.contains("coordinates")
-                    || message.contains("digest")
-                    || message.contains("size")
-                    || message.contains("limit")
-                {
-                    Status::invalid_argument(message)
-                } else {
-                    Status::internal(message)
-                }
-            })?;
-
-        Ok(Response::new(GeneralComputeArtifactChunkUploadResponse {
-            success: true,
-            status_message: "Chunk persisted".into(),
-            accepted_chunks: 1,
-        }))
-    }
-}
-impl GrpcBatchRuntimeService {
-    pub fn new(state: Arc<NodepoolState>) -> Self {
-        Self { state }
-    }
-}
-
-#[tonic::async_trait]
-impl MasterNodeService for GrpcMasterNodeService {
-    async fn upload_task(
-        &self,
-        request: Request<UploadTaskRequest>,
+        owner: &str,
+        req: UploadTaskRequest,
     ) -> Result<Response<UploadTaskResponse>, Status> {
-        let req = request.into_inner();
         let runtime = req.runtime.trim().to_owned();
-        let claims = self
-            .state
-            .auth
-            .validate_session(&req.token)
-            .await
-            .map_err(|_| Status::unauthenticated("Invalid token"))?;
         if !is_safe_task_id(&req.task_id) {
             return Ok(Response::new(UploadTaskResponse {
                 success: false,
@@ -3086,7 +2882,7 @@ impl MasterNodeService for GrpcMasterNodeService {
             let balance: Option<i64> = sqlx::query_scalar(
                 "SELECT balance FROM users WHERE username = $1 AND is_active = true",
             )
-            .bind(&claims.sub)
+            .bind(owner)
             .fetch_optional(&self.state.scheduler.database().pool)
             .await
             .map_err(|e| Status::internal(e.to_string()))?;
@@ -3113,7 +2909,7 @@ impl MasterNodeService for GrpcMasterNodeService {
         let task = Task {
             id: uuid::Uuid::new_v4(),
             task_id: req.task_id,
-            owner: claims.sub,
+            owner: owner.to_owned(),
             worker_id: None,
             worker_ip: None,
             status: TaskStatus::Pending,
@@ -3251,6 +3047,371 @@ impl MasterNodeService for GrpcMasterNodeService {
                 status_message: task_create_error_message(&e),
             })),
         }
+    }
+
+    /// Stops a task owned by `owner`. The caller has authenticated the owner.
+    pub(crate) async fn stop_task_for_owner(
+        &self,
+        owner: &str,
+        task_id: &str,
+    ) -> Result<Response<StopTaskResponse>, Status> {
+        if !is_safe_task_id(task_id) {
+            return Err(Status::invalid_argument("Invalid task_id"));
+        }
+        match self.state.scheduler.get_task(&task_id).await {
+            Ok(Some(t)) if t.owner != owner => {
+                return Ok(Response::new(StopTaskResponse {
+                    success: false,
+                    status_message: "Not authorized".into(),
+                }));
+            }
+            Ok(Some(_)) => {}
+            Ok(None) => {
+                return Ok(Response::new(StopTaskResponse {
+                    success: false,
+                    status_message: "Not found".into(),
+                }));
+            }
+            Err(e) => return Err(Status::internal(e.to_string())),
+        }
+        let consensus_attempt = self
+            .state
+            .scheduler
+            .managed_consensus_attempt_for_task(&task_id)
+            .await
+            .map_err(|error| Status::internal(error.to_string()))?;
+        let consensus_targets = if let Some(attempt) = consensus_attempt {
+            self.state
+                .scheduler
+                .managed_consensus_stop_targets(&task_id, attempt.id)
+                .await
+                .map_err(|error| Status::internal(error.to_string()))?
+        } else {
+            Vec::new()
+        };
+        match self.state.scheduler.cancel_task(&task_id).await {
+            Ok(task) => {
+                if let Some(dispatcher) = self.state.dispatcher.as_ref() {
+                    dispatcher.cancel_session_delivery(&task);
+                }
+                let status_message = if consensus_targets.is_empty() {
+                    let stop_dispatch = match worker_stop_credentials(
+                        &self.state.worker_execution_private_key_pem,
+                        &task,
+                    ) {
+                        Ok(credentials) => {
+                            request_worker_stop(
+                                &task,
+                                &credentials.token,
+                                credentials.attempt_id.as_deref(),
+                                credentials.idempotency_key.as_deref(),
+                            )
+                            .await
+                        }
+                        Err(error) => {
+                            tracing::warn!(
+                                task_id = %task.task_id,
+                                error = %error,
+                                "Task cancellation recorded but the attempt-bound worker stop identity could not be created"
+                            );
+                            WorkerStopDispatch::NotConfirmed(
+                                "managed execution identity is unavailable".into(),
+                            )
+                        }
+                    };
+                    match stop_dispatch {
+                        WorkerStopDispatch::NotAssigned => "Task cancellation recorded".to_string(),
+                        WorkerStopDispatch::Requested => {
+                            "Task cancellation recorded; worker stop requested".to_string()
+                        }
+                        WorkerStopDispatch::NotConfirmed(message) => {
+                            format!(
+                                "Task cancellation recorded; worker stop not confirmed: {message}"
+                            )
+                        }
+                    }
+                } else {
+                    let mut requested = 0usize;
+                    let mut failures = 0usize;
+                    for target in &consensus_targets {
+                        let credentials = match worker_stop_credentials_for_consensus(
+                            &self.state.worker_execution_private_key_pem,
+                            &task,
+                            target,
+                        ) {
+                            Ok(credentials) => credentials,
+                            Err(error) => {
+                                failures += 1;
+                                tracing::warn!(
+                                    task_id = %task.task_id,
+                                    worker_id = %target.worker_id,
+                                    error = %error,
+                                    "managed consensus cancellation identity could not be created"
+                                );
+                                continue;
+                            }
+                        };
+                        let mut replica_task = task.clone();
+                        replica_task.worker_id = Some(target.worker_id.clone());
+                        replica_task.worker_ip = Some(target.worker_ip.clone());
+                        match request_worker_stop(
+                            &replica_task,
+                            &credentials.token,
+                            credentials.attempt_id.as_deref(),
+                            credentials.idempotency_key.as_deref(),
+                        )
+                        .await
+                        {
+                            WorkerStopDispatch::Requested | WorkerStopDispatch::NotAssigned => {
+                                requested += 1;
+                            }
+                            WorkerStopDispatch::NotConfirmed(message) => {
+                                failures += 1;
+                                tracing::warn!(
+                                    task_id = %task.task_id,
+                                    worker_id = %target.worker_id,
+                                    "managed consensus Worker stop was not confirmed: {}",
+                                    message
+                                );
+                            }
+                        }
+                    }
+                    if failures == 0 {
+                        format!(
+                            "Task cancellation recorded; worker stop requested for {requested}/{} consensus replicas",
+                            consensus_targets.len()
+                        )
+                    } else {
+                        format!(
+                            "Task cancellation recorded; worker stop requested for {requested}/{} consensus replicas ({failures} not confirmed)",
+                            consensus_targets.len()
+                        )
+                    }
+                };
+                Ok(Response::new(StopTaskResponse {
+                    success: true,
+                    status_message,
+                }))
+            }
+            Err(e) => Ok(Response::new(StopTaskResponse {
+                success: false,
+                status_message: e.to_string(),
+            })),
+        }
+    }
+
+    pub fn new(state: Arc<NodepoolState>) -> Self {
+        Self { state }
+    }
+}
+
+pub struct GrpcBatchRuntimeService {
+    state: Arc<NodepoolState>,
+}
+
+/// Nodepool artifact control plane and compatibility byte storage.
+/// Uploads require an owner/admin session and immutable manifest coordinates;
+/// hcode reads require an execution token and the current replica assignment.
+pub struct GrpcGeneralComputeArtifactService {
+    state: Arc<NodepoolState>,
+}
+
+impl GrpcGeneralComputeArtifactService {
+    pub fn new(state: Arc<NodepoolState>) -> Self {
+        Self { state }
+    }
+
+    /// Verify the Nodepool-issued execution token against the public key and
+    /// its task binding. Shared by the byte download and the metadata-only
+    /// authorization so neither can accept a token the other would reject.
+    fn hcode_artifact_execution_claims(
+        &self,
+        req: &hivemind_proto::HcodeArtifactChunkDownload,
+    ) -> Result<hivemind_auth::worker_execution::WorkerExecutionClaims, Status> {
+        if !is_safe_task_id(&req.task_id)
+            || req.offset < 0
+            || req.token.len() > hivemind_proto::HCODE_ARTIFACT_EXECUTION_TOKEN_MAX_BYTES
+        {
+            return Err(Status::invalid_argument(
+                "invalid hcode artifact chunk request",
+            ));
+        }
+        general_compute_runtime::validate_artifact_id(&req.artifact_id)
+            .map_err(Status::invalid_argument)?;
+        let verifier = hivemind_auth::worker_execution::WorkerExecutionVerifier::from_pem(
+            &self.state.worker_execution_public_key_pem,
+        )
+        .map_err(|_| Status::internal("Worker execution public key is invalid"))?;
+        let claims = verifier
+            .decode_execution_claims(&req.token)
+            .map_err(|_| Status::unauthenticated("Invalid worker execution token"))?;
+        if claims.claims.role.as_deref() != Some("worker-execution")
+            || claims.claims.task_id.as_deref() != Some(req.task_id.as_str())
+        {
+            return Err(Status::permission_denied(
+                "artifact access is not bound to this task",
+            ));
+        }
+        Ok(claims)
+    }
+}
+
+#[tonic::async_trait]
+impl GeneralComputeArtifactService for GrpcGeneralComputeArtifactService {
+    async fn download_hcode_chunk(
+        &self,
+        request: Request<hivemind_proto::HcodeArtifactChunkDownload>,
+    ) -> Result<Response<hivemind_proto::HcodeArtifactChunkDownloadResponse>, Status> {
+        let req = request.into_inner();
+        let claims = self.hcode_artifact_execution_claims(&req)?;
+        let bytes = self
+            .state
+            .scheduler
+            .hcode_artifact_chunk_for_replica(&claims, &req.artifact_id, req.offset)
+            .await
+            .map_err(|error| Status::internal(error.to_string()))?
+            .ok_or_else(|| {
+                Status::permission_denied("artifact or active replica assignment is unavailable")
+            })?;
+        Ok(Response::new(
+            hivemind_proto::HcodeArtifactChunkDownloadResponse { bytes },
+        ))
+    }
+
+    /// Metadata-only authorization for one hcode artifact chunk. It re-runs
+    /// the same live assignment gates as `DownloadHcodeChunk` through the
+    /// shared repository predicate, but returns only immutable manifest
+    /// metadata and no bytes. The reply is not a lease: each later P2P or CAS
+    /// fetch must still pass the live gates on its own.
+    async fn authorize_hcode_chunk(
+        &self,
+        request: Request<hivemind_proto::HcodeArtifactChunkDownload>,
+    ) -> Result<Response<hivemind_proto::HcodeArtifactChunkAuthorization>, Status> {
+        let req = request.into_inner();
+        let claims = self.hcode_artifact_execution_claims(&req)?;
+        let authorization = self
+            .state
+            .scheduler
+            .authorize_hcode_artifact_chunk(&claims, &req.artifact_id, req.offset)
+            .await
+            .map_err(|error| Status::internal(error.to_string()))?
+            .ok_or_else(|| {
+                Status::permission_denied("artifact or active replica assignment is unavailable")
+            })?;
+        Ok(Response::new(
+            hivemind_proto::HcodeArtifactChunkAuthorization {
+                artifact_sha256: authorization.artifact_sha256,
+                artifact_size_bytes: authorization.artifact_size_bytes,
+                chunk_sha256: authorization.chunk_sha256,
+                chunk_size_bytes: authorization.chunk_size_bytes,
+            },
+        ))
+    }
+
+    async fn upload_chunk(
+        &self,
+        request: Request<GeneralComputeArtifactChunkUpload>,
+    ) -> Result<Response<GeneralComputeArtifactChunkUploadResponse>, Status> {
+        let req = request.into_inner();
+        if !is_safe_task_id(&req.task_id) {
+            return Err(Status::invalid_argument("Invalid task_id"));
+        }
+        hivemind_proto::validate_general_compute_artifact_chunk_upload(&req)
+            .map_err(Status::invalid_argument)?;
+        let size_bytes = u64::try_from(req.size_bytes)
+            .map_err(|_| Status::invalid_argument("artifact chunk size is invalid"))?;
+
+        let claims = self
+            .state
+            .auth
+            .validate_session(&req.token)
+            .await
+            .map_err(|_| Status::unauthenticated("Invalid token"))?;
+        let task = self
+            .state
+            .scheduler
+            .get_task(&req.task_id)
+            .await
+            .map_err(|error| Status::internal(error.to_string()))?
+            .ok_or_else(|| Status::not_found("Task not found"))?;
+        if claims.sub != task.owner && !is_admin(&claims.sub) {
+            return Err(Status::permission_denied("Not authorized for task"));
+        }
+        if !matches!(
+            task.status,
+            TaskStatus::Pending | TaskStatus::Queued | TaskStatus::Assigned | TaskStatus::Running
+        ) {
+            return Err(Status::failed_precondition(
+                "task is not accepting artifact chunks",
+            ));
+        }
+        if !matches!(
+            task.runtime.as_deref(),
+            Some("general-compute-v1alpha1" | "hcode")
+        ) {
+            return Err(Status::failed_precondition(
+                "task does not accept input artifacts",
+            ));
+        }
+
+        self.state
+            .scheduler
+            .put_general_compute_artifact_chunk(
+                &req.task_id,
+                &req.artifact_id,
+                u64::try_from(req.offset)
+                    .map_err(|_| Status::invalid_argument("artifact chunk offset is invalid"))?,
+                size_bytes,
+                &req.sha256,
+                &req.bytes,
+            )
+            .await
+            .map_err(|error| {
+                let message = error.to_string();
+                if message.contains("conflicts") {
+                    Status::already_exists(message)
+                } else if message.contains("expired") {
+                    Status::failed_precondition(message)
+                } else if message.contains("manifest")
+                    || message.contains("identity")
+                    || message.contains("coordinates")
+                    || message.contains("digest")
+                    || message.contains("size")
+                    || message.contains("limit")
+                {
+                    Status::invalid_argument(message)
+                } else {
+                    Status::internal(message)
+                }
+            })?;
+
+        Ok(Response::new(GeneralComputeArtifactChunkUploadResponse {
+            success: true,
+            status_message: "Chunk persisted".into(),
+            accepted_chunks: 1,
+        }))
+    }
+}
+impl GrpcBatchRuntimeService {
+    pub fn new(state: Arc<NodepoolState>) -> Self {
+        Self { state }
+    }
+}
+
+#[tonic::async_trait]
+impl MasterNodeService for GrpcMasterNodeService {
+    async fn upload_task(
+        &self,
+        request: Request<UploadTaskRequest>,
+    ) -> Result<Response<UploadTaskResponse>, Status> {
+        let req = request.into_inner();
+        let claims = self
+            .state
+            .auth
+            .validate_session(&req.token)
+            .await
+            .map_err(|_| Status::unauthenticated("Invalid token"))?;
+        self.create_task_for_owner(&claims.sub, req).await
     }
 
     async fn get_all_user_tasks(
@@ -3473,146 +3634,7 @@ impl MasterNodeService for GrpcMasterNodeService {
             .validate_session(&req.token)
             .await
             .map_err(|_| Status::unauthenticated("Invalid token"))?;
-        match self.state.scheduler.get_task(&req.task_id).await {
-            Ok(Some(t)) if t.owner != claims.sub => {
-                return Ok(Response::new(StopTaskResponse {
-                    success: false,
-                    status_message: "Not authorized".into(),
-                }));
-            }
-            Ok(Some(_)) => {}
-            Ok(None) => {
-                return Ok(Response::new(StopTaskResponse {
-                    success: false,
-                    status_message: "Not found".into(),
-                }));
-            }
-            Err(e) => return Err(Status::internal(e.to_string())),
-        }
-        let consensus_attempt = self
-            .state
-            .scheduler
-            .managed_consensus_attempt_for_task(&req.task_id)
-            .await
-            .map_err(|error| Status::internal(error.to_string()))?;
-        let consensus_targets = if let Some(attempt) = consensus_attempt {
-            self.state
-                .scheduler
-                .managed_consensus_stop_targets(&req.task_id, attempt.id)
-                .await
-                .map_err(|error| Status::internal(error.to_string()))?
-        } else {
-            Vec::new()
-        };
-        match self.state.scheduler.cancel_task(&req.task_id).await {
-            Ok(task) => {
-                if let Some(dispatcher) = self.state.dispatcher.as_ref() {
-                    dispatcher.cancel_session_delivery(&task);
-                }
-                let status_message = if consensus_targets.is_empty() {
-                    let stop_dispatch = match worker_stop_credentials(
-                        &self.state.worker_execution_private_key_pem,
-                        &task,
-                    ) {
-                        Ok(credentials) => {
-                            request_worker_stop(
-                                &task,
-                                &credentials.token,
-                                credentials.attempt_id.as_deref(),
-                                credentials.idempotency_key.as_deref(),
-                            )
-                            .await
-                        }
-                        Err(error) => {
-                            tracing::warn!(
-                                task_id = %task.task_id,
-                                error = %error,
-                                "Task cancellation recorded but the attempt-bound worker stop identity could not be created"
-                            );
-                            WorkerStopDispatch::NotConfirmed(
-                                "managed execution identity is unavailable".into(),
-                            )
-                        }
-                    };
-                    match stop_dispatch {
-                        WorkerStopDispatch::NotAssigned => "Task cancellation recorded".to_string(),
-                        WorkerStopDispatch::Requested => {
-                            "Task cancellation recorded; worker stop requested".to_string()
-                        }
-                        WorkerStopDispatch::NotConfirmed(message) => {
-                            format!(
-                                "Task cancellation recorded; worker stop not confirmed: {message}"
-                            )
-                        }
-                    }
-                } else {
-                    let mut requested = 0usize;
-                    let mut failures = 0usize;
-                    for target in &consensus_targets {
-                        let credentials = match worker_stop_credentials_for_consensus(
-                            &self.state.worker_execution_private_key_pem,
-                            &task,
-                            target,
-                        ) {
-                            Ok(credentials) => credentials,
-                            Err(error) => {
-                                failures += 1;
-                                tracing::warn!(
-                                    task_id = %task.task_id,
-                                    worker_id = %target.worker_id,
-                                    error = %error,
-                                    "managed consensus cancellation identity could not be created"
-                                );
-                                continue;
-                            }
-                        };
-                        let mut replica_task = task.clone();
-                        replica_task.worker_id = Some(target.worker_id.clone());
-                        replica_task.worker_ip = Some(target.worker_ip.clone());
-                        match request_worker_stop(
-                            &replica_task,
-                            &credentials.token,
-                            credentials.attempt_id.as_deref(),
-                            credentials.idempotency_key.as_deref(),
-                        )
-                        .await
-                        {
-                            WorkerStopDispatch::Requested | WorkerStopDispatch::NotAssigned => {
-                                requested += 1;
-                            }
-                            WorkerStopDispatch::NotConfirmed(message) => {
-                                failures += 1;
-                                tracing::warn!(
-                                    task_id = %task.task_id,
-                                    worker_id = %target.worker_id,
-                                    "managed consensus Worker stop was not confirmed: {}",
-                                    message
-                                );
-                            }
-                        }
-                    }
-                    if failures == 0 {
-                        format!(
-                            "Task cancellation recorded; worker stop requested for {requested}/{} consensus replicas",
-                            consensus_targets.len()
-                        )
-                    } else {
-                        format!(
-                            "Task cancellation recorded; worker stop requested for {requested}/{} consensus replicas ({failures} not confirmed)",
-                            consensus_targets.len()
-                        )
-                    }
-                };
-                Ok(Response::new(StopTaskResponse {
-                    success: true,
-                    status_message,
-                }))
-            }
-            Err(e) => Ok(Response::new(StopTaskResponse {
-                success: false,
-                status_message: e.to_string(),
-            })),
-        }
+        self.stop_task_for_owner(&claims.sub, &req.task_id).await
     }
 
     async fn get_tasklog(

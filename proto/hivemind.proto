@@ -1557,3 +1557,114 @@ service BatchRuntimeService {
     rpc CompleteBatch(CompleteBatchRequest) returns (CompleteBatchResponse);
     rpc Heartbeat(HeartbeatRequest) returns (HeartbeatResponse);
 }
+
+// Server-side jobs: one hcode function over many inputs. Nodepool owns the state, submits each input as a task,
+// and keeps the job's spend under its cap. Every request needs a token; an API token works.
+message CreateJobRequest {
+    string token = 1;
+    string name = 2;
+    string source = 3;
+    // One entry per input. Each entry is a JSON value, as the task input takes it.
+    repeated string inputs = 4;
+    int64 per_item_max_cpt = 5;
+    // Zero means per_item_max_cpt times the number of inputs.
+    int64 job_max_cpt = 6;
+    // Zero means the network's default replica count.
+    uint32 replica_count = 7;
+    int32 cpu_score = 8;
+    int32 gpu_score = 9;
+    int64 memory_gb = 10;
+    int64 gpu_memory_gb = 11;
+    int64 storage_gb = 12;
+    int32 host_count = 13;
+}
+message CreateJobResponse {
+    bool success = 1;
+    string status_message = 2;
+    string job_id = 3;
+    int64 item_count = 4;
+    int64 job_max_cpt = 5;
+}
+message GetJobRequest {
+    string token = 1;
+    string job_id = 2;
+}
+message JobView {
+    string job_id = 1;
+    string name = 2;
+    // running, cancelling, completed, or cancelled.
+    string state = 3;
+    int64 item_count = 4;
+    int64 pending = 5;
+    int64 submitted = 6;
+    int64 completed = 7;
+    int64 failed = 8;
+    int64 refused = 9;
+    int64 cancelled = 10;
+    // Billed by items that finished.
+    int64 spent_cpt = 11;
+    // Caps of items that are still running.
+    int64 reserved_cpt = 12;
+    int64 per_item_max_cpt = 13;
+    int64 job_max_cpt = 14;
+    string created_at = 15;
+    string updated_at = 16;
+    string finished_at = 17;
+    // Why the job is waiting, if it is, for example "waiting for CPT".
+    string note = 18;
+}
+message GetJobResponse {
+    bool success = 1;
+    string status_message = 2;
+    JobView job = 3;
+}
+message ListJobsRequest {
+    string token = 1;
+}
+message ListJobsResponse {
+    bool success = 1;
+    string status_message = 2;
+    repeated JobView jobs = 3;
+}
+message ListJobItemsRequest {
+    string token = 1;
+    string job_id = 2;
+    int64 offset = 3;
+    int64 limit = 4;
+}
+message JobItemView {
+    int64 index = 1;
+    string task_id = 2;
+    // pending, submitted, completed, failed, refused, or cancelled.
+    string state = 3;
+    int64 max_cpt = 4;
+    int64 billed_cpt = 5;
+    // At most the first 4096 characters, which is at most 16 KiB. The full output is on the task's log.
+    string output_preview = 6;
+    int64 output_bytes = 7;
+    bool output_truncated = 8;
+    string status_message = 9;
+    int64 input_bytes = 10;
+}
+message ListJobItemsResponse {
+    bool success = 1;
+    string status_message = 2;
+    repeated JobItemView items = 3;
+    int64 total = 4;
+}
+message CancelJobRequest {
+    string token = 1;
+    string job_id = 2;
+}
+message CancelJobResponse {
+    bool success = 1;
+    string status_message = 2;
+}
+
+service JobService {
+    rpc CreateJob(CreateJobRequest) returns (CreateJobResponse);
+    rpc GetJob(GetJobRequest) returns (GetJobResponse);
+    rpc ListJobs(ListJobsRequest) returns (ListJobsResponse);
+    rpc ListJobItems(ListJobItemsRequest) returns (ListJobItemsResponse);
+    rpc CancelJob(CancelJobRequest) returns (CancelJobResponse);
+}
