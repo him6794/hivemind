@@ -82,7 +82,7 @@ closed interpreter. Its runtime, backend, cost-model, and semantics identities
 are pinned by
 [`executor-rs/crates/managed-function-runtime/hcode-semantics.json`](../executor-rs/crates/managed-function-runtime/hcode-semantics.json)
 and digest
-`a3a34ebfe508ef280c16b283884aaeca49b99a4b58958e71e66c61f591fc9c04`.
+`7a5e14cb589d79c2f48f14520711e02c904f42db73305eff03024a6de7a99af0`.
 
 - Each managed task is assigned to three distinct Workers by default, with a
   two-replica quorum; at most seven replicas may be configured. A single Worker
@@ -198,12 +198,18 @@ Statements:
 let name = expression;
 fn name(arg1, arg2) { return expression; }
 for item in expression { statements... }
+while expression { statements... }
+if expression { statements... } else { statements... }
+break;
+continue;
 return expression;
 print(expression);
 expression;
 ```
 
 CPU hcode also accepts `//` line comments. A comment runs from `//` to the end of its line, and `//` inside a string literal is ordinary text. The frozen v0 surface has no comments.
+
+CPU hcode also has `while`, `break`, `continue`, and `if` statements. `while` checks its bool condition before each pass through its body, and each pass counts as one loop iteration against the same limit as `for`. `break;` ends the innermost loop, and `continue;` ends the current pass. A leading `if` is a statement when its branches are statements, and an expression otherwise, as before. A function body starts a new loop context, so `break` and `continue` outside a loop are parse errors. The frozen v0 surface keeps these words as ordinary names.
 
 Expressions:
 

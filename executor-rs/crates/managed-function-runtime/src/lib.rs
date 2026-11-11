@@ -21,7 +21,7 @@ pub const V1_SEMANTICS_MANIFEST_JSON: &str = include_str!("../hcode-semantics.js
 /// SHA-256 of the canonical JSON bytes in [`V1_SEMANTICS_MANIFEST_JSON`],
 /// excluding the file's trailing newline.
 pub const V1_SEMANTICS_MANIFEST_SHA256: &str =
-    "a3a34ebfe508ef280c16b283884aaeca49b99a4b58958e71e66c61f591fc9c04";
+    "7a5e14cb589d79c2f48f14520711e02c904f42db73305eff03024a6de7a99af0";
 
 /// Versioned metering identity committed by the v1 semantics manifest.
 pub const V1_COST_MODEL_ID: &str = "hcode-execution-cpt-v1";
@@ -547,7 +547,7 @@ impl<'a> ManagedGpuExecutor<'a> {
         limits: ExecutionLimits,
     ) -> Result<ExecutionResult, RuntimeError> {
         let tokens = Lexer::with_surface(source, Surface::HcodeGpu).tokenize()?;
-        let program = Parser::new(tokens).parse_program()?;
+        let program = Parser::new(tokens, Surface::HcodeGpu).parse_program()?;
         Evaluator::with_gpu(limits, self.backend, None).eval_program(&program)
     }
 
@@ -569,7 +569,7 @@ impl<'a> ManagedGpuExecutor<'a> {
     ) -> Result<ExecutionResult, RuntimeError> {
         let input = Value::from_json_str_with_surface(input_json, Surface::HcodeGpu)?;
         let tokens = Lexer::with_surface(source, Surface::HcodeGpu).tokenize()?;
-        let program = Parser::new(tokens).parse_program()?;
+        let program = Parser::new(tokens, Surface::HcodeGpu).parse_program()?;
         let mut evaluator = Evaluator::with_gpu(limits, self.backend, cancelled);
         evaluator.validate_external_value(&input)?;
         evaluator.current_scope().insert("input".to_string(), input);
@@ -589,7 +589,7 @@ impl ManagedExecutor {
     ) -> Result<ExecutionResult, RuntimeError> {
         let surface = Surface::for_cpu_limits(&limits);
         let tokens = Lexer::with_surface(source, surface).tokenize()?;
-        let program = Parser::new(tokens).parse_program()?;
+        let program = Parser::new(tokens, surface).parse_program()?;
         Evaluator::new(limits, surface).eval_program(&program)
     }
 
@@ -602,7 +602,7 @@ impl ManagedExecutor {
         let surface = Surface::for_cpu_limits(&limits);
         let input = Value::from_json_str_with_surface(input_json, surface)?;
         let tokens = Lexer::with_surface(source, surface).tokenize()?;
-        let program = Parser::new(tokens).parse_program()?;
+        let program = Parser::new(tokens, surface).parse_program()?;
         let mut evaluator = Evaluator::new(limits, surface);
         evaluator.validate_external_value(&input)?;
         evaluator.current_scope().insert("input".to_string(), input);
@@ -619,7 +619,7 @@ impl ManagedExecutor {
         let surface = Surface::for_cpu_limits(&limits);
         let input = Value::from_json_str_with_surface(input_json, surface)?;
         let tokens = Lexer::with_surface(source, surface).tokenize()?;
-        let program = Parser::new(tokens).parse_program()?;
+        let program = Parser::new(tokens, surface).parse_program()?;
         let mut evaluator = Evaluator::with_cancellation(limits, surface, cancelled);
         evaluator.validate_external_value(&input)?;
         evaluator.current_scope().insert("input".to_string(), input);
@@ -647,7 +647,7 @@ impl ManagedExecutor {
         }
         let input = Value::from_json_str_with_surface(input_json, surface)?;
         let tokens = Lexer::with_surface(source, surface).tokenize()?;
-        let program = Parser::new(tokens).parse_program()?;
+        let program = Parser::new(tokens, surface).parse_program()?;
         let mut evaluator = Evaluator {
             artifacts: Some(artifacts),
             cancelled,
@@ -912,6 +912,13 @@ fn checked_value_add(left: u64, right: u64) -> Result<u64, RuntimeError> {
     left.checked_add(right).ok_or_else(value_limit_error)
 }
 
+fn loop_control_outside_loop() -> RuntimeError {
+    RuntimeError::new(
+        "parse_error",
+        "break and continue are only valid inside a loop",
+    )
+}
+
 fn value_limit_error() -> RuntimeError {
     RuntimeError::new("value_limit_exceeded", "value limit exceeded")
 }
@@ -935,6 +942,9 @@ enum Token {
     In,
     If,
     Else,
+    While,
+    Break,
+    Continue,
     Plus,
     Minus,
     Star,
@@ -1201,6 +1211,9 @@ impl<'a> Lexer<'a> {
             "in" => Token::In,
             "if" => Token::If,
             "else" => Token::Else,
+            "while" if self.surface.hcode_extensions() => Token::While,
+            "break" if self.surface.hcode_extensions() => Token::Break,
+            "continue" if self.surface.hcode_extensions() => Token::Continue,
             "true" => Token::True,
             "false" => Token::False,
             "and" => Token::And,
@@ -1331,6 +1344,17 @@ enum Stmt {
         value: Expr,
     },
     Expr(Expr),
+    While {
+        condition: Expr,
+        body: Vec<Self>,
+    },
+    If {
+        condition: Expr,
+        then_body: Vec<Self>,
+        else_body: Vec<Self>,
+    },
+    Break,
+    Continue,
 }
 
 #[derive(Debug, Clone)]
@@ -1412,11 +1436,18 @@ enum LogicalOp {
 struct Parser {
     tokens: Vec<SpannedToken>,
     pos: usize,
+    surface: Surface,
+    loop_depth: usize,
 }
 
 impl Parser {
-    fn new(tokens: Vec<SpannedToken>) -> Self {
-        Self { tokens, pos: 0 }
+    fn new(tokens: Vec<SpannedToken>, surface: Surface) -> Self {
+        Self {
+            tokens,
+            pos: 0,
+            surface,
+            loop_depth: 0,
+        }
     }
 
     fn parse_program(mut self) -> Result<Program, RuntimeError> {
@@ -1445,6 +1476,10 @@ impl Parser {
                 Ok(Stmt::Return(expr))
             }
             Token::For => self.for_statement(),
+            Token::While => self.while_statement(),
+            Token::Break => self.loop_control(Stmt::Break),
+            Token::Continue => self.loop_control(Stmt::Continue),
+            Token::If if self.surface.hcode_extensions() => self.if_statement_or_expression(),
             Token::Ident(name) if name == "print" => {
                 self.advance();
                 self.expect(&Token::LParen)?;
@@ -1477,17 +1512,100 @@ impl Parser {
         }
     }
 
-    fn for_statement(&mut self) -> Result<Stmt, RuntimeError> {
-        self.expect(&Token::For)?;
-        let item = self.ident()?;
-        self.expect(&Token::In)?;
-        let iterable = self.expression()?;
+    /// `{ statements }`.
+    fn statement_block(&mut self) -> Result<Vec<Stmt>, RuntimeError> {
         self.expect(&Token::LBrace)?;
         let mut body = Vec::new();
         while !matches!(self.peek(), Token::RBrace | Token::Eof) {
             body.push(self.statement()?);
         }
         self.expect(&Token::RBrace)?;
+        Ok(body)
+    }
+
+    /// The body of a `for` or `while` loop. break and continue inside it act on this loop.
+    fn loop_body(&mut self) -> Result<Vec<Stmt>, RuntimeError> {
+        self.loop_depth += 1;
+        let body = self.statement_block();
+        self.loop_depth -= 1;
+        body
+    }
+
+    fn while_statement(&mut self) -> Result<Stmt, RuntimeError> {
+        self.expect(&Token::While)?;
+        let condition = self.expression()?;
+        let body = self.loop_body()?;
+        Ok(Stmt::While { condition, body })
+    }
+
+    fn loop_control(&mut self, statement: Stmt) -> Result<Stmt, RuntimeError> {
+        let keyword = if matches!(self.peek(), Token::Break) {
+            "break"
+        } else {
+            "continue"
+        };
+        self.advance();
+        if self.loop_depth == 0 {
+            return Err(RuntimeError::new(
+                "parse_error",
+                format!("{keyword} is only valid inside a loop"),
+            ));
+        }
+        self.expect(&Token::Semi)?;
+        Ok(statement)
+    }
+
+    /// An `if` that starts a statement is a statement when its branches are statements. Otherwise it is read
+    /// as an expression statement, exactly as before, so existing programs keep their meaning.
+    fn if_statement_or_expression(&mut self) -> Result<Stmt, RuntimeError> {
+        let start = self.pos;
+        let outer_loop_depth = self.loop_depth;
+        let statement_error = match self.if_statement() {
+            Ok(statement) => return Ok(statement),
+            Err(error) => error,
+        };
+        self.pos = start;
+        self.loop_depth = outer_loop_depth;
+        let as_expression = self.expression().and_then(|expression| {
+            self.expect(&Token::Semi)?;
+            Ok(Stmt::Expr(expression))
+        });
+        if let Ok(statement) = as_expression {
+            return Ok(statement);
+        }
+        // Neither reading parses. The statement error points at the broken branch.
+        self.pos = start;
+        self.loop_depth = outer_loop_depth;
+        Err(statement_error)
+    }
+
+    fn if_statement(&mut self) -> Result<Stmt, RuntimeError> {
+        self.expect(&Token::If)?;
+        let condition = self.expression()?;
+        let then_body = self.statement_block()?;
+        let else_body = if matches!(self.peek(), Token::Else) {
+            self.advance();
+            if matches!(self.peek(), Token::If) {
+                vec![self.if_statement()?]
+            } else {
+                self.statement_block()?
+            }
+        } else {
+            Vec::new()
+        };
+        Ok(Stmt::If {
+            condition,
+            then_body,
+            else_body,
+        })
+    }
+
+    fn for_statement(&mut self) -> Result<Stmt, RuntimeError> {
+        self.expect(&Token::For)?;
+        let item = self.ident()?;
+        self.expect(&Token::In)?;
+        let iterable = self.expression()?;
+        let body = self.loop_body()?;
         Ok(Stmt::For {
             item,
             iterable,
@@ -1511,13 +1629,15 @@ impl Parser {
             }
         }
         self.expect(&Token::RParen)?;
-        self.expect(&Token::LBrace)?;
-        let mut body = Vec::new();
-        while !matches!(self.peek(), Token::RBrace | Token::Eof) {
-            body.push(self.statement()?);
-        }
-        self.expect(&Token::RBrace)?;
-        Ok(Function { name, params, body })
+        // A function body is a new loop context, so break and continue cannot reach a loop around it.
+        let outer_loop_depth = std::mem::take(&mut self.loop_depth);
+        let body = self.statement_block();
+        self.loop_depth = outer_loop_depth;
+        Ok(Function {
+            name,
+            params,
+            body: body?,
+        })
     }
 
     fn expression(&mut self) -> Result<Expr, RuntimeError> {
@@ -2043,6 +2163,9 @@ impl<'a> Evaluator<'a> {
                         last = value;
                         break;
                     }
+                    Control::Break | Control::SkipIteration => {
+                        return Err(loop_control_outside_loop());
+                    }
                 }
             }
             Ok(last)
@@ -2083,30 +2206,51 @@ impl<'a> Evaluator<'a> {
                 };
                 let mut last = Value::Null;
                 for value in values {
-                    let next_iterations =
-                        self.receipt.loop_iterations.checked_add(1).ok_or_else(|| {
-                            RuntimeError::new(
-                                "loop_limit_exceeded",
-                                "loop iteration limit exceeded",
-                            )
-                        })?;
-                    if next_iterations > self.limits.max_loop_iterations {
-                        return Err(RuntimeError::new(
-                            "loop_limit_exceeded",
-                            "loop iteration limit exceeded",
-                        ));
-                    }
-                    self.receipt.loop_iterations = next_iterations;
+                    self.count_loop_iteration()?;
                     self.current_scope().insert(item.clone(), value);
-                    for statement in body {
-                        match self.eval_stmt(statement)? {
-                            Control::Continue(value) => last = value,
-                            Control::Return(value) => return Ok(Control::Return(value)),
-                        }
+                    match self.eval_block(body)? {
+                        Control::Continue(value) => last = value,
+                        Control::SkipIteration => {}
+                        Control::Break => break,
+                        Control::Return(value) => return Ok(Control::Return(value)),
                     }
                 }
                 Ok(Control::Continue(last))
             }
+            Stmt::While { condition, body } => {
+                let mut last = Value::Null;
+                loop {
+                    let Value::Bool(go_on) = self.eval_expr(condition)? else {
+                        return Err(RuntimeError::new(
+                            "type_error",
+                            "while condition must be bool",
+                        ));
+                    };
+                    if !go_on {
+                        break;
+                    }
+                    self.count_loop_iteration()?;
+                    match self.eval_block(body)? {
+                        Control::Continue(value) => last = value,
+                        Control::SkipIteration => {}
+                        Control::Break => break,
+                        Control::Return(value) => return Ok(Control::Return(value)),
+                    }
+                }
+                Ok(Control::Continue(last))
+            }
+            Stmt::If {
+                condition,
+                then_body,
+                else_body,
+            } => {
+                let Value::Bool(take_then) = self.eval_expr(condition)? else {
+                    return Err(RuntimeError::new("type_error", "if condition must be bool"));
+                };
+                self.eval_block(if take_then { then_body } else { else_body })
+            }
+            Stmt::Break => Ok(Control::Break),
+            Stmt::Continue => Ok(Control::SkipIteration),
             Stmt::Print(expr) => {
                 self.charge(5)?;
                 let value = self.eval_expr(expr)?;
@@ -2134,6 +2278,33 @@ impl<'a> Evaluator<'a> {
             }
             Stmt::Expr(expr) => self.eval_expr(expr).map(Control::Continue),
         }
+    }
+
+    /// Counts one entry into a `for` or `while` body against the loop limit.
+    fn count_loop_iteration(&mut self) -> Result<(), RuntimeError> {
+        let next_iterations = self.receipt.loop_iterations.checked_add(1).ok_or_else(|| {
+            RuntimeError::new("loop_limit_exceeded", "loop iteration limit exceeded")
+        })?;
+        if next_iterations > self.limits.max_loop_iterations {
+            return Err(RuntimeError::new(
+                "loop_limit_exceeded",
+                "loop iteration limit exceeded",
+            ));
+        }
+        self.receipt.loop_iterations = next_iterations;
+        Ok(())
+    }
+
+    /// Runs a statement list in the current scope. The first break, continue, or return ends the list.
+    fn eval_block(&mut self, body: &[Stmt]) -> Result<Control, RuntimeError> {
+        let mut last = Value::Null;
+        for statement in body {
+            match self.eval_stmt(statement)? {
+                Control::Continue(value) => last = value,
+                other => return Ok(other),
+            }
+        }
+        Ok(Control::Continue(last))
     }
 
     fn eval_expr(&mut self, expr: &Expr) -> Result<Value, RuntimeError> {
@@ -2532,6 +2703,7 @@ impl<'a> Evaluator<'a> {
             match self.eval_stmt(statement)? {
                 Control::Continue(value) => result = value,
                 Control::Return(value) => return Ok(value),
+                Control::Break | Control::SkipIteration => return Err(loop_control_outside_loop()),
             }
         }
         Ok(result)
@@ -3269,6 +3441,10 @@ impl<'a> Evaluator<'a> {
 enum Control {
     Continue(Value),
     Return(Value),
+    /// `break`: ends the innermost loop.
+    Break,
+    /// `continue`: ends this pass through the innermost loop body.
+    SkipIteration,
 }
 
 fn eval_binary_integer(
@@ -4081,6 +4257,141 @@ mod tests {
         let mut reserved = crate::HCODE_BUILTIN_NAMES.to_vec();
         reserved.sort_unstable();
         assert_eq!(listed, reserved);
+    }
+
+    #[test]
+    fn hcode_while_runs_while_its_condition_holds() {
+        assert_eq!(
+            eval_hcode(
+                "let i = 0; let total = 0; while i < 5 { let total = total + i; let i = i + 1; } return total;"
+            )
+            .unwrap(),
+            "10"
+        );
+        // A false condition on entry means the body never runs.
+        assert_eq!(
+            eval_hcode("let n = 7; while n < 0 { let n = 0; } return n;").unwrap(),
+            "7"
+        );
+    }
+
+    #[test]
+    fn hcode_break_and_continue_act_on_the_innermost_loop() {
+        // break stops at the first multiple of four.
+        assert_eq!(
+            eval_hcode(
+                "let i = 0; while true { let i = i + 1; if i % 4 == 0 { break; } } return i;"
+            )
+            .unwrap(),
+            "4"
+        );
+        // continue skips the rest of the body, so only the odd numbers are counted.
+        assert_eq!(
+            eval_hcode(
+                "let i = 0; let odd = 0; while i < 6 { let i = i + 1; if i % 2 == 0 { continue; } let odd = odd + 1; } return odd;"
+            )
+            .unwrap(),
+            "3"
+        );
+        // A break in the inner loop leaves only the inner loop.
+        assert_eq!(
+            eval_hcode(
+                "let i = 0; let total = 0; while i < 3 { let i = i + 1; let j = 0; while true { let j = j + 1; if j == 2 { break; } } let total = total + j; } return total;"
+            )
+            .unwrap(),
+            "6"
+        );
+        // break and continue work in for loops too.
+        assert_eq!(
+            eval_hcode(
+                "let seen = 0; for x in [1, 2, 3, 4] { if x == 3 { break; } let seen = seen + x; } return seen;"
+            )
+            .unwrap(),
+            "3"
+        );
+        assert_eq!(
+            eval_hcode(
+                "let sum = 0; for x in [1, 2, 3] { if x == 2 { continue; } let sum = sum + x; } return sum;"
+            )
+            .unwrap(),
+            "4"
+        );
+    }
+
+    #[test]
+    fn hcode_while_needs_a_bool_condition_and_shares_the_loop_limit() {
+        assert_eq!(hcode_error_code("while 1 { }"), "type_error");
+        let limited = ExecutionLimits {
+            max_loop_iterations: 3,
+            ..ExecutionLimits::for_managed_function_budget(u64::MAX)
+        };
+        let error = ManagedExecutor
+            .execute_json_input("let i = 0; while true { let i = i + 1; }", limited, "null")
+            .expect_err("the fourth entry into the body must hit the loop limit");
+        assert_eq!(error.code(), "loop_limit_exceeded");
+    }
+
+    #[test]
+    fn hcode_break_and_continue_outside_a_loop_are_parse_errors() {
+        assert_eq!(hcode_error_code("break;"), "parse_error");
+        assert_eq!(hcode_error_code("continue;"), "parse_error");
+        // A function body is a new loop context, so it cannot break out of a loop around its definition.
+        assert_eq!(
+            hcode_error_code("while true { fn f() { break; } }"),
+            "parse_error"
+        );
+    }
+
+    #[test]
+    fn hcode_if_statements_and_if_expressions_both_keep_their_meaning() {
+        assert_eq!(
+            eval_hcode("let x = 0; if x == 0 { let x = 1; } else { let x = 2; } return x;")
+                .unwrap(),
+            "1"
+        );
+        assert_eq!(
+            eval_hcode("let x = 5; if x == 0 { let x = 1; } return x;").unwrap(),
+            "5"
+        );
+        assert_eq!(
+            eval_hcode(
+                "let x = 2; if x == 1 { let y = 10; } else if x == 2 { let y = 20; } else { let y = 30; } return y;"
+            )
+            .unwrap(),
+            "20"
+        );
+        // An if at the start of an expression statement is still an expression.
+        assert_eq!(eval_hcode("if false { 1 } else { 2 };").unwrap(), "2");
+        assert_eq!(
+            eval_hcode("return if 1 < 2 { \"yes\" } else { \"no\" };").unwrap(),
+            "yes"
+        );
+        assert_eq!(
+            eval_hcode("let v = if false { 1 } else { 2 } + 40; return v;").unwrap(),
+            "42"
+        );
+        assert_eq!(hcode_error_code("if 1 { let x = 1; }"), "type_error");
+    }
+
+    #[test]
+    fn the_frozen_v0_surface_has_no_control_flow_keywords() {
+        // On v0, while, break, and continue are ordinary names.
+        assert_eq!(
+            eval_v0(
+                "let while = 1; let break = 2; let continue = 3; return while + break + continue;",
+                "null"
+            )
+            .unwrap(),
+            "6"
+        );
+        assert!(
+            eval_v0(
+                "let i = 0; while i < 1 { let i = i + 1; } return i;",
+                "null"
+            )
+            .is_err()
+        );
+        assert!(eval_v0("if true { 1; } else { 2; } return 3;", "null").is_err());
     }
 
     fn eval_hcode_json(source: &str, input: &str) -> Result<String, String> {
