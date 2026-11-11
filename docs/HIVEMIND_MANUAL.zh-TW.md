@@ -440,12 +440,16 @@ Readiness 有 bounded timeout；VPN 不可用時應 fail closed，而不是改�
 let name = expression;
 fn name(arg1, arg2) { return expression; }
 for item in expression { statements... }
+while expression { statements... }
+if expression { statements... } else { statements... }
+break;
+continue;
 return expression;
 print(expression);
 expression;
 ```
 
-Expression 包含 integer、boolean、string、list、dict、name／call、parentheses、arithmetic／comparison 與 `if ... else ...`。最後的 expression statement 是 final value，除非較早 `return`。
+Expression 包含 integer、boolean、string、list、dict、name／call、parentheses、arithmetic／comparison 與 `if ... else ...`。最後的 expression statement 是 final value，除非較早 `return`。CPU hcode 另外支援 `//` 註解、`while`、`break;`、`continue;`，以及語句開頭的 `if`；見 7.3 的表格。
 
 例子：
 
@@ -468,7 +472,10 @@ CPU hcode 支援 signed `i64` integer、boolean、string、list、string-keyed d
 | --- | --- |
 | `let x = expr;` | 宣告／重新綁定；不支援 bare `x = expr;` |
 | `fn name(args) { ... }` | 頂層 named user function；受 call-depth／budget bounds |
-| `if condition { expr } else { expr }` | Expression；需 `else`，branch 是單一 expression，不是 C-like statements block |
+| `if condition { expr } else { expr }` | Expression；需 `else`，branch 是單一 expression。CPU hcode 在語句開頭的 `if` 是 statement：branch 為 statements block，`else` 可省略或接另一個 `if`；既有程式的判讀不變 |
+| `while condition { ... }` | CPU hcode；condition 須為 bool，每次進入 body 計一次 loop iteration，與 `for` 共用 `max_loop_iterations` |
+| `break;`／`continue;` | CPU hcode；只能在 `for`／`while` 內使用；function body 會開啟新的迴圈上下文 |
+| `// 註解` | CPU hcode；註解到行尾；字串內的 `//` 是文字 |
 | `for item in values { ... }` | 只迭代 list；沒有 range／dict／string iterator |
 | `and`／`or`／`not` | Boolean expressions；不是 JavaScript `&&`／`||` 語法 |
 | `+ - * /` 與比較 | Signed integer arithmetic；checked overflow，division by zero 失敗 |
@@ -477,6 +484,11 @@ CPU hcode 支援 signed `i64` integer、boolean、string、list、string-keyed d
 | `len(value)` | String **UTF-8 byte length**、list item count、dict entry count |
 | `get(target, key)` | Dict＋string key／list＋非負 integer index；missing／out-of-range 回 `null`；不支援 string `get` |
 | `contains(target, value)` | Dict key membership、string substring、list equality membership |
+| `append(list, value)` | CPU hcode；回傳新 list，參數不變；計費為新 list 的長度 |
+| `sort(list)` | CPU hcode；回傳新的升序 list；元素須全為 int、全為 float 或全為 string，混合型別失敗；string 依 UTF-8 bytes 排序；比較前先計費，為元素數乘以其二進位位數 |
+| `keys(dict)` | CPU hcode；回傳 dict key 組成的 string list，依 UTF-8 bytes 升序；每個 key 計一次用量 |
+| `split(text, separator)` | CPU hcode；以非空 separator 切割，與 Rust `str::split` 相同；每個 byte 計一次，每個片段再計一次 |
+| `join(list, separator)` | CPU hcode；以 separator 連接 string list，元素須全為 string，separator 可為空；每個結果 byte 計一次 |
 | `print(expr);` | Parser special statement；不是可任意傳遞的一般 builtin；計入 bounded output |
 
 注意 `len(string)` 計 bytes，而 `string[index]` 按 characters，兩者不能互相推算。

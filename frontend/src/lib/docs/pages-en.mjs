@@ -156,7 +156,7 @@ export const docsPagesEn = [
       { type: 'p', text: 'The outer `if` returns one of three results. The inner `if` sits in the else branch, so it is also a single expression.' },
       { type: 'example', id: 'conditions-sign' },
       { type: 'h2', id: 'update', text: 'Updating a value under a condition' },
-      { type: 'p', text: 'A branch cannot hold several statements. To change a variable only when a condition holds, rebind it with `let` and an `if` expression on the right side.' },
+      { type: 'p', text: 'In an expression, a branch holds one expression. On CPU hcode, an `if` at the start of a statement can hold several statements, as in `if get(row, "ok") { let count = count + 1; }`, which changes the variable only when the condition holds. The expression below rebinds `count` in one step.' },
       { type: 'code', lang: 'hcode', code: 'let count = if get(row, "ok") { count + 1 } else { count };' },
       { type: 'example', id: 'loop-count' },
       { type: 'h2', id: 'contains', text: 'Checking for a value' },

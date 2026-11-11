@@ -56,12 +56,29 @@ add(get(input, "left"), get(input, "right"));
 
 函式是頂層具名函式，`return` 提早回傳值。`for item in values { ... }` 只遍歷 list，不遍歷 dict、string。需要整數序列時用 `range(...)` 產生 list（見下方 builtins）。
 
-`if` 是 expression，必須有 `else`；每個 branch 是單一 expression，不是任意 statements block：
+`if` 作為 expression 時必須有 `else`，每個 branch 是單一 expression：
 
 ```text
 let count = get(input, "count");
 if count > 0 { count } else { 0 };
 ```
+
+在語句開頭寫 `if`（CPU hcode）時，它是 statement：每個 branch 是 statements block，`else` 可以省略，也可以接另一個 `if`。
+
+CPU hcode 還支援 `//` 註解（到行尾為止），以及 `while`、`break;`、`continue;`。`while condition { ... }` 每次進入本體前檢查 bool 條件，每次進入都計一次 loop iteration，與 `for` 共用 `max_loop_iterations`。`break;` 結束最內層的 `for` 或 `while`，`continue;` 結束這一輪。函式本體會開啟新的迴圈上下文，因此 `break`、`continue` 不能跨越函式邊界。
+
+```text
+let i = 0;
+let odd = 0;
+while i < 10 {
+  let i = i + 1;   // 每一輪先加一
+  if i % 2 == 0 { continue; }
+  let odd = odd + 1;
+}
+odd;
+```
+
+上面的程式回傳 5（1、3、5、7、9 是奇數）。
 
 ### 型別與運算
 
@@ -87,6 +104,11 @@ CPU hcode 支援 signed `i64` 整數、有限的 `f64` 浮點數、boolean、str
 | `len(value)` | List 元素數、dict entries 數或 string 的 **UTF-8 byte 數** |
 | `get(target, key)` | Dict＋string key，或 list＋非負 integer index；缺 key／越界回 `null`；不支援 string target |
 | `contains(target, value)` | Dict key 存在、string substring 或 list equality membership |
+| `append(list, value)` | 回傳新 list，附加 value 在尾端，參數不變（CPU hcode）；計費為新 list 的長度 |
+| `sort(list)` | 回傳新的升序 list；元素須全為 int、全為 float 或全為 string，混合型別失敗（CPU hcode）；string 依 UTF-8 bytes 排序；比較前先計費，為元素數乘以其二進位位數 |
+| `keys(dict)` | 回傳 dict key 組成的 string list，依 UTF-8 bytes 升序（CPU hcode）；每個 key 計一次用量 |
+| `split(text, separator)` | 以非空 separator 切割 string，與 Rust `str::split` 相同（CPU hcode）；每個 byte 計一次，每個片段再計一次 |
+| `join(list, separator)` | 以 separator 連接 string list，元素須全為 string，separator 可為空（CPU hcode）；每個結果 byte 計一次 |
 | `abs(n)`、`min(a, b)`、`max(a, b)` | 整數絕對值、最小值與最大值（CPU hcode）；`abs(i64::MIN)` 會失敗 |
 | `range(stop)`、`range(start, stop)`、`range(start, stop, step)` | 產生 int list（CPU hcode）；每個元素計一次用量，超過 collection 上限會失敗；step 不可為 0 |
 | `wrapping_add`、`wrapping_sub`、`wrapping_mul` | 整數運算保留低 64 位元，不因溢位失敗（CPU hcode） |
@@ -237,7 +259,7 @@ Platform fee: 7 CPT
 Minimum --max-cpt for the work: 82 CPT
 The price of any computer requirements (--cpu-score and the other submit resource flags) is not included. `submit --max-cpt auto` uses the larger of the two.
 
-This is an estimate from a run on this machine (interpreter semantics d82fb2679d7f). Nodepool settles on what the Workers report.
+This is an estimate from a run on this machine under interpreter semantics d82fb2679d7f, the v1 digest from before the 2026-11-11 hcode additions. Those additions leave the cost of existing constructs unchanged, and the v1 cost-vector tests still pass. Nodepool settles on what the Workers report.
 ```
 
 `Minimum --max-cpt for the work` 是讓每個副本都能跑完的最小總上限，也是三個副本全部執行並被接受時的工作收費。它不含所選電腦需求的價格：Master 會拒絕低於該價格的上限，所以要設定 `--cpu-score` 等資源時，請用 `submit --max-cpt auto`，它取工作上限與資源價格兩者較大值。低於工作上限時，副本會因 `budget_exhausted` 失敗。它是預估：本機與 Worker 的直譯器版本不同時，用量可能不同，輸出裡的 interpreter semantics 摘要可用來比對。`check` 也接受 `--artifact name=path.safetensors`、`--replicas`（2 到 7）、`--max-usage` 與 `--timeout-secs`（本機試跑自己的上限）。函式在本機就失敗時，語法錯誤會附行與欄，其他錯誤只有代碼與原因。

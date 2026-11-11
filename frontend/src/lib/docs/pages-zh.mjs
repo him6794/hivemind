@@ -155,7 +155,7 @@ export const docsPagesZh = [
       { type: 'p', text: '外層的 `if` 會回傳三個結果之一。內層的 `if` 放在 else 分支中，因此它同樣是單一運算式。' },
       { type: 'example', id: 'conditions-sign' },
       { type: 'h2', id: 'update', text: '在條件成立時更新值' },
-      { type: 'p', text: '一個分支中不能放多個陳述式。若只想在條件成立時更新變數，請用 `let` 重新綁定，並在右側使用 `if` 運算式。' },
+      { type: 'p', text: '運算式中的分支只能放一個運算式。在 CPU hcode 中，語句開頭的 `if` 可以放多個陳述式，例如 `if get(row, "ok") { let count = count + 1; }`，只有條件成立時才會改變變數。下方的運算式寫法則用一步重新綁定 `count`。' },
       { type: 'code', lang: 'hcode', code: 'let count = if get(row, "ok") { count + 1 } else { count };' },
       { type: 'example', id: 'loop-count' },
       { type: 'h2', id: 'contains', text: '檢查是否含有某個值' },
