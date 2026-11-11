@@ -445,9 +445,11 @@ test('release browser QA covers account, worker registration, and task lifecycle
   assert.match(flowSource, /Download/);
   assert.match(flowSource, /Cancel/);
   assert.match(flowSource, /getByLabel\('CPU score'\)\.fill\('1201'\)/);
-  assert.match(flowSource, /getByLabel\('Max CPT'\)\.fill\('200'\)/);
-  assert.match(flowSource, /getByLabel\('Max CPT'\)\.fill\('100'\)/);
-  assert.doesNotMatch(flowSource, /getByLabel\('Max CPT'\)\.fill\('1000000'\)/);
+  // The charge-cap field is labelled "Task charge cap (CPT, fee included)" in the Master console.
+  assert.match(flowSource, /getByLabel\('Task charge cap \(CPT, fee included\)'\)\.fill\('200'\)/);
+  assert.match(flowSource, /getByLabel\('Task charge cap \(CPT, fee included\)'\)\.fill\('100'\)/);
+  assert.doesNotMatch(flowSource, /getByLabel\('Task charge cap \(CPT, fee included\)'\)\.fill\('1000000'\)/);
+  assert.doesNotMatch(flowSource, /getByLabel\('Max CPT'\)/);
 });
 
 // Settlement copy has to match the billing identity the backend applies:
