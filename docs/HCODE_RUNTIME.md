@@ -82,7 +82,7 @@ closed interpreter. Its runtime, backend, cost-model, and semantics identities
 are pinned by
 [`executor-rs/crates/managed-function-runtime/hcode-semantics.json`](../executor-rs/crates/managed-function-runtime/hcode-semantics.json)
 and digest
-`f7593109a627205b49172b9cf38251bc618a4a03d2885829280449390e2dee2e`.
+`6621354e7117166c7f35ae543335c7f7d72425a25e8f179569478e232e7d05aa`.
 
 - Each managed task is assigned to three distinct Workers by default, with a
   two-replica quorum; at most seven replicas may be configured. A single Worker
@@ -296,7 +296,9 @@ Rules:
   dtype `i64` or `f64`. Build them with `tensor(nested_list)` (the dtype is `f64`
   if any element is a float), or with `zeros(shape, "i64")` and
   `zeros(shape, "f64")`. Other builtins: `shape`, `reshape`, `transpose`,
-  `tolist`, `cast`, `sum`, `dot`, `matmul` (matrix-matrix, matrix-vector, or
+  `tolist`, `cast`, `concat` (joins a list of tensors along the first axis; the
+  tensors must share one dtype and every dimension after the first), `sum`,
+  `dot`, `matmul` (matrix-matrix, matrix-vector, or
   vector-matrix), `relu`, `gelu` (tanh approximation), and `softmax` (along the last
   axis). `t[i]` returns a scalar for rank 1 and otherwise the sub-tensor, and
   `len(t)` is the first dimension. Tensors support `+ - * /` with an equal-shape
@@ -312,7 +314,9 @@ Rules:
   of its operand): one unit for elementwise, reshape, transpose, cast, sum, and
   conversion work; `m + m*n + m*k*n` for `matmul` (one per output row, one per
   output position, and one per multiply-add); one per multiply-add for `dot`; 24
-  per position for `gelu`; and 20 per position for `softmax`.
+  per position for `gelu`; and 20 per position for `softmax`. `concat` charges
+  one unit per position of the result it joins, measured from the joined shape
+  before any element is copied.
 - `freivalds_check(a, b, c, seed, rounds)` verifies a claimed integer product
   `a * b == c` without recomputing it. `a`, `b`, and `c` are `i64` matrices with
   entries in the i32 range, and `rounds` is 1 through 64. Each round is charged

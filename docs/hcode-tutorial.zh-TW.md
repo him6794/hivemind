@@ -114,6 +114,7 @@ CPU hcode 支援 signed `i64` 整數、有限的 `f64` 浮點數、boolean、str
 | `wrapping_add`、`wrapping_sub`、`wrapping_mul` | 整數運算保留低 64 位元，不因溢位失敗（CPU hcode） |
 | `tensor(list)`、`zeros(shape, "i64")`、`zeros(shape, "f64")` | 建立 tensor（CPU hcode）。巢狀 list 必須是矩形；含任一 float 時為 `f64`；元素數超過 collection 上限會失敗 |
 | `shape(t)`、`reshape(t, shape)`、`transpose(t)`、`tolist(t)`、`cast(t, "f64")` | 查詢或改變形狀、轉成巢狀 list、改變 dtype。`transpose` 只支援 rank 2 |
+| `concat(list)` | 沿第一維串接 tensor list（CPU hcode）。各 tensor 的 dtype 與第一維以外的形狀必須相同；結果第一維是各張量第一維之和；結果的每個位置計一次用量，在複製前收取 |
 | `sum(t)`、`dot(a, b)`、`matmul(a, b)` | 總和、向量內積，以及矩陣乘法（矩陣×矩陣、矩陣×向量、向量×矩陣）。每次乘加計一次用量 |
 | `relu(t)`、`gelu(t)`、`softmax(t)` | 激活函式。`gelu` 每元素計 24 單位；`softmax` 沿最後一維計算，每元素計 20 單位 |
 | `freivalds_check(a, b, c, seed, rounds)` | 驗證 `a * b == c`（i64 矩陣，元素在 i32 範圍內，`rounds` 為 1 到 64），不必重算乘積。正確乘積必定通過。理論上的 `2^-rounds` 界需要獨立均勻、與固定聲稱無關的隨機向量；本函式使用固定 seed 的 splitmix64，沒有已證明的對抗性機率保證，不能取代 Nodepool 共識驗證 |

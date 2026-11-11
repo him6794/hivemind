@@ -21,7 +21,7 @@ pub const V1_SEMANTICS_MANIFEST_JSON: &str = include_str!("../hcode-semantics.js
 /// SHA-256 of the canonical JSON bytes in [`V1_SEMANTICS_MANIFEST_JSON`],
 /// excluding the file's trailing newline.
 pub const V1_SEMANTICS_MANIFEST_SHA256: &str =
-    "f7593109a627205b49172b9cf38251bc618a4a03d2885829280449390e2dee2e";
+    "6621354e7117166c7f35ae543335c7f7d72425a25e8f179569478e232e7d05aa";
 
 /// Versioned metering identity committed by the v1 semantics manifest.
 pub const V1_COST_MODEL_ID: &str = "hcode-execution-cpt-v1";
@@ -2102,6 +2102,7 @@ const HCODE_BUILTIN_NAMES: &[&str] = &[
     "transpose",
     "tolist",
     "cast",
+    "concat",
     "sum",
     "dot",
     "matmul",
@@ -3033,8 +3034,9 @@ impl<'a> Evaluator<'a> {
             {
                 self.eval_artifact_builtin(name, args).map(Some)
             }
-            "tensor" | "zeros" | "shape" | "reshape" | "transpose" | "tolist" | "cast" | "sum"
-            | "dot" | "matmul" | "relu" | "gelu" | "softmax" | "freivalds_check"
+            "tensor" | "zeros" | "shape" | "reshape" | "transpose" | "tolist" | "cast"
+            | "concat" | "sum" | "dot" | "matmul" | "relu" | "gelu" | "softmax"
+            | "freivalds_check"
                 if self.surface.hcode_extensions() =>
             {
                 self.eval_tensor_builtin(name, args).map(Some)
@@ -3342,6 +3344,30 @@ impl<'a> Evaluator<'a> {
                 let dtype = tensor::dtype_from_value(dtype)?;
                 self.charge(tensor::position_units(tensor))?;
                 Value::Tensor(tensor::cast(tensor, dtype)?)
+            }
+            ("concat", [Value::List(items)]) => {
+                let tensors = items
+                    .iter()
+                    .map(|item| match item {
+                        Value::Tensor(tensor) => Ok(tensor),
+                        _ => Err(RuntimeError::new(
+                            "type_error",
+                            "concat expects a list of tensors",
+                        )),
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                // The result is sized and charged before any element is copied.
+                let shape = tensor::concat_shape(&tensors)?;
+                let positions = tensor::walk_count(&shape)?;
+                self.check_element_limit(positions)?;
+                self.charge(positions)?;
+                Value::Tensor(tensor::concat(&tensors, shape)?)
+            }
+            ("concat", _) => {
+                return Err(RuntimeError::new(
+                    "type_error",
+                    "concat expects a list of tensors",
+                ));
             }
             ("sum", [Value::Tensor(tensor)]) => {
                 self.charge(tensor::position_units(tensor))?;
@@ -4958,6 +4984,85 @@ mod tests {
             hcode_error_code("return matmul(zeros([400, 1], \"i64\"), zeros([1, 400], \"i64\"));"),
             "value_limit_exceeded"
         );
+    }
+
+    #[test]
+    fn concat_joins_tensors_along_the_first_axis() {
+        assert_eq!(
+            eval_hcode("return tolist(concat([tensor([1, 2]), tensor([3, 4])]));").unwrap(),
+            "[1,2,3,4]"
+        );
+        // A rank-2 join adds the rows of the second tensor below the first.
+        assert_eq!(
+            eval_hcode(
+                "return tolist(concat([tensor([[1, 2, 3], [4, 5, 6]]), tensor([[7, 8, 9]])]));"
+            )
+            .unwrap(),
+            "[[1,2,3],[4,5,6],[7,8,9]]"
+        );
+        // A single tensor is joined with itself and is unchanged.
+        assert_eq!(
+            eval_hcode("return tolist(concat([tensor([1, 2, 3])]));").unwrap(),
+            "[1,2,3]"
+        );
+        // Built-ins and literals of the same dtype mix freely.
+        assert_eq!(
+            eval_hcode("return tolist(concat([tensor([[1, 2, 3]]), zeros([1, 3], \"i64\")]));")
+                .unwrap(),
+            "[[1,2,3],[0,0,0]]"
+        );
+        // Concatenation is a value: the list argument keeps its length.
+        assert_eq!(
+            eval_hcode(
+                "let parts = [tensor([1]), tensor([2])]; let joined = concat(parts); [len(parts), tolist(joined)];"
+            )
+            .unwrap(),
+            "[2,[1,2]]"
+        );
+    }
+
+    #[test]
+    fn concat_checks_dtype_rank_and_trailing_dimensions() {
+        assert_eq!(hcode_error_code("return concat([]);"), "type_error");
+        assert_eq!(hcode_error_code("return concat([1, 2]);"), "type_error");
+        assert_eq!(hcode_error_code("return concat(1);"), "type_error");
+        assert_eq!(
+            hcode_error_code("return concat([tensor([1]), tensor([1.5])]);"),
+            "type_error"
+        );
+        assert_eq!(
+            hcode_error_code("return concat([tensor([1, 2]), tensor([[3, 4]])]);"),
+            "type_error"
+        );
+        assert_eq!(
+            hcode_error_code("return concat([tensor([[1, 2]]), tensor([[3, 4, 5]])]);"),
+            "type_error"
+        );
+        assert_eq!(hcode_error_code("return concat([1]);"), "type_error");
+    }
+
+    #[test]
+    fn concat_checks_the_result_against_the_element_limit() {
+        // Each operand fits; their join does not, so the result shape is the
+        // thing that fails, before any element is copied.
+        assert_eq!(
+            hcode_error_code("return concat([zeros([100000], \"i64\"), zeros([1], \"i64\")]);"),
+            "value_limit_exceeded"
+        );
+    }
+
+    #[test]
+    fn concat_charges_one_unit_per_result_position() {
+        // Growing the second operand by four positions grows the result by four
+        // as well. Subtracting the plain list return leaves exactly those four
+        // result positions, so the marginal charge is one per position. The
+        // call, return, list, and operand costs cancel between the two.
+        let concat_grow =
+            hcode_usage("return concat([zeros([4], \"i64\"), zeros([12], \"i64\")]);")
+                - hcode_usage("return concat([zeros([4], \"i64\"), zeros([8], \"i64\")]);");
+        let list_grow = hcode_usage("return [zeros([4], \"i64\"), zeros([12], \"i64\")];")
+            - hcode_usage("return [zeros([4], \"i64\"), zeros([8], \"i64\")];");
+        assert_eq!(concat_grow - list_grow, 4);
     }
 
     #[test]

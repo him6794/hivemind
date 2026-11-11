@@ -809,6 +809,62 @@ pub(crate) fn reshape(tensor: &Tensor, shape: Vec<usize>) -> Result<Tensor, Runt
     Tensor::new(shape, tensor.elements.clone())
 }
 
+/// The shape `concat` produces for `tensors`, checked before any storage is
+/// reserved. The tensors must share one dtype and every dimension after the
+/// first; the first dimensions add up.
+pub(crate) fn concat_shape(tensors: &[&Tensor]) -> Result<Vec<usize>, RuntimeError> {
+    let Some((first, rest)) = tensors.split_first() else {
+        return Err(RuntimeError::new(
+            "type_error",
+            "concat expects at least one tensor",
+        ));
+    };
+    let mut shape = first.shape.clone();
+    for tensor in rest {
+        if tensor.dtype() != first.dtype() {
+            return Err(RuntimeError::new(
+                "type_error",
+                "concat expects tensors of one dtype",
+            ));
+        }
+        if tensor.shape[1..] != first.shape[1..] {
+            return Err(RuntimeError::new(
+                "type_error",
+                "concat expects the same dimensions after the first",
+            ));
+        }
+        shape[0] = shape[0]
+            .checked_add(tensor.shape[0])
+            .ok_or_else(value_limit_error)?;
+    }
+    Ok(shape)
+}
+
+/// Joins `tensors` along the first axis into `shape`, which is the result of
+/// [`concat_shape`] for the same tensors.
+pub(crate) fn concat(tensors: &[&Tensor], shape: Vec<usize>) -> Result<Tensor, RuntimeError> {
+    let count = shape_count(&shape)?;
+    let float_output = tensors.first().is_some_and(|first| first.side().is_float());
+    let elements = if float_output {
+        let mut out = Vec::with_capacity(count);
+        for tensor in tensors {
+            if let Elements::F64(values) = &tensor.elements {
+                out.extend_from_slice(values);
+            }
+        }
+        Elements::F64(out)
+    } else {
+        let mut out = Vec::with_capacity(count);
+        for tensor in tensors {
+            if let Elements::I64(values) = &tensor.elements {
+                out.extend_from_slice(values);
+            }
+        }
+        Elements::I64(out)
+    };
+    Tensor::new(shape, elements)
+}
+
 /// Converts between dtypes. Float to int truncates toward zero and fails when
 /// the result is outside the i64 range.
 pub(crate) fn cast(tensor: &Tensor, dtype: DType) -> Result<Tensor, RuntimeError> {
