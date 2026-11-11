@@ -21,7 +21,7 @@ pub const V1_SEMANTICS_MANIFEST_JSON: &str = include_str!("../hcode-semantics.js
 /// SHA-256 of the canonical JSON bytes in [`V1_SEMANTICS_MANIFEST_JSON`],
 /// excluding the file's trailing newline.
 pub const V1_SEMANTICS_MANIFEST_SHA256: &str =
-    "7fdedda6c9efb0aaed074a1568f4fecc5744a42d87e8cdc0ab60f2afd34d0302";
+    "f7593109a627205b49172b9cf38251bc618a4a03d2885829280449390e2dee2e";
 
 /// Versioned metering identity committed by the v1 semantics manifest.
 pub const V1_COST_MODEL_ID: &str = "hcode-execution-cpt-v1";
@@ -2069,6 +2069,7 @@ impl Parser {
 /// not reuse one, because builtins resolve before user functions.
 const HCODE_BUILTIN_NAMES: &[&str] = &[
     "append",
+    "join",
     "keys",
     "len",
     "get",
@@ -2081,6 +2082,7 @@ const HCODE_BUILTIN_NAMES: &[&str] = &[
     "wrapping_sub",
     "wrapping_mul",
     "sort",
+    "split",
     "sqrt",
     "floor",
     "ceil",
@@ -2887,6 +2889,78 @@ impl<'a> Evaluator<'a> {
                 self.charge(count)?;
                 let keys = entries.into_keys().map(Value::String).collect();
                 self.materialize_owned_value(Value::List(keys)).map(Some)
+            }
+            "split" if self.surface.hcode_extensions() => {
+                let [text, separator] = args else {
+                    return Err(RuntimeError::new(
+                        "arity_error",
+                        "split expects 2 arguments",
+                    ));
+                };
+                let Value::String(text) = self.eval_expr(text)? else {
+                    return Err(RuntimeError::new("type_error", "split expects a string"));
+                };
+                let Value::String(separator) = self.eval_expr(separator)? else {
+                    return Err(RuntimeError::new(
+                        "type_error",
+                        "split expects a string separator",
+                    ));
+                };
+                if separator.is_empty() {
+                    return Err(RuntimeError::new(
+                        "runtime_error",
+                        "split separator must not be empty",
+                    ));
+                }
+                // The text is scanned once, one unit per byte. Each piece then costs one unit.
+                let bytes = u64::try_from(text.len())
+                    .map_err(|_| RuntimeError::new("runtime_error", "length is out of range"))?;
+                self.charge(bytes)?;
+                let pieces: Vec<Value> = text
+                    .split(separator.as_str())
+                    .map(|piece| Value::String(piece.to_string()))
+                    .collect();
+                let piece_count = u64::try_from(pieces.len())
+                    .map_err(|_| RuntimeError::new("runtime_error", "length is out of range"))?;
+                self.charge(piece_count)?;
+                self.materialize_owned_value(Value::List(pieces)).map(Some)
+            }
+            "join" if self.surface.hcode_extensions() => {
+                let [list, separator] = args else {
+                    return Err(RuntimeError::new("arity_error", "join expects 2 arguments"));
+                };
+                let Value::List(items) = self.eval_expr(list)? else {
+                    return Err(RuntimeError::new(
+                        "type_error",
+                        "join expects a list of strings",
+                    ));
+                };
+                let Value::String(separator) = self.eval_expr(separator)? else {
+                    return Err(RuntimeError::new(
+                        "type_error",
+                        "join expects a string separator",
+                    ));
+                };
+                let mut texts = Vec::with_capacity(items.len());
+                for item in items {
+                    let Value::String(text) = item else {
+                        return Err(RuntimeError::new(
+                            "type_error",
+                            "join expects a list of strings",
+                        ));
+                    };
+                    texts.push(text);
+                }
+                // One unit per byte of the joined text, counted before the text is built.
+                let separators = texts.len().saturating_sub(1);
+                let bytes =
+                    texts.iter().map(String::len).sum::<usize>() + separator.len() * separators;
+                let bytes = u64::try_from(bytes)
+                    .map_err(|_| RuntimeError::new("runtime_error", "length is out of range"))?;
+                self.charge(bytes)?;
+                let joined = texts.join(separator.as_str());
+                self.materialize_owned_value(Value::String(joined))
+                    .map(Some)
             }
             "abs" if self.surface.numeric_builtins() => {
                 let [arg] = args else {
@@ -4570,6 +4644,56 @@ mod tests {
                 - hcode_usage(&format!("return {entries};"))
         };
         assert_eq!(keys_delta("{\"a\": 1, \"b\": 2}") - keys_delta("{}"), 2);
+    }
+
+    #[test]
+    fn hcode_split_and_join_follow_str_split_for_a_nonempty_separator() {
+        assert_eq!(
+            eval_hcode("return split(\"a,b,,c\", \",\");").unwrap(),
+            "[\"a\",\"b\",\"\",\"c\"]"
+        );
+        assert_eq!(eval_hcode("return split(\"\", \",\");").unwrap(), "[\"\"]");
+        assert_eq!(
+            eval_hcode("return join([\"a\", \"b\"], \", \");").unwrap(),
+            "a, b"
+        );
+        assert_eq!(eval_hcode("return join([], \"-\");").unwrap(), "");
+        assert_eq!(
+            eval_hcode("return join([\"x\", \"y\"], \"\");").unwrap(),
+            "xy"
+        );
+        assert_eq!(
+            eval_hcode("return join(split(\"p-q-r\", \"-\"), \"+\");").unwrap(),
+            "p+q+r"
+        );
+        assert_eq!(
+            hcode_error_code("return split(\"a\", \"\");"),
+            "runtime_error"
+        );
+        assert_eq!(hcode_error_code("return split(1, \",\");"), "type_error");
+        assert_eq!(hcode_error_code("return join([1], \",\");"), "type_error");
+        assert_eq!(
+            hcode_error_code("return join(\"ab\", \",\");"),
+            "type_error"
+        );
+    }
+
+    #[test]
+    fn hcode_split_and_join_charge_bytes_and_pieces() {
+        // split costs one unit per byte of text and one per piece. The call and the arguments cancel out.
+        let split_delta = |text: &str| {
+            hcode_usage(&format!("return split(\"{text}\", \",\");"))
+                - hcode_usage(&format!("return \"{text}\";"))
+        };
+        // "a,b,c" has 5 bytes and 3 pieces. "" has 0 bytes and 1 piece.
+        assert_eq!(split_delta("a,b,c") - split_delta(""), 5 + 3 - 1);
+        // join costs one unit per byte of the joined text.
+        let join_delta = |items: &str| {
+            hcode_usage(&format!("return join({items}, \"-\");"))
+                - hcode_usage(&format!("return {items};"))
+        };
+        // ["ab", "c"] joins to "ab-c", which is 4 bytes. [] joins to "", which is 0.
+        assert_eq!(join_delta("[\"ab\", \"c\"]") - join_delta("[]"), 4);
     }
 
     fn eval_hcode_json(source: &str, input: &str) -> Result<String, String> {

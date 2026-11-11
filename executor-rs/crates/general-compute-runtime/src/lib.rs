@@ -42,7 +42,7 @@ pub const MANAGED_DSL_SEMANTICS_MANIFEST_SHA256: &str =
 pub const MANAGED_DSL_V1_RUNTIME_VERSION: &str = "hcode";
 /// Canonical v1 managed DSL semantics binding.
 pub const MANAGED_DSL_V1_SEMANTICS_MANIFEST_SHA256: &str =
-    "sha256:7fdedda6c9efb0aaed074a1568f4fecc5744a42d87e8cdc0ab60f2afd34d0302";
+    "sha256:f7593109a627205b49172b9cf38251bc618a4a03d2885829280449390e2dee2e";
 pub const MANAGED_DSL_V1_COST_MODEL_VERSION: &str = "hcode-execution-cpt-v1";
 /// Managed DSL cost model with no charge for a task that ends without a certificate. The
 /// cost vectors and per-replica budgets are the v1 ones. Only the settlement outcome changes.
