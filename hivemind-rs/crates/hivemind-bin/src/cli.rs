@@ -7,8 +7,11 @@ use std::time::{Duration, Instant};
 mod artifacts;
 #[path = "cli_check.rs"]
 mod check;
+#[path = "cli_pipeline.rs"]
+mod pipeline;
 
 pub use check::{run_check, CheckCommand};
+pub use pipeline::{run_check as run_pipeline_check, PipelineCommand};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CliCommand {
@@ -18,6 +21,7 @@ pub enum CliCommand {
     Result(TaskLookupCommand),
     Batch(BatchCommand),
     Check(CheckCommand),
+    Pipeline(PipelineCommand),
 }
 
 /// One function run over many inputs. Inputs come one JSON value per line of `inputs_path`.
@@ -100,6 +104,10 @@ pub fn parse_cli_args(args: &[String]) -> Result<CliCommand> {
 
     if command == "check" {
         return Ok(CliCommand::Check(check::parse_check_args(args)?));
+    }
+
+    if command == "pipeline" {
+        return Ok(CliCommand::Pipeline(pipeline::parse_pipeline_args(args)?));
     }
 
     if command != "submit" {
