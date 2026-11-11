@@ -696,6 +696,14 @@ Identity enrollment credential 的 TTL 為 10 分鐘，DB 保存 hash／expiry�
 | GET | `/api/balance` | Bearer／Nodepool owner account |
 | POST | `/api/tasks/quote` | Bearer；只估算保留資源的價格（每台底價 10 CPT，再依資源累加，乘以主機數），不含程式本身的用量；正式 submission 仍重新檢查，`max_cpt` 低於它會被拒絕 |
 | POST | `/api/tasks/dry-run` | Bearer；在 Master 所在電腦以副本相同的限制執行一次 hcode，回傳輸出、單一副本用量，以及足以支付它的最小 `max_cpt`（預設 3 個副本）。不連線 Nodepool、不扣款；是預估，Nodepool 以 Worker 回報結算。最多同時 2 個，超過回 429 |
+| POST | `/api/tokens` | Bearer（登入會話）；建立 API token，明文只回傳一次。預設 90 天，最多 365 天；每個帳號最多 20 個有效 token |
+| GET | `/api/tokens` | Bearer（登入會話）；列出帳號的 token，不含明文 |
+| DELETE | `/api/tokens/{token_id}` | Bearer（登入會話）；撤銷 token，立即失效 |
+| POST | `/api/jobs` | Bearer（任何有效 token）；建立伺服器端 Job：同一個函式套用到最多 1000 筆輸入。每筆與整個 Job 各有上限，由 Nodepool 提交與追蹤，腳本中斷後仍會繼續；每個帳號同時最多 10 個進行中的 Job |
+| GET | `/api/jobs` | Bearer；列出帳號最近 50 個 Job |
+| GET | `/api/jobs/{job_id}` | Bearer；Job 的狀態、各狀態計數、已花費與保留中的上限，等待時會說明原因（`note`） |
+| GET | `/api/jobs/{job_id}/items?offset=0&limit=50` | Bearer；分頁列出每筆的狀態、花費與輸出預覽（最多 4096 字元，完整輸出用 `/api/tasks/{task_id}/log`） |
+| POST | `/api/jobs/{job_id}/cancel` | Bearer；取消 Job：尚未開始的輸入取消，執行中的任務要求停止 |
 | POST | `/api/tasks` | Bearer；建立 task，**不是同步 execution result** |
 | GET | `/api/tasks` | Bearer／owner-scoped task list；沒有獨立 `GET /api/tasks/{task_id}` |
 | GET | `/api/tasks/{task_id}/log` | Bearer／task owner；stored output |
