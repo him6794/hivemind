@@ -307,6 +307,8 @@ JWT secret 不可使用 `CHANGE_ME_IN_PRODUCTION`，service validation 也要求
 | `DATABASE_URL` | PostgreSQL connection string | Nodepool；正式 deployment 需覆寫範例帳密 |
 | `REDIS_URL` | Redis connection string | Nodepool；不可發給下載 client |
 | `JWT_SECRET` | 平台 account token signing secret | Nodepool／Website／all；trim 後至少 32 bytes，不能 default／empty |
+| `ACCOUNT_DAILY_ALLOWANCE_CPT` | 每日免費額度，預設 `0`（關閉） | Nodepool；必須是非負整數，無效時視為關閉並記錄錯誤。只改變帳號餘額，不改變計價 |
+| `ACCOUNT_ALLOWANCE_POOL_FLOOR_CPT` | 系統池保留下限，預設 `100000000` | Nodepool；領取後系統池若會低於此值就拒絕，保護結算與歡迎額度；無效時使用預設值並記錄錯誤 |
 | `WORKER_EXECUTION_PRIVATE_KEY_PEM` | Nodepool Ed25519 signing key；default empty | Nodepool／all 必須提供可解析私鑰 |
 | `WORKER_EXECUTION_PUBLIC_KEY_PEM` | Worker Ed25519 verification key | Self-host 要與 Nodepool matching；可接受 literal `\n` normalization |
 | `NODEPOOL_GRPC_ADDR` | `0.0.0.0:50051` | Listen／舊 connect context；不要拿 wildcard 當 remote target |
@@ -704,6 +706,7 @@ Identity enrollment credential 的 TTL 為 10 分鐘，DB 保存 hash／expiry�
 | GET | `/api/jobs/{job_id}` | Bearer；Job 的狀態、各狀態計數、已花費與保留中的上限，等待時會說明原因（`note`） |
 | GET | `/api/jobs/{job_id}/items?offset=0&limit=50` | Bearer；分頁列出每筆的狀態、花費與輸出預覽（最多 4096 字元，完整輸出用 `/api/tasks/{task_id}/log`） |
 | POST | `/api/jobs/{job_id}/cancel` | Bearer；取消 Job：尚未開始的輸入取消，執行中的任務要求停止 |
+| POST | `/api/allowance/claim` | Bearer（任何有效 token）；領取每日免費額度。Nodepool 未設定 `ACCOUNT_DAILY_ALLOWANCE_CPT` 時不提供；每個帳號每 24 小時一次，額度從系統池撥出。未開放、已領取或系統池低於下限時回 409，`message` 說明原因 |
 | POST | `/api/tasks` | Bearer；建立 task，**不是同步 execution result** |
 | GET | `/api/tasks` | Bearer／owner-scoped task list；沒有獨立 `GET /api/tasks/{task_id}` |
 | GET | `/api/tasks/{task_id}/log` | Bearer／task owner；stored output |
