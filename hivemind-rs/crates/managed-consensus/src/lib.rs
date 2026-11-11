@@ -3,6 +3,8 @@ use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use thiserror::Error;
 
+pub mod spot_check;
+
 /// Version of the Nodepool-coordinated managed execution quorum protocol.
 pub const CONSENSUS_PROTOCOL_VERSION: u16 = 1;
 /// Evidence produced by this crate means agreement between authenticated Workers,
