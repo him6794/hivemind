@@ -1,30 +1,33 @@
 #![allow(clippy::result_large_err)]
 
+use hivemind_proto::job_service_client::JobServiceClient;
 use hivemind_proto::{
     general_compute_artifact_service_client::GeneralComputeArtifactServiceClient,
     master_node_service_client::MasterNodeServiceClient,
     node_manager_service_client::NodeManagerServiceClient, user_service_client::UserServiceClient,
-    CleanupAdminArtifactsRequest, CleanupAdminArtifactsResponse, CreateApiTokenRequest,
-    CreateApiTokenResponse, DownloadTaskArtifactRequest, DownloadTaskArtifactResponse,
+    CancelJobRequest, CancelJobResponse, CleanupAdminArtifactsRequest,
+    CleanupAdminArtifactsResponse, CreateApiTokenRequest, CreateApiTokenResponse, CreateJobRequest,
+    CreateJobResponse, DownloadTaskArtifactRequest, DownloadTaskArtifactResponse,
     GeneralComputeArtifactChunkUpload, GeneralComputeArtifactChunkUploadResponse,
     GetAdminArtifactOverviewRequest, GetAdminArtifactOverviewResponse,
     GetAdminBillingOverviewRequest, GetAdminBillingOverviewResponse,
     GetAdminSchedulingCacheAlertRequest, GetAdminSchedulingCacheAlertResponse,
     GetAdminSchedulingCacheMetricsRequest, GetAdminSchedulingCacheMetricsResponse,
     GetAllUserTasksRequest, GetAllUserTasksResponse, GetBalanceRequest, GetBalanceResponse,
-    GetProviderEarningsRequest, GetProviderEarningsResponse, GetProviderWorkerSettingsRequest,
-    GetProviderWorkerSettingsResponse, GetTaskResultRequest, GetTaskResultResponse,
-    GetWorkerTrustProfileRequest, GetWorkerTrustProfileResponse, ListAdminAuditLogsRequest,
-    ListAdminAuditLogsResponse, ListAdminSchedulingCacheAnomaliesRequest,
-    ListAdminSchedulingCacheAnomaliesResponse, ListAdminWorkerTrustRequest,
-    ListAdminWorkerTrustResponse, ListApiTokensRequest, ListApiTokensResponse, ListWorkersRequest,
-    ListWorkersResponse, LoginRequest, LoginResponse, QuoteTaskRequest, QuoteTaskResponse,
-    RegisterUserRequest, RegisterUserResponse, RegisterWorkerNodeRequest, RemoveWorkerRequest,
-    ResourceSpec as ProtoResourceSpec, RevokeApiTokenRequest, RevokeApiTokenResponse,
-    StatusResponse, StopTaskRequest, StopTaskResponse, TasklogRequest, TasklogResponse,
-    UpdateProviderWorkerSettingsRequest, UpdateProviderWorkerSettingsResponse,
-    UpdateWorkerTrustControlRequest, UpdateWorkerTrustControlResponse, UploadTaskRequest,
-    UploadTaskResponse,
+    GetJobRequest, GetJobResponse, GetProviderEarningsRequest, GetProviderEarningsResponse,
+    GetProviderWorkerSettingsRequest, GetProviderWorkerSettingsResponse, GetTaskResultRequest,
+    GetTaskResultResponse, GetWorkerTrustProfileRequest, GetWorkerTrustProfileResponse,
+    ListAdminAuditLogsRequest, ListAdminAuditLogsResponse,
+    ListAdminSchedulingCacheAnomaliesRequest, ListAdminSchedulingCacheAnomaliesResponse,
+    ListAdminWorkerTrustRequest, ListAdminWorkerTrustResponse, ListApiTokensRequest,
+    ListApiTokensResponse, ListJobItemsRequest, ListJobItemsResponse, ListJobsRequest,
+    ListJobsResponse, ListWorkersRequest, ListWorkersResponse, LoginRequest, LoginResponse,
+    QuoteTaskRequest, QuoteTaskResponse, RegisterUserRequest, RegisterUserResponse,
+    RegisterWorkerNodeRequest, RemoveWorkerRequest, ResourceSpec as ProtoResourceSpec,
+    RevokeApiTokenRequest, RevokeApiTokenResponse, StatusResponse, StopTaskRequest,
+    StopTaskResponse, TasklogRequest, TasklogResponse, UpdateProviderWorkerSettingsRequest,
+    UpdateProviderWorkerSettingsResponse, UpdateWorkerTrustControlRequest,
+    UpdateWorkerTrustControlResponse, UploadTaskRequest, UploadTaskResponse,
 };
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -38,6 +41,21 @@ struct ConnectedClients {
     master: MasterNodeServiceClient<Channel>,
     node_mgr: NodeManagerServiceClient<Channel>,
     artifact: GeneralComputeArtifactServiceClient<Channel>,
+    job: JobServiceClient<Channel>,
+}
+
+/// The resource and budget fields of a job, as the client sends them.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct JobSpec {
+    pub per_item_max_cpt: i64,
+    pub job_max_cpt: i64,
+    pub replica_count: u32,
+    pub cpu_score: i32,
+    pub gpu_score: i32,
+    pub memory_gb: i64,
+    pub gpu_memory_gb: i64,
+    pub storage_gb: i64,
+    pub host_count: i32,
 }
 
 /// Lazy nodepool gRPC client for user-deployed masters.
@@ -104,6 +122,9 @@ impl GrpcClient {
                 .max_decoding_message_size(max_msg)
                 .max_encoding_message_size(max_msg),
             node_mgr: NodeManagerServiceClient::new(channel.clone()),
+            job: JobServiceClient::new(channel.clone())
+                .max_decoding_message_size(max_msg)
+                .max_encoding_message_size(max_msg),
             artifact: GeneralComputeArtifactServiceClient::new(channel)
                 .max_decoding_message_size(
                     hivemind_proto::GENERAL_COMPUTE_CHUNK_RPC_MESSAGE_MAX_BYTES,
@@ -221,6 +242,111 @@ impl GrpcClient {
             .await
             .map_err(|_| Status::deadline_exceeded("nodepool login timed out after 10 seconds"))?
             .map(|r| r.into_inner())
+        })
+        .await
+    }
+
+    pub async fn create_job(
+        &mut self,
+        token: &str,
+        name: &str,
+        source: &str,
+        inputs: Vec<String>,
+        spec: JobSpec,
+    ) -> Result<CreateJobResponse, tonic::Status> {
+        let token = token.to_string();
+        let name = name.to_string();
+        let source = source.to_string();
+        self.with_clients(|mut clients| async move {
+            clients
+                .job
+                .create_job(Request::new(CreateJobRequest {
+                    token,
+                    name,
+                    source,
+                    inputs,
+                    per_item_max_cpt: spec.per_item_max_cpt,
+                    job_max_cpt: spec.job_max_cpt,
+                    replica_count: spec.replica_count,
+                    cpu_score: spec.cpu_score,
+                    gpu_score: spec.gpu_score,
+                    memory_gb: spec.memory_gb,
+                    gpu_memory_gb: spec.gpu_memory_gb,
+                    storage_gb: spec.storage_gb,
+                    host_count: spec.host_count,
+                }))
+                .await
+                .map(|r| r.into_inner())
+        })
+        .await
+    }
+
+    pub async fn get_job(
+        &mut self,
+        token: &str,
+        job_id: &str,
+    ) -> Result<GetJobResponse, tonic::Status> {
+        let token = token.to_string();
+        let job_id = job_id.to_string();
+        self.with_clients(|mut clients| async move {
+            clients
+                .job
+                .get_job(Request::new(GetJobRequest { token, job_id }))
+                .await
+                .map(|r| r.into_inner())
+        })
+        .await
+    }
+
+    pub async fn list_jobs(&mut self, token: &str) -> Result<ListJobsResponse, tonic::Status> {
+        let token = token.to_string();
+        self.with_clients(|mut clients| async move {
+            clients
+                .job
+                .list_jobs(Request::new(ListJobsRequest { token }))
+                .await
+                .map(|r| r.into_inner())
+        })
+        .await
+    }
+
+    pub async fn list_job_items(
+        &mut self,
+        token: &str,
+        job_id: &str,
+        offset: i64,
+        limit: i64,
+    ) -> Result<ListJobItemsResponse, tonic::Status> {
+        let token = token.to_string();
+        let job_id = job_id.to_string();
+        self.with_clients(|mut clients| async move {
+            clients
+                .job
+                .list_job_items(Request::new(ListJobItemsRequest {
+                    token,
+                    job_id,
+                    offset,
+                    limit,
+                }))
+                .await
+                .map(|r| r.into_inner())
+        })
+        .await
+    }
+
+    pub async fn cancel_job(
+        &mut self,
+        token: &str,
+        job_id: &str,
+    ) -> Result<CancelJobResponse, tonic::Status> {
+        let token = token.to_string();
+        let job_id = job_id.to_string();
+        self.with_clients(|mut clients| async move {
+            clients
+                .job
+                .cancel_job(Request::new(CancelJobRequest { token, job_id }))
+                .await
+                .map(|r| r.into_inner())
         })
         .await
     }

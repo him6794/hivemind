@@ -9,6 +9,9 @@ use axum::{
 };
 use tower_http::cors::{AllowOrigin, CorsLayer};
 
+/// A job's inputs travel in one request: up to 16 MiB of values, plus the JSON around them.
+pub const JOB_CREATE_BODY_MAX_BYTES: usize = 32 * 1024 * 1024;
+
 pub fn create_router(state: AppState) -> Router {
     let cors = build_cors_layer(&state.config.server.master_cors_allowed_origins);
 
@@ -77,6 +80,21 @@ pub fn create_router(state: AppState) -> Router {
         .route(
             "/api/tokens/:token_id",
             delete(super::handlers::revoke_api_token),
+        )
+        .route(
+            "/api/jobs",
+            post(super::handlers::create_job)
+                .layer(DefaultBodyLimit::max(JOB_CREATE_BODY_MAX_BYTES)),
+        )
+        .route("/api/jobs", get(super::handlers::list_jobs))
+        .route("/api/jobs/:job_id", get(super::handlers::get_job))
+        .route(
+            "/api/jobs/:job_id/items",
+            get(super::handlers::list_job_items),
+        )
+        .route(
+            "/api/jobs/:job_id/cancel",
+            post(super::handlers::cancel_job),
         )
         .route("/api/tasks/quote", post(super::handlers::quote_task))
         .route(

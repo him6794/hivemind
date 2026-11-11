@@ -13,7 +13,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use crate::grpc_client::GrpcClient;
+use crate::grpc_client::{GrpcClient, JobSpec};
 use crate::middleware::AuthUser;
 
 // ---- Shared App State ----
@@ -1586,6 +1586,382 @@ pub async fn revoke_api_token(
         Err(status) => (
             token_status_code(&status),
             Json(ApiTokenStatusResponse {
+                success: false,
+                message: status.message().to_string(),
+            }),
+        ),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CreateJobBody {
+    #[serde(default)]
+    pub name: String,
+    pub task_source: String,
+    /// One JSON value per item. Each value is sent as the input of one task.
+    pub inputs: Vec<serde_json::Value>,
+    #[serde(default)]
+    pub per_item_max_cpt: i64,
+    /// Zero means per_item_max_cpt times the number of inputs.
+    #[serde(default)]
+    pub job_max_cpt: i64,
+    /// Zero means the network's default replica count.
+    #[serde(default)]
+    pub replica_count: u32,
+    #[serde(default)]
+    pub cpu_score: i32,
+    #[serde(default)]
+    pub gpu_score: i32,
+    #[serde(default)]
+    pub memory_gb: i64,
+    #[serde(default)]
+    pub gpu_memory_gb: i64,
+    #[serde(default)]
+    pub storage_gb: i64,
+    #[serde(default)]
+    pub host_count: i32,
+}
+
+#[derive(Debug, Serialize)]
+pub struct JobCreatedResponse {
+    pub success: bool,
+    pub message: String,
+    pub job_id: String,
+    pub item_count: i64,
+    pub job_max_cpt: i64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct JobBody {
+    pub job_id: String,
+    pub name: String,
+    pub state: String,
+    pub note: String,
+    pub item_count: i64,
+    pub pending: i64,
+    pub submitted: i64,
+    pub completed: i64,
+    pub failed: i64,
+    pub refused: i64,
+    pub cancelled: i64,
+    pub spent_cpt: i64,
+    pub reserved_cpt: i64,
+    pub per_item_max_cpt: i64,
+    pub job_max_cpt: i64,
+    pub created_at: String,
+    pub updated_at: String,
+    pub finished_at: String,
+}
+
+fn job_body(job: hivemind_proto::JobView) -> JobBody {
+    JobBody {
+        job_id: job.job_id,
+        name: job.name,
+        state: job.state,
+        note: job.note,
+        item_count: job.item_count,
+        pending: job.pending,
+        submitted: job.submitted,
+        completed: job.completed,
+        failed: job.failed,
+        refused: job.refused,
+        cancelled: job.cancelled,
+        spent_cpt: job.spent_cpt,
+        reserved_cpt: job.reserved_cpt,
+        per_item_max_cpt: job.per_item_max_cpt,
+        job_max_cpt: job.job_max_cpt,
+        created_at: job.created_at,
+        updated_at: job.updated_at,
+        finished_at: job.finished_at,
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub struct JobItemBody {
+    pub index: i64,
+    pub task_id: String,
+    pub state: String,
+    pub max_cpt: i64,
+    pub billed_cpt: i64,
+    /// The first part of the output. The task's log has all of it.
+    pub output_preview: String,
+    pub output_bytes: i64,
+    pub output_truncated: bool,
+    pub status_message: String,
+    pub input_bytes: i64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct JobStatusResponse {
+    pub success: bool,
+    pub message: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct JobGetResponse {
+    pub success: bool,
+    pub message: String,
+    pub job: Option<JobBody>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct JobListResponse {
+    pub success: bool,
+    pub message: String,
+    pub jobs: Vec<JobBody>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct JobItemsResponse {
+    pub success: bool,
+    pub message: String,
+    pub total: i64,
+    pub items: Vec<JobItemBody>,
+}
+
+/// POST /api/jobs
+pub async fn create_job(
+    State(state): State<AppState>,
+    AuthUser { token, .. }: AuthUser,
+    Json(body): Json<CreateJobBody>,
+) -> (StatusCode, Json<JobCreatedResponse>) {
+    let inputs: Vec<String> = match body
+        .inputs
+        .iter()
+        .map(serde_json::to_string)
+        .collect::<Result<Vec<_>, _>>()
+    {
+        Ok(inputs) => inputs,
+        Err(error) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(JobCreatedResponse {
+                    success: false,
+                    message: format!("inputs are not JSON: {error}"),
+                    job_id: String::new(),
+                    item_count: 0,
+                    job_max_cpt: 0,
+                }),
+            )
+        }
+    };
+    let spec = JobSpec {
+        per_item_max_cpt: body.per_item_max_cpt,
+        job_max_cpt: body.job_max_cpt,
+        replica_count: body.replica_count,
+        cpu_score: body.cpu_score,
+        gpu_score: body.gpu_score,
+        memory_gb: body.memory_gb,
+        gpu_memory_gb: body.gpu_memory_gb,
+        storage_gb: body.storage_gb,
+        host_count: body.host_count,
+    };
+    let mut grpc = state.grpc_client.clone();
+    match grpc
+        .create_job(&token, &body.name, &body.task_source, inputs, spec)
+        .await
+    {
+        Ok(resp) if resp.success => (
+            StatusCode::CREATED,
+            Json(JobCreatedResponse {
+                success: true,
+                message: resp.status_message,
+                job_id: resp.job_id,
+                item_count: resp.item_count,
+                job_max_cpt: resp.job_max_cpt,
+            }),
+        ),
+        Ok(resp) => (
+            StatusCode::BAD_REQUEST,
+            Json(JobCreatedResponse {
+                success: false,
+                message: resp.status_message,
+                job_id: String::new(),
+                item_count: 0,
+                job_max_cpt: 0,
+            }),
+        ),
+        Err(status) => (
+            token_status_code(&status),
+            Json(JobCreatedResponse {
+                success: false,
+                message: status.message().to_string(),
+                job_id: String::new(),
+                item_count: 0,
+                job_max_cpt: 0,
+            }),
+        ),
+    }
+}
+
+/// GET /api/jobs
+pub async fn list_jobs(
+    State(state): State<AppState>,
+    AuthUser { token, .. }: AuthUser,
+) -> (StatusCode, Json<JobListResponse>) {
+    let mut grpc = state.grpc_client.clone();
+    match grpc.list_jobs(&token).await {
+        Ok(resp) => (
+            StatusCode::OK,
+            Json(JobListResponse {
+                success: resp.success,
+                message: resp.status_message,
+                jobs: resp.jobs.into_iter().map(job_body).collect(),
+            }),
+        ),
+        Err(status) => (
+            token_status_code(&status),
+            Json(JobListResponse {
+                success: false,
+                message: status.message().to_string(),
+                jobs: Vec::new(),
+            }),
+        ),
+    }
+}
+
+/// GET /api/jobs/:job_id
+pub async fn get_job(
+    State(state): State<AppState>,
+    AuthUser { token, .. }: AuthUser,
+    AxumPath(job_id): AxumPath<String>,
+) -> (StatusCode, Json<JobGetResponse>) {
+    let mut grpc = state.grpc_client.clone();
+    match grpc.get_job(&token, &job_id).await {
+        Ok(resp) if resp.success => (
+            StatusCode::OK,
+            Json(JobGetResponse {
+                success: true,
+                message: resp.status_message,
+                job: resp.job.map(job_body),
+            }),
+        ),
+        Ok(resp) => (
+            StatusCode::NOT_FOUND,
+            Json(JobGetResponse {
+                success: false,
+                message: resp.status_message,
+                job: None,
+            }),
+        ),
+        Err(status) => (
+            token_status_code(&status),
+            Json(JobGetResponse {
+                success: false,
+                message: status.message().to_string(),
+                job: None,
+            }),
+        ),
+    }
+}
+
+/// GET /api/jobs/:job_id/items?offset=0&limit=50
+pub async fn list_job_items(
+    State(state): State<AppState>,
+    AuthUser { token, .. }: AuthUser,
+    AxumPath(job_id): AxumPath<String>,
+    Query(query): Query<HashMap<String, String>>,
+) -> (StatusCode, Json<JobItemsResponse>) {
+    let refuse = |message: String| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(JobItemsResponse {
+                success: false,
+                message,
+                total: 0,
+                items: Vec::new(),
+            }),
+        )
+    };
+    let parse = |key: &str, default: i64| -> Result<i64, String> {
+        match query.get(key) {
+            None => Ok(default),
+            Some(value) => value
+                .parse::<i64>()
+                .map_err(|_| format!("{key} must be a whole number")),
+        }
+    };
+    let offset = match parse("offset", 0) {
+        Ok(offset) if offset >= 0 => offset,
+        Ok(_) => return refuse("offset must not be negative".into()),
+        Err(message) => return refuse(message),
+    };
+    let limit = match parse("limit", 50) {
+        Ok(limit) => limit,
+        Err(message) => return refuse(message),
+    };
+    let mut grpc = state.grpc_client.clone();
+    match grpc.list_job_items(&token, &job_id, offset, limit).await {
+        Ok(resp) if resp.success => (
+            StatusCode::OK,
+            Json(JobItemsResponse {
+                success: true,
+                message: resp.status_message,
+                total: resp.total,
+                items: resp
+                    .items
+                    .into_iter()
+                    .map(|item| JobItemBody {
+                        index: item.index,
+                        task_id: item.task_id,
+                        state: item.state,
+                        max_cpt: item.max_cpt,
+                        billed_cpt: item.billed_cpt,
+                        output_preview: item.output_preview,
+                        output_bytes: item.output_bytes,
+                        output_truncated: item.output_truncated,
+                        status_message: item.status_message,
+                        input_bytes: item.input_bytes,
+                    })
+                    .collect(),
+            }),
+        ),
+        Ok(resp) => (
+            StatusCode::NOT_FOUND,
+            Json(JobItemsResponse {
+                success: false,
+                message: resp.status_message,
+                total: 0,
+                items: Vec::new(),
+            }),
+        ),
+        Err(status) => (
+            token_status_code(&status),
+            Json(JobItemsResponse {
+                success: false,
+                message: status.message().to_string(),
+                total: 0,
+                items: Vec::new(),
+            }),
+        ),
+    }
+}
+
+/// POST /api/jobs/:job_id/cancel
+pub async fn cancel_job(
+    State(state): State<AppState>,
+    AuthUser { token, .. }: AuthUser,
+    AxumPath(job_id): AxumPath<String>,
+) -> (StatusCode, Json<JobStatusResponse>) {
+    let mut grpc = state.grpc_client.clone();
+    match grpc.cancel_job(&token, &job_id).await {
+        Ok(resp) if resp.success => (
+            StatusCode::OK,
+            Json(JobStatusResponse {
+                success: true,
+                message: resp.status_message,
+            }),
+        ),
+        Ok(resp) => (
+            StatusCode::CONFLICT,
+            Json(JobStatusResponse {
+                success: false,
+                message: resp.status_message,
+            }),
+        ),
+        Err(status) => (
+            token_status_code(&status),
+            Json(JobStatusResponse {
                 success: false,
                 message: status.message().to_string(),
             }),

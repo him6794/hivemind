@@ -316,6 +316,17 @@ mod api_token_gate_tests {
             ("POST", "/api/tokens"),
             ("GET", "/api/tokens"),
             ("DELETE", "/api/tokens/00000000-0000-0000-0000-000000000000"),
+            ("POST", "/api/jobs"),
+            ("GET", "/api/jobs"),
+            ("GET", "/api/jobs/00000000-0000-0000-0000-000000000000"),
+            (
+                "GET",
+                "/api/jobs/00000000-0000-0000-0000-000000000000/items",
+            ),
+            (
+                "POST",
+                "/api/jobs/00000000-0000-0000-0000-000000000000/cancel",
+            ),
         ] {
             let response = app
                 .clone()
