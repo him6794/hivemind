@@ -3058,7 +3058,7 @@ impl GrpcMasterNodeService {
         if !is_safe_task_id(task_id) {
             return Err(Status::invalid_argument("Invalid task_id"));
         }
-        match self.state.scheduler.get_task(&task_id).await {
+        match self.state.scheduler.get_task(task_id).await {
             Ok(Some(t)) if t.owner != owner => {
                 return Ok(Response::new(StopTaskResponse {
                     success: false,
@@ -3077,19 +3077,19 @@ impl GrpcMasterNodeService {
         let consensus_attempt = self
             .state
             .scheduler
-            .managed_consensus_attempt_for_task(&task_id)
+            .managed_consensus_attempt_for_task(task_id)
             .await
             .map_err(|error| Status::internal(error.to_string()))?;
         let consensus_targets = if let Some(attempt) = consensus_attempt {
             self.state
                 .scheduler
-                .managed_consensus_stop_targets(&task_id, attempt.id)
+                .managed_consensus_stop_targets(task_id, attempt.id)
                 .await
                 .map_err(|error| Status::internal(error.to_string()))?
         } else {
             Vec::new()
         };
-        match self.state.scheduler.cancel_task(&task_id).await {
+        match self.state.scheduler.cancel_task(task_id).await {
             Ok(task) => {
                 if let Some(dispatcher) = self.state.dispatcher.as_ref() {
                     dispatcher.cancel_session_delivery(&task);

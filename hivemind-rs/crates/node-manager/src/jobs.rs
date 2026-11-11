@@ -7,6 +7,8 @@
 //! Spend is bounded by the job's cap. Each submitted item reserves its own cap until its task ends, and an item
 //! is submitted only when the finished spend, the reserved caps, and its own cap fit under the job's cap.
 
+#![allow(clippy::result_large_err, reason = "gRPC uses tonic::Status")]
+
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -371,16 +373,15 @@ async fn sync_submitted(tx: &mut Transaction<'_, Postgres>, job: &JobRow) -> Res
         .map(|(_, task_id, _)| task_id.clone())
         .collect();
     // `output` and `status_message` are nullable on tasks, so they are read as options.
-    let tasks: Vec<(String, String, Option<String>, i64, Option<String>)> = sqlx::query_as(
+    type TaskRow = (String, String, Option<String>, i64, Option<String>);
+    let tasks: Vec<TaskRow> = sqlx::query_as(
         "SELECT task_id, status, output, billed_amount, status_message FROM tasks WHERE task_id = ANY($1)",
     )
     .bind(&task_ids)
     .fetch_all(&mut **tx)
     .await?;
-    let by_id: std::collections::HashMap<
-        &str,
-        &(String, String, Option<String>, i64, Option<String>),
-    > = tasks.iter().map(|task| (task.0.as_str(), task)).collect();
+    let by_id: std::collections::HashMap<&str, &TaskRow> =
+        tasks.iter().map(|task| (task.0.as_str(), task)).collect();
     for (index, task_id, submitted_at) in &submitted {
         let Some(task) = by_id.get(task_id.as_str()) else {
             // The task is created before the submission is recorded, so a missing task means it was lost.
