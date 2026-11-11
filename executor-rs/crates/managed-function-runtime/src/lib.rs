@@ -21,7 +21,7 @@ pub const V1_SEMANTICS_MANIFEST_JSON: &str = include_str!("../hcode-semantics.js
 /// SHA-256 of the canonical JSON bytes in [`V1_SEMANTICS_MANIFEST_JSON`],
 /// excluding the file's trailing newline.
 pub const V1_SEMANTICS_MANIFEST_SHA256: &str =
-    "abf54dc1c6f9a4d709044def6fbe32775264a17a6d64a6e350655c00a4020340";
+    "7fdedda6c9efb0aaed074a1568f4fecc5744a42d87e8cdc0ab60f2afd34d0302";
 
 /// Versioned metering identity committed by the v1 semantics manifest.
 pub const V1_COST_MODEL_ID: &str = "hcode-execution-cpt-v1";
@@ -2069,6 +2069,7 @@ impl Parser {
 /// not reuse one, because builtins resolve before user functions.
 const HCODE_BUILTIN_NAMES: &[&str] = &[
     "append",
+    "keys",
     "len",
     "get",
     "contains",
@@ -2872,6 +2873,20 @@ impl<'a> Evaluator<'a> {
                 self.charge(cost)?;
                 sort_hcode_values(&mut values)?;
                 self.materialize_owned_value(Value::List(values)).map(Some)
+            }
+            "keys" if self.surface.hcode_extensions() => {
+                let [dict] = args else {
+                    return Err(RuntimeError::new("arity_error", "keys expects 1 argument"));
+                };
+                let Value::Dict(entries) = self.eval_expr(dict)? else {
+                    return Err(RuntimeError::new("type_error", "keys expects a dict"));
+                };
+                // One unit per key, charged before the list is built.
+                let count = u64::try_from(entries.len())
+                    .map_err(|_| RuntimeError::new("runtime_error", "length is out of range"))?;
+                self.charge(count)?;
+                let keys = entries.into_keys().map(Value::String).collect();
+                self.materialize_owned_value(Value::List(keys)).map(Some)
             }
             "abs" if self.surface.numeric_builtins() => {
                 let [arg] = args else {
@@ -4526,6 +4541,35 @@ mod tests {
             usage(&format!("return append({items}, 0);")) - usage(&format!("return {items};"))
         };
         assert_eq!(append_delta("[1, 2]") - append_delta("[]"), 2);
+    }
+
+    fn hcode_usage(source: &str) -> u64 {
+        ManagedExecutor
+            .execute_json_input(
+                source,
+                ExecutionLimits::for_managed_function_budget(u64::MAX),
+                "null",
+            )
+            .expect("the source must succeed")
+            .receipt
+            .usage_units
+    }
+
+    #[test]
+    fn hcode_keys_lists_a_dicts_keys_in_sorted_order() {
+        assert_eq!(
+            eval_hcode("return keys({\"b\": 1, \"a\": 2, \"B\": 3});").unwrap(),
+            "[\"B\",\"a\",\"b\"]"
+        );
+        assert_eq!(eval_hcode("return keys({});").unwrap(), "[]");
+        assert_eq!(hcode_error_code("return keys([1]);"), "type_error");
+        assert_eq!(hcode_error_code("return keys({}, 1);"), "arity_error");
+        // One unit per key. The call and the dict literal cancel out, so the empty dict is the baseline.
+        let keys_delta = |entries: &str| {
+            hcode_usage(&format!("return keys({entries});"))
+                - hcode_usage(&format!("return {entries};"))
+        };
+        assert_eq!(keys_delta("{\"a\": 1, \"b\": 2}") - keys_delta("{}"), 2);
     }
 
     fn eval_hcode_json(source: &str, input: &str) -> Result<String, String> {
