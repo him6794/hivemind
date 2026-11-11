@@ -72,3 +72,45 @@
 | 更新通道 | 託管位置與金鑰 |
 | Linux Worker | Linux 實機端到端環境 |
 | P2P 接線 | 第二台主機 |
+
+## 完成狀態與驗證（2026-11-11）
+
+本階段的提交都在本機，尚未推送，也沒有部署。
+
+| 項目 | 狀態 | 提交（由舊到新） |
+|---|---|---|
+| 1. Job、API token、Python SDK | 完成 | `ec056304`（token）、`362b1541`（Nodepool job）、`aa162bc3`（clippy 修正）、`e213e06d`（Master 路由）、`12076c5d`（SDK）、`7e5314c7`（文件）、`471a3303`（site 測試） |
+| 2. 定期免費額度 | 完成，預設關閉；向量化計價擱置 | `acfc10e2`、`a9d567a1` |
+| 3. 預設副本數 | 維持 3，不改預設 | 無程式變更 |
+| 4. 抽樣重算 | 純函式完成；未接入派工 | `de381757` |
+| 5. hcode 語言 | 五項各自提交：註解、while／break／continue／if、append／sort、keys、split／join | `0bb62056`、`b238a618`、`1b1482db`、`2bed6de7`、`d47a18d0`；文件 `a51204ed` |
+
+### 驗證（最終樹）
+
+- hivemind-rs：`cargo fmt --all -- --check` 通過；`hivemind-bin` check 通過；node-manager 192 通過（連接 DB、序列執行）；master-api 71 通過；worker-executor 190 通過。
+- 受影響 crate 的 clippy `-D warnings` 在各自提交時通過（database、node-manager、master-api、hivemind-bin、managed-consensus、managed-function-runtime）。
+- executor-rs：managed-function-runtime 與 general-compute-runtime 的全部測試通過，每個語言提交都重新執行。
+- 網站 104 通過；master-ui 98 通過；Python SDK 15 通過。
+
+### 設計決定
+
+- 為了讓 `break`、`continue` 能夠條件式使用，一併加入語句形式的 `if`。語句開頭的 `if` 先以語句讀取，失敗時回退為既有的運算式讀取，因此既有程式的含義不變。
+- `while`、`break`、`continue`、註解與新 builtin 只在 CPU hcode 生效；frozen v0 不變。新 builtin 名稱加入保留名稱，使用者的 `fn` 不能使用同名（repo 內沒有此類程式）。
+- Job：每個帳號同時最多 10 個進行中的 Job。原計畫未列，已寫入手冊。
+- SDK 方法名稱為 `iter_job_items`、`jobs`、`task_log`，草稿中的 `list_items` 改名。
+- 免費額度：API token 可以領取；所有拒絕都回 409，原因放在 `message`。
+- 抽樣：`classify` 與憑證中的 `output_digest` 比對；只有 `Verified` 可以顯示為已驗證。
+- 語意摘要（v1 digest）每個語言提交都會改變。目前為 `f7593109a627…`，同步寫在八個檔案與 master console 的 12 字元前綴。Worker 與 Nodepool 必須同版建置與升級。
+
+### 審查
+
+`codex_status` 顯示 Codex 未登入。依規則不代為登入，改為自我審查；獨立審查尚未進行，需要使用者登入 Codex 後再補。
+
+### 未完成或擱置
+
+- 向量化計價：Gate 1、Gate 2 仍需決定，未實作。
+- 免費額度金額與系統池預算：由營運者決定，預設 0（關閉）。
+- 抽樣接入派工：驗證節點位置與付款規則尚未決定。
+- 程式碼簽章與更新通道：缺簽章憑證與託管位置。
+- Linux headless Worker 的端到端驗證：需要 Linux 實機與 Headscale overlay，且要把新版 Nodepool 部署到 Orange Pi、讓 Linux Worker 加入 overlay。部署是對外動作，未經使用者確認不做。
+- P2P 跨主機接線：需要第二台主機。
