@@ -2044,6 +2044,11 @@ async fn run_migrations_inner(pool: &PgPool) -> Result<()> {
         .execute(&mut *tx)
         .await?;
 
+    // The time of the account's last allowance claim. Null until the first claim.
+    sqlx::query("ALTER TABLE users ADD COLUMN IF NOT EXISTS last_allowance_at TIMESTAMPTZ;")
+        .execute(&mut *tx)
+        .await?;
+
     // Server-side jobs. A job owns its items; each item becomes one task when Nodepool submits it. The
     // runner advances jobs in transactions that lock the job row, so two Nodepool processes cannot submit the
     // same item twice.

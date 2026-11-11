@@ -193,6 +193,18 @@ message RevokeApiTokenResponse {
     bool success = 1;
     string status_message = 2;
 }
+// The recurring CPT allowance from the system pool. It is off unless the operator configures an amount.
+message ClaimDailyAllowanceRequest {
+    string token = 1;
+}
+message ClaimDailyAllowanceResponse {
+    bool success = 1;
+    string status_message = 2;
+    int64 granted_cpt = 3;
+    int64 balance = 4;
+    // When the account may claim again, as RFC 3339 text. Empty when the claim was granted or is unavailable.
+    string next_claim_at = 5;
+}
 // Whether the address has verified ownership or an unexpired unverified reservation.
 message CheckEmailRequest {
     string email = 1;
@@ -1457,6 +1469,7 @@ service UserService {
     rpc CreateApiToken(CreateApiTokenRequest) returns (CreateApiTokenResponse);
     rpc ListApiTokens(ListApiTokensRequest) returns (ListApiTokensResponse);
     rpc RevokeApiToken(RevokeApiTokenRequest) returns (RevokeApiTokenResponse);
+    rpc ClaimDailyAllowance(ClaimDailyAllowanceRequest) returns (ClaimDailyAllowanceResponse);
 }
 
 service NodeManagerService {

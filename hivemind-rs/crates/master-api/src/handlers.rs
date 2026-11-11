@@ -1969,6 +1969,55 @@ pub async fn cancel_job(
     }
 }
 
+#[derive(Debug, Serialize)]
+pub struct AllowanceClaimResponse {
+    pub success: bool,
+    pub message: String,
+    pub granted_cpt: i64,
+    pub balance: i64,
+    pub next_claim_at: String,
+}
+
+/// POST /api/allowance/claim
+pub async fn claim_allowance(
+    State(state): State<AppState>,
+    AuthUser { token, .. }: AuthUser,
+) -> (StatusCode, Json<AllowanceClaimResponse>) {
+    let mut grpc = state.grpc_client.clone();
+    match grpc.claim_daily_allowance(&token).await {
+        Ok(resp) if resp.success => (
+            StatusCode::OK,
+            Json(AllowanceClaimResponse {
+                success: true,
+                message: resp.status_message,
+                granted_cpt: resp.granted_cpt,
+                balance: resp.balance,
+                next_claim_at: resp.next_claim_at,
+            }),
+        ),
+        Ok(resp) => (
+            StatusCode::CONFLICT,
+            Json(AllowanceClaimResponse {
+                success: false,
+                message: resp.status_message,
+                granted_cpt: 0,
+                balance: 0,
+                next_claim_at: resp.next_claim_at,
+            }),
+        ),
+        Err(status) => (
+            token_status_code(&status),
+            Json(AllowanceClaimResponse {
+                success: false,
+                message: status.message().to_string(),
+                granted_cpt: 0,
+                balance: 0,
+                next_claim_at: String::new(),
+            }),
+        ),
+    }
+}
+
 /// POST /api/tasks
 pub async fn create_task(
     State(state): State<AppState>,

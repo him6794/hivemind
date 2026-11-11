@@ -247,6 +247,10 @@ class Client:
                 )
             self._sleep(poll_seconds)
 
+    def claim_allowance(self) -> Dict[str, Any]:
+        """Claims the daily CPT allowance if the network offers one: once in every 24 hours per account."""
+        return self._request("POST", "/api/allowance/claim")
+
     # API tokens. Creating, listing, and revoking them needs a sign-in token, not an API token.
 
     def create_token(self, name: str, *, expires_in_days: Optional[int] = None) -> Dict[str, Any]:

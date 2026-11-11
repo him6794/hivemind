@@ -211,6 +211,31 @@ class SdkTests(unittest.TestCase):
         self.assertEqual(self.client.quote("1;", "{}", cpu_score=250, host_count=3), 105)
         self.assertEqual(self.master.requests[-1]["body"]["max_cpt"], 1)
 
+    def test_the_daily_allowance_is_one_post_and_returns_the_grant(self):
+        self.master.answer(
+            "POST",
+            "/api/allowance/claim",
+            200,
+            {"success": True, "message": "OK", "granted_cpt": 50, "balance": 50, "next_claim_at": "2026-11-12T00:00:00+00:00"},
+        )
+        result = self.client.claim_allowance()
+        self.assertEqual(result["granted_cpt"], 50)
+        self.assertEqual(self.master.requests[-1]["method"], "POST")
+        self.assertEqual(self.master.requests[-1]["path"], "/api/allowance/claim")
+        self.assertIsNone(self.master.requests[-1]["body"])
+
+    def test_a_refused_allowance_claim_raises_with_the_reason(self):
+        self.master.answer(
+            "POST",
+            "/api/allowance/claim",
+            409,
+            {"success": False, "message": "already claimed; the next claim is at 2026-11-12T00:00:00+00:00"},
+        )
+        with self.assertRaises(HivemindError) as raised:
+            self.client.claim_allowance()
+        self.assertEqual(raised.exception.status, 409)
+        self.assertIn("already claimed", raised.exception.message)
+
     def test_a_job_name_and_item_ids_are_escaped_in_the_path(self):
         self.master.answer("POST", "/api/jobs/a%2Fb/cancel", 200, {"success": True})
         self.client.cancel_job("a/b")

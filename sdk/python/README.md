@@ -61,6 +61,15 @@ write_results_csv(client, job["job_id"], "results.csv")  # 每筆一列；試算
 
 `item["output_preview"]` 只含前 4096 個字元；完整輸出用 `client.task_log(item["task_id"])` 取得。
 
+## 每日免費額度
+
+Nodepool 可以開啟每日免費額度（`ACCOUNT_DAILY_ALLOWANCE_CPT`，預設 0，即關閉）。開啟後，每個帳號每 24 小時可領取一次，額度從系統池撥出；系統池餘額低於下限（`ACCOUNT_ALLOWANCE_POOL_FLOOR_CPT`）時暫停發放。API token 也能領取，因為額度記在帳號上。
+
+```python
+grant = client.claim_allowance()   # 未開放、已領取過或系統池不足時丟出 HivemindError（409），message 說明原因
+print(grant["granted_cpt"], grant["balance"], grant["next_claim_at"])
+```
+
 ## 錯誤
 
 所有 HTTP 錯誤與網路錯誤都會丟出 `HivemindError`：

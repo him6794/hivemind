@@ -17,6 +17,8 @@ use hivemind_proto::{
     ChangePasswordResponse,
     CheckEmailRequest,
     CheckEmailResponse,
+    ClaimDailyAllowanceRequest,
+    ClaimDailyAllowanceResponse,
     CleanupAdminArtifactsRequest,
     CleanupAdminArtifactsResponse,
     CompleteBatchRequest,
@@ -319,13 +321,24 @@ pub fn artifact_root_for_config(config: &HivemindConfig) -> PathBuf {
 pub struct GrpcUserService {
     state: Arc<NodepoolState>,
     account: account::AccountSettings,
+    allowance: crate::allowance::AllowanceSettings,
 }
 impl GrpcUserService {
     pub fn new(state: Arc<NodepoolState>) -> Self {
         Self {
             state,
             account: account::AccountSettings::from_env(),
+            allowance: crate::allowance::AllowanceSettings::from_env(),
         }
+    }
+
+    /// Replaces the allowance settings. Tests use this to turn the allowance on without the environment.
+    pub fn with_allowance_settings(
+        mut self,
+        allowance: crate::allowance::AllowanceSettings,
+    ) -> Self {
+        self.allowance = allowance;
+        self
     }
 
     /// Replaces the account settings. Tests use this to write mail to a temporary directory.
@@ -1430,6 +1443,66 @@ impl UserService for GrpcUserService {
                 "Token not found or already revoked".into()
             },
         }))
+    }
+
+    async fn claim_daily_allowance(
+        &self,
+        request: Request<ClaimDailyAllowanceRequest>,
+    ) -> Result<Response<ClaimDailyAllowanceResponse>, Status> {
+        let req = request.into_inner();
+        // API tokens may claim too: the allowance credits the account, and a script acts for the account.
+        let claims = self
+            .state
+            .auth
+            .validate_session(&req.token)
+            .await
+            .map_err(|_| Status::unauthenticated("Invalid token"))?;
+        let pool = &self.state.scheduler.database().pool;
+        let outcome = crate::allowance::claim(pool, &self.allowance, &claims.sub)
+            .await
+            .map_err(internal_status)?;
+        let refused = |message: String,
+                       next: String|
+         -> Result<Response<ClaimDailyAllowanceResponse>, Status> {
+            Ok(Response::new(ClaimDailyAllowanceResponse {
+                success: false,
+                status_message: message,
+                granted_cpt: 0,
+                balance: 0,
+                next_claim_at: next,
+            }))
+        };
+        match outcome {
+            crate::allowance::AllowanceOutcome::Disabled => refused(
+                "the daily allowance is not offered on this network".into(),
+                String::new(),
+            ),
+            crate::allowance::AllowanceOutcome::UnknownAccount => {
+                refused("account not found or inactive".into(), String::new())
+            }
+            crate::allowance::AllowanceOutcome::TooSoon { next_claim_at } => refused(
+                format!(
+                    "already claimed; the next claim is at {}",
+                    next_claim_at.to_rfc3339()
+                ),
+                next_claim_at.to_rfc3339(),
+            ),
+            crate::allowance::AllowanceOutcome::PoolTooLow => refused(
+                "the allowance is paused: the system pool is at or below its floor".into(),
+                String::new(),
+            ),
+            crate::allowance::AllowanceOutcome::Granted {
+                amount_cpt,
+                balance_cpt,
+                next_claim_at,
+            } => Ok(Response::new(ClaimDailyAllowanceResponse {
+                success: true,
+                status_message: "OK".into(),
+                granted_cpt: amount_cpt,
+                balance: balance_cpt,
+                next_claim_at: next_claim_at.to_rfc3339(),
+            })),
+        }
     }
 
     async fn check_email(
@@ -7170,6 +7243,99 @@ mod tests {
 
         assert!(!response.success);
         assert_eq!(response.status_message, "invalid transfer lease request");
+    }
+
+    #[tokio::test]
+    async fn the_daily_allowance_is_granted_once_a_day_to_a_session_or_an_api_token() {
+        let lock = grpc_db_lock();
+        let _lock_guard = lock.lock().await;
+        let (service, _task_id, _other_token, owner) = match test_service().await {
+            Some(parts) => parts,
+            None => return,
+        };
+        sqlx::query("INSERT INTO users (username, password_hash) VALUES ($1, 'hash')")
+            .bind(&owner)
+            .execute(&service.state.scheduler.database().pool)
+            .await
+            .unwrap();
+        let session = token_for(&service.state.auth, &owner);
+
+        let off = GrpcUserService::new(service.state.clone()).with_allowance_settings(
+            crate::allowance::AllowanceSettings {
+                amount_cpt: 0,
+                pool_floor_cpt: 0,
+            },
+        );
+        let refused = off
+            .claim_daily_allowance(Request::new(ClaimDailyAllowanceRequest {
+                token: session.clone(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(!refused.success);
+        assert!(
+            refused.status_message.contains("not offered"),
+            "{}",
+            refused.status_message
+        );
+
+        let on = GrpcUserService::new(service.state.clone()).with_allowance_settings(
+            crate::allowance::AllowanceSettings {
+                amount_cpt: 50,
+                pool_floor_cpt: 0,
+            },
+        );
+        let before: i64 = sqlx::query_scalar("SELECT balance FROM users WHERE username = $1")
+            .bind(&owner)
+            .fetch_one(&service.state.scheduler.database().pool)
+            .await
+            .unwrap();
+        // A script holds an API token rather than a sign-in session, and it must be able to claim too.
+        let created = GrpcUserService::new(service.state.clone())
+            .create_api_token(Request::new(CreateApiTokenRequest {
+                token: session.clone(),
+                name: "script".into(),
+                expires_in_days: 0,
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(created.success, "{}", created.status_message);
+        let granted = on
+            .claim_daily_allowance(Request::new(ClaimDailyAllowanceRequest {
+                token: created.api_token.clone(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(granted.success, "{}", granted.status_message);
+        assert_eq!(granted.granted_cpt, 50);
+        assert_eq!(granted.balance, before + 50);
+        assert!(!granted.next_claim_at.is_empty());
+
+        let again = on
+            .claim_daily_allowance(Request::new(ClaimDailyAllowanceRequest {
+                token: session.clone(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(!again.success);
+        assert!(
+            again.status_message.contains("already claimed"),
+            "{}",
+            again.status_message
+        );
+        assert_eq!(again.granted_cpt, 0);
+
+        let invalid = on
+            .claim_daily_allowance(Request::new(ClaimDailyAllowanceRequest {
+                token: "not-a-token".into(),
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(invalid.code(), tonic::Code::Unauthenticated);
     }
 
     #[tokio::test]

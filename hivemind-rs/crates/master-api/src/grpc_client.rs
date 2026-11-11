@@ -29,6 +29,7 @@ use hivemind_proto::{
     UpdateProviderWorkerSettingsResponse, UpdateWorkerTrustControlRequest,
     UpdateWorkerTrustControlResponse, UploadTaskRequest, UploadTaskResponse,
 };
+use hivemind_proto::{ClaimDailyAllowanceRequest, ClaimDailyAllowanceResponse};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio::time::{sleep, Duration};
@@ -345,6 +346,21 @@ impl GrpcClient {
             clients
                 .job
                 .cancel_job(Request::new(CancelJobRequest { token, job_id }))
+                .await
+                .map(|r| r.into_inner())
+        })
+        .await
+    }
+
+    pub async fn claim_daily_allowance(
+        &mut self,
+        token: &str,
+    ) -> Result<ClaimDailyAllowanceResponse, tonic::Status> {
+        let token = token.to_string();
+        self.with_clients(|mut clients| async move {
+            clients
+                .user
+                .claim_daily_allowance(Request::new(ClaimDailyAllowanceRequest { token }))
                 .await
                 .map(|r| r.into_inner())
         })
