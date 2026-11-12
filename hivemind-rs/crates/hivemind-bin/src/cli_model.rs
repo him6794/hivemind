@@ -387,11 +387,10 @@ fn infer_model(weights: &Weights, hidden: &str, final_activation: &str) -> Resul
         };
         let (rows, columns) =
             linear_shape(weights, &layer).with_context(|| format!("layer {}", position + 1))?;
-        if previous.is_some_and(|width| width != columns) {
+        if let Some(width) = previous.filter(|width| *width != columns) {
             bail!(
-                "layer {} expects {columns} inputs but the previous layer has {} outputs",
-                position + 1,
-                previous.unwrap()
+                "layer {} expects {columns} inputs but the previous layer has {width} outputs",
+                position + 1
             );
         }
         previous = Some(rows);
@@ -471,9 +470,17 @@ fn decoded_size(tensor: &TensorBytes) -> Result<usize> {
     let mut data_bytes = 0;
     for chunk in tensor.data.chunks_exact(width) {
         let number = if width == 4 {
-            f32::from_le_bytes(chunk.try_into().unwrap()) as f64
+            f32::from_le_bytes(
+                chunk
+                    .try_into()
+                    .map_err(|_| anyhow!("invalid F32 weight byte width"))?,
+            ) as f64
         } else {
-            f64::from_le_bytes(chunk.try_into().unwrap())
+            f64::from_le_bytes(
+                chunk
+                    .try_into()
+                    .map_err(|_| anyhow!("invalid F64 weight byte width"))?,
+            )
         };
         if !number.is_finite() {
             bail!("weights must contain finite values");
