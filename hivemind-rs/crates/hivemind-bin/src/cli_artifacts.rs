@@ -24,6 +24,13 @@ pub(super) struct PreparedArtifacts {
 }
 
 impl PreparedArtifacts {
+    pub fn content_hashes(&self) -> std::collections::BTreeMap<String, String> {
+        self.files
+            .iter()
+            .map(|(manifest, _)| (manifest.artifact_id.clone(), manifest.sha256.clone()))
+            .collect()
+    }
+
     pub async fn prepare(input: &str, specs: &[(String, String)]) -> Result<Option<Self>> {
         if specs.is_empty() {
             return Ok(None);

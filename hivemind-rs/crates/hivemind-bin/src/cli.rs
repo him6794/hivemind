@@ -11,7 +11,7 @@ mod check;
 mod pipeline;
 
 pub use check::{run_check, CheckCommand};
-pub use pipeline::{run_check as run_pipeline_check, PipelineCommand};
+pub use pipeline::{run_check as run_pipeline_check, run_pipeline, PipelineCommand};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CliCommand {
@@ -1494,15 +1494,26 @@ async fn pace_submission(next_submit_at: &mut Instant, interval: Duration) {
     *next_submit_at = Instant::now() + interval;
 }
 
-async fn submit_batch_task(
+/// How the Master answered a request to create a task.
+enum TaskCreation {
+    Created,
+    /// A task with this id is already there. Carries the Master's message.
+    Exists(String),
+    /// The Master reported a refusal. Reconcile the ID: some refusals happen
+    /// after Nodepool persisted a task but failed a later admission step.
+    Refused(String),
+}
+
+/// Asks the Master to create one task, pacing the request and waiting out the rate limit. An
+/// error means the request itself did not complete, so whether the task was created is unknown.
+async fn create_task(
     client: &reqwest::Client,
     api_base: &str,
     token: &str,
     body: &serde_json::Value,
     next_submit_at: &mut Instant,
     interval: Duration,
-    conflict_is_ok: bool,
-) -> Result<()> {
+) -> Result<TaskCreation> {
     const MAX_ATTEMPTS: u32 = 5;
     let url = format!("{}/api/tasks", api_base);
     for attempt in 1..=MAX_ATTEMPTS {
@@ -1515,16 +1526,28 @@ async fn submit_batch_task(
             .await
             .map_err(|e| anyhow!("task create request failed: {}", e))?;
         let status = response.status();
-        let reply: serde_json::Value = response.json().await.unwrap_or(serde_json::Value::Null);
+        let reply: serde_json::Value = match response.json().await {
+            Ok(reply) => reply,
+            // A refusal without a JSON body is described by its status code alone.
+            Err(_) if !status.is_success() => serde_json::Value::Null,
+            // The Master accepted the request, but its answer was cut off.
+            Err(e) => return Err(anyhow!("task create response could not be read: {}", e)),
+        };
         if status.is_success()
             && reply.get("success").and_then(|value| value.as_bool()) == Some(true)
         {
-            return Ok(());
+            return Ok(TaskCreation::Created);
         }
-        // When resuming, the saved state has already shown that the data behind this task id is
-        // the data of this batch, so a task that is already there is a task that was submitted.
-        if status == reqwest::StatusCode::CONFLICT && conflict_is_ok {
-            return Ok(());
+        // A gateway/server failure may occur after Nodepool persisted the
+        // task. Keep this outcome uncertain so a pipeline reconciles its
+        // original ID instead of creating a second billable attempt.
+        if status.is_server_error()
+            || status == reqwest::StatusCode::REQUEST_TIMEOUT
+            || status.is_success()
+        {
+            return Err(anyhow!(
+                "task creation outcome is uncertain ({status}); reconcile the original task ID"
+            ));
         }
         if status == reqwest::StatusCode::TOO_MANY_REQUESTS && attempt < MAX_ATTEMPTS {
             // The submission window is one minute. Wait for it to reset before trying this task again.
@@ -1537,9 +1560,35 @@ async fn submit_batch_task(
             .and_then(|value| value.as_str())
             .map(str::to_owned)
             .unwrap_or_else(|| status.to_string());
-        return Err(anyhow!("{}", message));
+        return Ok(if status == reqwest::StatusCode::CONFLICT {
+            TaskCreation::Exists(message)
+        } else {
+            TaskCreation::Refused(message)
+        });
     }
-    Err(anyhow!("task submission kept hitting the rate limit"))
+    Ok(TaskCreation::Refused(
+        "task submission kept hitting the rate limit".into(),
+    ))
+}
+
+async fn submit_batch_task(
+    client: &reqwest::Client,
+    api_base: &str,
+    token: &str,
+    body: &serde_json::Value,
+    next_submit_at: &mut Instant,
+    interval: Duration,
+    conflict_is_ok: bool,
+) -> Result<()> {
+    match create_task(client, api_base, token, body, next_submit_at, interval).await? {
+        TaskCreation::Created => Ok(()),
+        // When resuming, the saved state has already shown that the data behind this task id is
+        // the data of this batch, so a task that is already there is a task that was submitted.
+        TaskCreation::Exists(_) if conflict_is_ok => Ok(()),
+        TaskCreation::Exists(message) | TaskCreation::Refused(message) => {
+            Err(anyhow!("{}", message))
+        }
+    }
 }
 
 async fn fetch_task_snapshots(

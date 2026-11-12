@@ -167,7 +167,10 @@ pub async fn run_from_cli(args: Vec<String>) -> Result<()> {
         return cli::run_check(check).await;
     }
     if let cli::CliCommand::Pipeline(pipeline) = command {
-        return cli::run_pipeline_check(&pipeline).await;
+        return match pipeline {
+            cli::PipelineCommand::Check(options) => cli::run_pipeline_check(&options).await,
+            cli::PipelineCommand::Run(run) => cli::run_pipeline(&run).await,
+        };
     }
     let service = match command {
         cli::CliCommand::Service(service) => service,
@@ -450,6 +453,8 @@ async fn run_service_inner(
     let _ = run_master;
     #[cfg(not(feature = "website"))]
     let _ = run_website;
+    #[cfg(not(feature = "nodepool"))]
+    let _ = run_nodepool;
     #[cfg(not(feature = "worker"))]
     let _ = run_worker;
 

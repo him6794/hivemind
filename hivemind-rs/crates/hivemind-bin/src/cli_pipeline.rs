@@ -1,20 +1,22 @@
-//! Local pipeline runs for the CLI: `hivemind pipeline check`.
+//! Pipeline runs for the CLI: `hivemind pipeline check` and `run`.
 //!
 //! A pipeline splits one unit of work across many independent hcode tasks:
 //! each stage's items run the way a normal task would, and the previous
 //! stage's outputs are composed into the next stage's input. `check` runs the
 //! whole pipeline on this machine with the limits a replica uses, so it finds
 //! an item that cannot run and an output too large for a Worker to report,
-//! before anything is sent.
+//! before anything is sent. `run` sends the pipeline to the network stage by
+//! stage, keeping a state file that a resume can continue.
 
+use super::check::{
+    describe_failure, limits, load_artifacts, parse_replicas, run_local, DEFAULT_REPLICAS,
+};
 use anyhow::{anyhow, bail, Result};
 use general_compute_runtime::managed_budget::required_task_budget;
 use managed_function_runtime::dry_run::{DryRunLimits, DEFAULT_MAX_USAGE_UNITS, DEFAULT_WALL_TIME};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-
-use super::check::{describe_failure, limits, load_artifacts, run_local, DEFAULT_REPLICAS};
 
 /// The JSON file that names a pipeline: its input and its stages.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -55,51 +57,94 @@ pub struct StageItem {
     pub max_cpt: Option<i64>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PipelineSubcommand {
-    Check,
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PipelineCommand {
+    Check(CheckOptions),
+    Run(PipelineRunCommand),
 }
 
+/// The local bounds a `check` applies to every item.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PipelineCommand {
-    pub sub: PipelineSubcommand,
+pub struct CheckOptions {
     /// Path to the pipeline JSON file.
     pub path: String,
     /// Local bounds applied to each item while checking.
     pub max_usage_units: u64,
     pub timeout_secs: u64,
+    pub replicas: u16,
 }
 
+/// A `run`: send the pipeline to the network, stage by stage.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PipelineRunCommand {
+    /// Path to the pipeline JSON file.
+    pub path: String,
+    pub api_base: String,
+    pub username: String,
+    pub password: String,
+    /// The prefix every task id starts with. It names the run; one is made up
+    /// when this is `None`.
+    pub task_prefix: Option<String>,
+    /// The most CPT the whole run may spend. Required.
+    pub max_total_cpt: i64,
+    /// Where the results are written. The state file sits next to it.
+    pub out_path: Option<String>,
+    /// Run nothing on this machine: every item must name its `max_cpt`.
+    pub no_local_run: bool,
+    /// Replicas to request per item. The network default applies when `None`.
+    pub replicas: Option<u16>,
+    /// Continue the run that `--task-prefix` and `--out` name, sending only
+    /// what is still missing.
+    pub resume: bool,
+    pub per_minute: u32,
+    pub poll_secs: u64,
+    /// How long to wait for one stage's tasks to finish.
+    pub timeout_secs: u64,
+    pub cpu_score: Option<i32>,
+    pub memory_gb: Option<i32>,
+    pub gpu_score: Option<i32>,
+    pub gpu_memory_gb: Option<i32>,
+    pub storage_gb: Option<i64>,
+    pub host_count: Option<i32>,
+}
+
+const CHECK_USAGE: &str =
+    "Usage: hivemind pipeline check <pipeline.json> [--max-usage <units>] [--timeout-secs <n>] [--replicas <2-7>]";
+const RUN_USAGE: &str = "Usage: hivemind pipeline run <pipeline.json> --max-total-cpt <cpt> --username <user> [--password <pass>] [--out <results.json>] [--task-prefix <prefix>] [--resume] [--no-local-run] [--replicas <2-7>] [--per-minute <1-60>] [--poll-secs <n>] [--timeout-secs <n>] [--api <url>]";
+
 pub fn parse_pipeline_args(args: &[String]) -> Result<PipelineCommand> {
-    const USAGE: &str =
-        "Usage: hivemind pipeline check <pipeline.json> [--max-usage <units>] [--timeout-secs <n>]";
-    let sub = args
-        .get(2)
-        .map(String::as_str)
-        .ok_or_else(|| anyhow!("{USAGE}"))?;
-    let sub = match sub {
-        "check" => PipelineSubcommand::Check,
-        other => bail!("unknown pipeline subcommand {other}; use check"),
-    };
+    match args.get(2).map(String::as_str) {
+        Some("check") => Ok(PipelineCommand::Check(parse_check_subcommand(args)?)),
+        Some("run") => Ok(PipelineCommand::Run(parse_run_subcommand(args)?)),
+        Some(other) => {
+            bail!(
+                "unknown pipeline subcommand {other}; use check or run\n{CHECK_USAGE}\n{RUN_USAGE}"
+            )
+        }
+        None => bail!("{CHECK_USAGE}\n{RUN_USAGE}"),
+    }
+}
+
+fn parse_check_subcommand(args: &[String]) -> Result<CheckOptions> {
     let path = args
         .get(3)
         .filter(|value| !value.starts_with("--"))
-        .ok_or_else(|| anyhow!("{USAGE}"))?
+        .ok_or_else(|| anyhow!("{CHECK_USAGE}"))?
         .clone();
-
-    let mut command = PipelineCommand {
-        sub,
+    let mut command = CheckOptions {
         path,
         max_usage_units: DEFAULT_MAX_USAGE_UNITS,
         timeout_secs: DEFAULT_WALL_TIME.as_secs(),
+        replicas: DEFAULT_REPLICAS,
     };
     let mut i = 4;
     while i < args.len() {
         let flag = args[i].as_str();
         let value = args
             .get(i + 1)
-            .ok_or_else(|| anyhow!("missing value for {}", flag))?;
+            .ok_or_else(|| anyhow!("missing value for {flag}"))?;
         match flag {
+            "--replicas" => command.replicas = parse_replicas(flag, value)?,
             "--max-usage" => {
                 command.max_usage_units = value
                     .parse::<u64>()
@@ -119,6 +164,109 @@ pub fn parse_pipeline_args(args: &[String]) -> Result<PipelineCommand> {
             _ => bail!("unknown pipeline flag {flag}"),
         }
         i += 2;
+    }
+    Ok(command)
+}
+
+fn parse_run_subcommand(args: &[String]) -> Result<PipelineRunCommand> {
+    let path = args
+        .get(3)
+        .filter(|value| !value.starts_with("--"))
+        .ok_or_else(|| anyhow!("{RUN_USAGE}"))?
+        .clone();
+
+    let mut command = PipelineRunCommand {
+        path,
+        api_base: super::default_api_base(),
+        username: String::new(),
+        password: String::new(),
+        task_prefix: None,
+        max_total_cpt: 0,
+        out_path: None,
+        no_local_run: false,
+        replicas: None,
+        resume: false,
+        per_minute: 50,
+        poll_secs: 5,
+        timeout_secs: 3600,
+        cpu_score: None,
+        memory_gb: None,
+        gpu_score: None,
+        gpu_memory_gb: None,
+        storage_gb: None,
+        host_count: None,
+    };
+
+    let mut i = 4;
+    while i < args.len() {
+        let flag = args[i].as_str();
+        match flag {
+            // These two take no value.
+            "--no-local-run" => {
+                command.no_local_run = true;
+                i += 1;
+                continue;
+            }
+            "--resume" => {
+                command.resume = true;
+                i += 1;
+                continue;
+            }
+            _ => {}
+        }
+        let value = args
+            .get(i + 1)
+            .ok_or_else(|| anyhow!("missing value for {flag}"))?;
+        match flag {
+            "--api" => command.api_base = super::normalize_api_base(value),
+            "--username" => command.username = value.clone(),
+            "--password" => command.password = value.clone(),
+            "--task-prefix" => command.task_prefix = Some(value.clone()),
+            "--max-total-cpt" => command.max_total_cpt = super::parse_i64_flag(flag, value)?,
+            "--out" => command.out_path = Some(value.clone()),
+            "--replicas" => command.replicas = Some(parse_replicas(flag, value)?),
+            "--per-minute" => command.per_minute = super::parse_u32_flag(flag, value)?,
+            "--poll-secs" => command.poll_secs = super::parse_u64_flag(flag, value)?,
+            "--timeout-secs" => command.timeout_secs = super::parse_u64_flag(flag, value)?,
+            "--cpu-score" => command.cpu_score = Some(super::parse_i32_flag(flag, value)?),
+            "--memory-gb" => command.memory_gb = Some(super::parse_i32_flag(flag, value)?),
+            "--gpu-score" => command.gpu_score = Some(super::parse_i32_flag(flag, value)?),
+            "--gpu-memory-gb" => command.gpu_memory_gb = Some(super::parse_i32_flag(flag, value)?),
+            "--storage-gb" => command.storage_gb = Some(super::parse_i64_flag(flag, value)?),
+            "--host-count" => command.host_count = Some(super::parse_i32_flag(flag, value)?),
+            _ => bail!("unknown pipeline flag {flag}"),
+        }
+        i += 2;
+    }
+
+    if command.resume && command.task_prefix.is_none() {
+        bail!("--resume needs --task-prefix: it names the run to continue");
+    }
+    if let Some(prefix) = command.task_prefix.as_deref() {
+        if !super::is_safe_task_id(&format!("{prefix}-0001")) {
+            bail!("--task-prefix may use only letters, digits, '.', '-', '_'");
+        }
+    }
+    if command.username.trim().is_empty() {
+        bail!("--username is required");
+    }
+    if command.password.is_empty() {
+        command.password = super::password_from_env().unwrap_or_default();
+    }
+    if command.password.is_empty() {
+        bail!("--password is required (or set HIVEMIND_PASSWORD)");
+    }
+    if command.max_total_cpt <= 0 {
+        bail!("--max-total-cpt is required and must be greater than 0: a pipeline does not run without a total budget");
+    }
+    if !(1..=60).contains(&command.per_minute) {
+        bail!("--per-minute must be between 1 and 60");
+    }
+    if !(1..=3600).contains(&command.poll_secs) {
+        bail!("--poll-secs must be between 1 and 3600");
+    }
+    if !(10..=86_400).contains(&command.timeout_secs) {
+        bail!("--timeout-secs must be between 10 and 86400");
     }
     Ok(command)
 }
@@ -288,15 +436,15 @@ fn run_item(
     })
 }
 
-/// The minimum `--max-cpt` one item's work needs at the network default of
-/// three replicas, for the summary a check prints and the `max_cpt` checks.
-fn required_max_cpt(usage_units: u64) -> Result<i64> {
-    Ok(required_task_budget(usage_units, DEFAULT_REPLICAS)?.task_budget)
+/// The minimum task cap at the chosen replica count, for the local report and
+/// validation of an explicitly supplied cap.
+fn required_max_cpt(usage_units: u64, replicas: u16) -> Result<i64> {
+    Ok(required_task_budget(usage_units, replicas)?.task_budget)
 }
 
 /// Runs every stage on this machine, composing each stage's outputs into the
 /// next, and reports what each item used and whether its output could travel.
-pub async fn run_check(command: &PipelineCommand) -> Result<()> {
+pub async fn run_check(command: &CheckOptions) -> Result<()> {
     let pipeline_path = PathBuf::from(&command.path);
     let base_dir = pipeline_base_dir(&command.path);
     let pipeline = load_pipeline(&pipeline_path)?;
@@ -340,13 +488,13 @@ pub async fn run_check(command: &PipelineCommand) -> Result<()> {
                 )
             })?;
             total_usage = total_usage.saturating_add(result.usage_units);
-            let cap = required_max_cpt(result.usage_units)?;
+            let cap = required_max_cpt(result.usage_units, command.replicas)?;
             summary.push_str(&format!(
                 "  item {} ({})\n    usage {} units; --max-cpt must be {cap} or more at {} replicas; output {} bytes\n",
                 item_index + 1,
                 source_name,
                 result.usage_units,
-                DEFAULT_REPLICAS,
+                command.replicas,
                 result.output_bytes
             ));
             if let Some(want) = max_cpt {
@@ -369,10 +517,14 @@ pub async fn run_check(command: &PipelineCommand) -> Result<()> {
     println!("Final output: {final_text}");
     println!(
         "\nTotal usage across the pipeline: {total_usage} units. This is a local estimate at {} replicas per item.",
-        DEFAULT_REPLICAS
+        command.replicas
     );
     Ok(())
 }
+
+#[path = "cli_pipeline_run.rs"]
+mod network;
+pub use network::run_pipeline;
 
 #[cfg(test)]
 mod tests {
@@ -404,10 +556,56 @@ mod tests {
     fn pipeline_arguments_parse_with_defaults() {
         let command =
             parse_pipeline_args(&args(&["hivemind", "pipeline", "check", "pipe.json"])).unwrap();
-        assert_eq!(command.sub, PipelineSubcommand::Check);
-        assert_eq!(command.path, "pipe.json");
-        assert_eq!(command.max_usage_units, DEFAULT_MAX_USAGE_UNITS);
-        assert_eq!(command.timeout_secs, DEFAULT_WALL_TIME.as_secs());
+        let PipelineCommand::Check(options) = command else {
+            panic!("expected the check subcommand");
+        };
+        assert_eq!(options.path, "pipe.json");
+        assert_eq!(options.max_usage_units, DEFAULT_MAX_USAGE_UNITS);
+        assert_eq!(options.timeout_secs, DEFAULT_WALL_TIME.as_secs());
+    }
+
+    #[tokio::test]
+    async fn pipeline_check_validates_caps_at_the_requested_replica_count() {
+        let dir = temp_dir();
+        write_file(&dir, "work.hcode", "return 1;");
+        let usage = run_local(
+            "return 1;",
+            "null",
+            None,
+            limits(DEFAULT_MAX_USAGE_UNITS, 10),
+        )
+        .unwrap()
+        .receipt
+        .usage_units;
+        let cap = required_task_budget(usage, 2).unwrap().task_budget;
+        let path = write_file(
+            &dir,
+            "pipe.json",
+            &serde_json::json!({"stages":[{"items":[{"source":"work.hcode","max_cpt":cap}]}]})
+                .to_string(),
+        );
+        let PipelineCommand::Check(command) = parse_pipeline_args(&args(&[
+            "hivemind",
+            "pipeline",
+            "check",
+            path.to_str().unwrap(),
+            "--replicas",
+            "2",
+        ]))
+        .unwrap() else {
+            panic!()
+        };
+        run_check(&command).await.unwrap();
+        let PipelineCommand::Check(default) = parse_pipeline_args(&args(&[
+            "hivemind",
+            "pipeline",
+            "check",
+            path.to_str().unwrap(),
+        ]))
+        .unwrap() else {
+            panic!()
+        };
+        assert!(run_check(&default).await.is_err());
     }
 
     #[test]
@@ -506,11 +704,11 @@ mod tests {
     }
 
     fn check_error(dir: &std::path::Path) -> anyhow::Error {
-        let command = PipelineCommand {
-            sub: PipelineSubcommand::Check,
+        let command = CheckOptions {
             path: dir.join("pipe.json").to_string_lossy().into_owned(),
             max_usage_units: DEFAULT_MAX_USAGE_UNITS,
             timeout_secs: DEFAULT_WALL_TIME.as_secs(),
+            replicas: DEFAULT_REPLICAS,
         };
         let runtime = tokio::runtime::Runtime::new().unwrap();
         runtime.block_on(run_check(&command)).unwrap_err()
