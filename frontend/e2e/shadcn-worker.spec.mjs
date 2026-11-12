@@ -57,6 +57,19 @@ function createProfile() {
   };
 }
 
+// The worker dashboard reads /api/sharing when it loads. The shape mirrors
+// SharingStatus in worker-executor/src/sharing.rs with the default settings: an
+// always-on mode that accepts tasks. It is not part of the sign-in flow.
+function createSharing() {
+  return {
+    success: true,
+    settings: { mode: 'always', idle_seconds: 300, cpu_percent_threshold: 20 },
+    accepts_tasks: true,
+    source: 'cpu_usage',
+    idle_for_seconds: null,
+  };
+}
+
 // The Computer tab polls the local control API's /api/benchmark on a timer once
 // signed in, so the fixture must answer it or the request lands in
 // unhandledRequests. The shape mirrors BenchmarkStatusResponse: a server-derived
@@ -214,6 +227,13 @@ async function installMockApi(page, { startupScenario = 'ready' } = {}) {
 
     if (method === 'POST' && pathname === '/api/benchmark/rerun') {
       await fulfillJson({ success: true });
+      return;
+    }
+
+    if (method === 'GET' && pathname === '/api/sharing') {
+      // The dashboard reads this on load. Answer it so the request never lands in
+      // unhandledRequests; it is not part of the sign-in flow.
+      await fulfillJson(createSharing());
       return;
     }
 
