@@ -64,6 +64,65 @@ fn stop_task_execution_reports_not_running_for_unknown_task() {
 }
 
 #[tokio::test]
+async fn changing_sharing_to_busy_does_not_cancel_a_running_task() {
+    let started = Arc::new(Notify::new());
+    let finish = Arc::new(Notify::new());
+    let executor = Arc::new(WorkerExecutor::new_with_task_runner(
+        HivemindConfig::default(),
+        {
+            let started = started.clone();
+            let finish = finish.clone();
+            move |task, cancellation| {
+                let started = started.clone();
+                let finish = finish.clone();
+                async move {
+                    started.notify_one();
+                    finish.notified().await;
+                    assert!(
+                        !*cancellation.borrow(),
+                        "availability changes never cancel work"
+                    );
+                    Ok(TaskResult {
+                        task_id: task.task_id,
+                        success: true,
+                        output: Some("finished".into()),
+                        error: None,
+                        exit_code: 0,
+                        cpu_time_ms: None,
+                        wall_time_ms: None,
+                        peak_memory_mb: None,
+                        managed_executed_ops: 0,
+                        managed_output_bytes: 0,
+                        managed_receipt_json: None,
+                        general_compute_result_json: None,
+                        managed_gpu_result_json: None,
+                    })
+                }
+            }
+        },
+    ));
+    let running = {
+        let executor = executor.clone();
+        tokio::spawn(async move { executor.execute_task(&test_task("idle-transition")).await })
+    };
+    started.notified().await;
+    executor
+        .sharing
+        .configure(hivemind_config::WorkerSharingConfig {
+            mode: hivemind_config::WorkerSharingMode::Idle,
+            ..Default::default()
+        })
+        .unwrap();
+    *executor.sharing.observation_override.lock().unwrap() =
+        Some(idle::IdleObservation::LastInput(Some(Duration::ZERO)));
+    assert!(!executor.sharing_status().accepts_tasks);
+    finish.notify_one();
+    let result = running.await.unwrap().unwrap();
+    assert!(result.success);
+    assert_eq!(result.output.as_deref(), Some("finished"));
+}
+
+#[tokio::test]
 async fn confirmed_attempt_stop_fences_late_execution() {
     let calls = Arc::new(AtomicUsize::new(0));
     let executor = WorkerExecutor::new_with_task_runner(HivemindConfig::default(), {

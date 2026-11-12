@@ -17,6 +17,50 @@ pub struct HivemindConfig {
     pub managed_consensus: ManagedConsensusConfig,
     #[serde(default)]
     pub client_updates: ClientUpdateConfig,
+    #[serde(default)]
+    pub worker_sharing: WorkerSharingConfig,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkerSharingMode {
+    #[default]
+    Always,
+    Idle,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct WorkerSharingConfig {
+    pub mode: WorkerSharingMode,
+    pub idle_seconds: u64,
+    /// Linux has no session input sensor; require sustained low host CPU use.
+    pub cpu_percent_threshold: f64,
+}
+
+impl Default for WorkerSharingConfig {
+    fn default() -> Self {
+        Self {
+            mode: WorkerSharingMode::Always,
+            idle_seconds: 300,
+            cpu_percent_threshold: 20.0,
+        }
+    }
+}
+
+impl WorkerSharingConfig {
+    pub fn validate(&self) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            (1..=86400).contains(&self.idle_seconds),
+            "worker idle_seconds must be between 1 and 86400"
+        );
+        anyhow::ensure!(
+            self.cpu_percent_threshold.is_finite()
+                && (0.0..=100.0).contains(&self.cpu_percent_threshold),
+            "worker cpu_percent_threshold must be between 0 and 100"
+        );
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -653,6 +697,7 @@ impl Default for HivemindConfig {
             general_compute: GeneralComputeConfig::default(),
             managed_consensus: ManagedConsensusConfig::default(),
             client_updates: ClientUpdateConfig::default(),
+            worker_sharing: WorkerSharingConfig::default(),
         }
     }
 }
@@ -741,6 +786,21 @@ impl HivemindConfig {
     }
 
     fn apply_env_overrides(&mut self) -> anyhow::Result<()> {
+        if let Ok(value) = std::env::var("WORKER_SHARING_MODE") {
+            self.worker_sharing.mode = match value.trim() {
+                "always" => WorkerSharingMode::Always,
+                "idle" => WorkerSharingMode::Idle,
+                _ => anyhow::bail!("WORKER_SHARING_MODE must be always or idle"),
+            };
+        }
+        if let Ok(value) = std::env::var("WORKER_IDLE_SECONDS") {
+            self.worker_sharing.idle_seconds = parse_env("WORKER_IDLE_SECONDS", &value)?;
+        }
+        if let Ok(value) = std::env::var("WORKER_IDLE_CPU_PERCENT") {
+            self.worker_sharing.cpu_percent_threshold =
+                parse_env("WORKER_IDLE_CPU_PERCENT", &value)?;
+        }
+        self.worker_sharing.validate()?;
         if let Ok(url) = std::env::var("DATABASE_URL") {
             self.database.url = url;
         }
@@ -1252,6 +1312,77 @@ where
 mod tests {
     use super::*;
     use std::sync::{Mutex, OnceLock};
+
+    #[test]
+    fn worker_sharing_defaults_to_always_with_explicit_idle_thresholds() {
+        let value = serde_json::to_value(HivemindConfig::default()).unwrap();
+        assert_eq!(value["worker_sharing"]["mode"], "always");
+        assert_eq!(value["worker_sharing"]["idle_seconds"], 300);
+        assert_eq!(value["worker_sharing"]["cpu_percent_threshold"], 20.0);
+    }
+
+    #[test]
+    fn worker_sharing_is_backward_compatible_and_rejects_invalid_settings() {
+        let mut old = serde_json::to_value(HivemindConfig::default()).unwrap();
+        old.as_object_mut().unwrap().remove("worker_sharing");
+        assert_eq!(
+            serde_json::from_value::<HivemindConfig>(old)
+                .unwrap()
+                .worker_sharing,
+            WorkerSharingConfig::default()
+        );
+        assert!(serde_json::from_str::<WorkerSharingConfig>(r#"{"mode":"never"}"#).is_err());
+        for idle_seconds in [0, 86401] {
+            assert!(WorkerSharingConfig {
+                idle_seconds,
+                ..WorkerSharingConfig::default()
+            }
+            .validate()
+            .is_err());
+        }
+        for cpu_percent_threshold in [f64::NAN, f64::INFINITY, -1.0, 101.0] {
+            assert!(WorkerSharingConfig {
+                cpu_percent_threshold,
+                ..WorkerSharingConfig::default()
+            }
+            .validate()
+            .is_err());
+        }
+    }
+
+    #[test]
+    fn worker_sharing_environment_settings_are_loaded_and_validated() {
+        let _environment_lock = lock_environment();
+        let names = [
+            "WORKER_SHARING_MODE",
+            "WORKER_IDLE_SECONDS",
+            "WORKER_IDLE_CPU_PERCENT",
+        ];
+        let original = names.map(std::env::var_os);
+        for (name, value) in names.into_iter().zip(["idle", "120", "15.5"]) {
+            std::env::set_var(name, value);
+        }
+        let mut config = HivemindConfig::default();
+        let loaded = config.apply_env_overrides();
+        std::env::set_var("WORKER_IDLE_SECONDS", "0");
+        let invalid = HivemindConfig::default().apply_env_overrides();
+        for (name, value) in names.into_iter().zip(original) {
+            match value {
+                Some(value) => std::env::set_var(name, value),
+                None => std::env::remove_var(name),
+            }
+        }
+        loaded.unwrap();
+        assert_eq!(
+            config.worker_sharing,
+            WorkerSharingConfig {
+                mode: WorkerSharingMode::Idle,
+                idle_seconds: 120,
+                cpu_percent_threshold: 15.5
+            }
+        );
+        assert!(invalid.is_err());
+    }
 
     // These tests mutate process-wide environment and working-directory state.
     static ENVIRONMENT_LOCK: OnceLock<Mutex<()>> = OnceLock::new();

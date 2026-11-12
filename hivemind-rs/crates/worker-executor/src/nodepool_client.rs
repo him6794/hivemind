@@ -1036,10 +1036,12 @@ pub fn start_registration_loop(
                             );
                         let current_payload =
                             benchmark_snapshot.as_ref().map(|report| report.report_json.clone());
+                        let usage = executor.get_resource_usage();
+                        let availability = executor.sharing_status();
                         let request = build_status_request_with_capability_report(
                             &registration.worker_id,
-                            "IDLE",
-                            executor.get_resource_usage(),
+                            if availability.accepts_tasks { "IDLE" } else { "BUSY" },
+                            usage,
                             &registration.token,
                             Some(capability_report),
                             benchmark_snapshot.filter(|_| current_payload != last_sent_benchmark),
@@ -2033,6 +2035,64 @@ mod tests {
         ));
     }
 
+    #[tokio::test]
+    async fn sharing_heartbeat_reports_idle_busy_and_resumes_on_user_idle() {
+        use crate::idle::IdleObservation;
+        use hivemind_config::{WorkerSharingConfig, WorkerSharingMode};
+        use std::sync::{Arc, Mutex};
+        let (addr, mut reports) = fake_node_manager_report_server()
+            .await
+            .expect("test Nodepool starts");
+        let executor = Arc::new(WorkerExecutor::new(HivemindConfig::default()));
+        *executor.sharing.observation_override.lock().unwrap() =
+            Some(IdleObservation::LastInput(Some(Duration::ZERO)));
+        let shutdown = super::start_registration_loop(
+            executor.clone(),
+            super::RegistrationLoopConfig {
+                nodepool_addr: Arc::new(Mutex::new(addr.to_string())),
+                worker_id: "idle-worker".into(),
+                username: "owner".into(),
+                worker_addr: Arc::new(Mutex::new("127.0.0.1:50053".into())),
+                worker_grpc_addr: "127.0.0.1:50053".into(),
+                location: "test".into(),
+                token: "issued-token".into(),
+                interval: Duration::from_millis(100),
+                require_external_overlay: false,
+            },
+        );
+        for (mode, idle, expected) in [
+            (WorkerSharingMode::Always, 0, "IDLE"),
+            (WorkerSharingMode::Idle, 0, "BUSY"),
+            (WorkerSharingMode::Idle, 60, "IDLE"),
+            (WorkerSharingMode::Idle, 0, "BUSY"),
+            (WorkerSharingMode::Always, 0, "IDLE"),
+        ] {
+            executor
+                .sharing
+                .configure(WorkerSharingConfig {
+                    mode,
+                    idle_seconds: 60,
+                    ..WorkerSharingConfig::default()
+                })
+                .unwrap();
+            *executor.sharing.observation_override.lock().unwrap() =
+                Some(IdleObservation::LastInput(Some(Duration::from_secs(idle))));
+            tokio::time::timeout(Duration::from_secs(20), async {
+                loop {
+                    let request = reports.status_rx.recv().await.expect("heartbeat received");
+                    assert_eq!(request.worker_id, "idle-worker");
+                    assert_eq!(request.token, "issued-token");
+                    if request.status == expected {
+                        break;
+                    }
+                }
+            })
+            .await
+            .expect("heartbeat follows sharing mode");
+        }
+        shutdown.send(true).unwrap();
+    }
+
     async fn fake_node_manager_report_server() -> Option<(SocketAddr, CapturedReports)> {
         fake_node_manager_server(AuthorityBehavior::Active).await
     }
@@ -2045,12 +2105,14 @@ mod tests {
         let (result_tx, result_rx) = mpsc::channel(1);
         let (usage_tx, usage_rx) = mpsc::channel(1);
         let (authority_tx, authority_rx) = mpsc::channel(1);
+        let (status_tx, status_rx) = mpsc::channel(16);
         let service = NodeManagerServiceServer::new(FakeNodeManagerReportService {
             output_tx,
             result_tx,
             usage_tx,
             authority_tx,
             authority_behavior,
+            status_tx,
         });
         tokio::spawn(async move {
             let _ = tonic::transport::Server::builder()
@@ -2073,6 +2135,7 @@ mod tests {
                         result_rx,
                         usage_rx,
                         authority_rx,
+                        status_rx,
                     },
                 ));
             }
@@ -2093,6 +2156,7 @@ mod tests {
         result_rx: mpsc::Receiver<TaskResultUploadRequest>,
         usage_rx: mpsc::Receiver<TaskUsageRequest>,
         authority_rx: mpsc::Receiver<ValidateGeneralComputeTransferLeaseRequest>,
+        status_rx: mpsc::Receiver<hivemind_proto::RunningStatusRequest>,
     }
 
     #[derive(Clone, Copy)]
@@ -2109,6 +2173,7 @@ mod tests {
         usage_tx: mpsc::Sender<TaskUsageRequest>,
         authority_tx: mpsc::Sender<ValidateGeneralComputeTransferLeaseRequest>,
         authority_behavior: AuthorityBehavior,
+        status_tx: mpsc::Sender<hivemind_proto::RunningStatusRequest>,
     }
 
     #[tonic::async_trait]
@@ -2127,8 +2192,9 @@ mod tests {
 
         async fn report_status(
             &self,
-            _request: Request<hivemind_proto::RunningStatusRequest>,
+            request: Request<hivemind_proto::RunningStatusRequest>,
         ) -> Result<Response<RunningStatusResponse>, Status> {
+            let _ = self.status_tx.try_send(request.into_inner());
             Ok(Response::new(RunningStatusResponse {
                 success: true,
                 status_message: "OK".into(),

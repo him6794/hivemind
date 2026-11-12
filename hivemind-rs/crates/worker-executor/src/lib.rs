@@ -5,11 +5,13 @@ pub mod control_api;
 pub mod executor;
 pub mod grpc_server;
 pub mod hcode_p2p;
+pub mod idle;
 pub mod maintenance;
 pub mod nodepool_client;
 pub mod resource_monitor;
 pub mod runtime_admission;
 pub mod sandbox;
+pub mod sharing;
 
 use anyhow::Result;
 use attempt_stop_fence::AttemptStopFenceStore;
@@ -112,6 +114,7 @@ pub struct WorkerExecutor {
     latest_resource_sample: Arc<std::sync::RwLock<Option<ResourceSample>>>,
     resource_refresh_lock: Arc<Mutex<()>>,
     pub benchmark: Arc<benchmark::BenchmarkCoordinator>,
+    pub sharing: sharing::SharingController,
     task_runner: Arc<TaskRunner>,
     dynamic_capability_report: WorkerCapabilityReport,
     runtime_admission: runtime_admission::WorkerRuntimeAdmission,
@@ -183,8 +186,13 @@ impl WorkerExecutor {
             Some(Arc::new(admission.capability_matrix()))
         };
         let benchmark = benchmark::BenchmarkCoordinator::new(stop_fences.worker_state_root())?;
+        let sharing = sharing::SharingController::new(
+            config.worker_sharing.clone(),
+            stop_fences.worker_state_root(),
+        )?;
         Ok(Self {
             benchmark,
+            sharing,
             active_tasks: Arc::new(Mutex::new(ActiveTaskRegistry {
                 running: HashMap::new(),
                 stopped: stop_fences.fences(),
@@ -251,6 +259,8 @@ impl WorkerExecutor {
     {
         Self {
             benchmark: benchmark::BenchmarkCoordinator::new(None).expect("test benchmark state"),
+            sharing: sharing::SharingController::new(_config.worker_sharing, None)
+                .expect("test sharing settings"),
             active_tasks: Arc::new(Mutex::new(ActiveTaskRegistry {
                 running: HashMap::new(),
                 stopped: stop_fences.fences(),
@@ -516,6 +526,10 @@ impl WorkerExecutor {
     }
     pub fn get_resource_usage(&self) -> hivemind_models::ResourceUsage {
         resource_monitor::to_resource_usage(&self.get_system_resources())
+    }
+
+    pub fn sharing_status(&self) -> sharing::SharingStatus {
+        self.sharing.status(self.latest_resource_sample().as_ref())
     }
 
     /// The freshest presence-aware host observation, or `None` when no sample

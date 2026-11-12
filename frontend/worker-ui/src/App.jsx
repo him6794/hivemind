@@ -10,6 +10,7 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { WorkerBenchmark } from './components/worker-benchmark.jsx';
+import { WorkerSharing } from './components/worker-sharing.jsx';
 import { WorkerComputer } from './components/worker-computer.jsx';
 import { WorkerDashboard } from './components/worker-dashboard.jsx';
 import { LoadingPanel } from './components/worker-setup-panels.jsx';
@@ -762,7 +763,8 @@ export default function WorkerApp() {
                 setupActive={setupActive}
                 onRefresh={handleRefresh}
               />
-              <div className="computer-benchmark">
+              <div className="computer-benchmark grid gap-4">
+                <WorkerSharing workerControlBase={workerControlBase} token={token} backendReady={backendReady} onUnauthorized={logout} />
                 <WorkerBenchmark
                   benchmark={benchmark}
                   benchmarkError={benchmarkError}

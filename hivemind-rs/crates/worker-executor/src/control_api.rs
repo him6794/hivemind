@@ -389,6 +389,7 @@ pub fn router_with_ui_dir(
         .route("/api/worker-dashboard", get(worker_dashboard))
         .route("/api/benchmark", get(benchmark_status))
         .route("/api/benchmark/rerun", post(benchmark_rerun))
+        .route("/api/sharing", get(sharing_status).post(update_sharing))
         .route("/api/vpn/bootstrap", post(bootstrap_vpn))
         .route("/api/vpn/status", get(vpn_status))
         .route("/api/login", post(login))
@@ -492,6 +493,88 @@ async fn worker_info(
 }
 
 const RESOURCE_SAMPLE_STALE_AFTER: chrono::Duration = chrono::Duration::seconds(30);
+
+type SharingResponse =
+    std::result::Result<Json<crate::sharing::SharingStatus>, (StatusCode, Json<StatusResponse>)>;
+
+async fn authorize_sharing(
+    state: &ControlApiState,
+    headers: &axum::http::HeaderMap,
+) -> std::result::Result<(), (StatusCode, Json<StatusResponse>)> {
+    let error = |status, message: &str| {
+        (
+            status,
+            Json(StatusResponse {
+                success: false,
+                status_message: message.into(),
+            }),
+        )
+    };
+    let token = bearer_token(headers)
+        .ok_or_else(|| error(StatusCode::UNAUTHORIZED, "Bearer token is required"))?;
+    let worker_id = state.current_worker_identity().ok_or_else(|| {
+        error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Worker is not registered with Nodepool",
+        )
+    })?;
+    match nodepool_client::verify_worker_ownership(&state.nodepool_addr(), &token, &worker_id).await
+    {
+        nodepool_client::OwnershipCheck::Owned => Ok(()),
+        nodepool_client::OwnershipCheck::Unauthorized => Err(error(
+            StatusCode::UNAUTHORIZED,
+            "Bearer token was rejected by Nodepool",
+        )),
+        nodepool_client::OwnershipCheck::NotOwned => Err(error(
+            StatusCode::FORBIDDEN,
+            "Worker is not owned by the authenticated account",
+        )),
+        nodepool_client::OwnershipCheck::Unavailable => Err(error(
+            StatusCode::BAD_GATEWAY,
+            "Nodepool ownership verification is unavailable",
+        )),
+    }
+}
+
+async fn sharing_status(
+    State(state): State<ControlApiState>,
+    headers: axum::http::HeaderMap,
+) -> SharingResponse {
+    authorize_sharing(&state, &headers).await?;
+    Ok(Json(state.executor.sharing_status()))
+}
+
+async fn update_sharing(
+    State(state): State<ControlApiState>,
+    headers: axum::http::HeaderMap,
+    Json(settings): Json<hivemind_config::WorkerSharingConfig>,
+) -> SharingResponse {
+    authorize_sharing(&state, &headers).await?;
+    settings.validate().map_err(|error| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(StatusResponse {
+                success: false,
+                status_message: error.to_string(),
+            }),
+        )
+    })?;
+    state
+        .executor
+        .sharing
+        .configure(settings)
+        .map_err(|error| {
+            tracing::warn!(error = %error, "Worker sharing settings could not be saved");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(StatusResponse {
+                    success: false,
+                    status_message: "Worker sharing settings could not be saved".into(),
+                }),
+            )
+        })?;
+    Ok(Json(state.executor.sharing_status()))
+}
 
 async fn worker_dashboard(
     State(state): State<ControlApiState>,
@@ -1906,6 +1989,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn sharing_settings_require_login_and_verified_ownership() {
+        for method in ["GET", "POST"] {
+            let app = super::router_with_allowed_origins(sample_state(), &[]);
+            let response = app
+                .oneshot(
+                    Request::builder()
+                        .method(method)
+                        .uri("/api/sharing")
+                        .header(axum::http::header::CONTENT_TYPE, "application/json")
+                        .body(Body::from(
+                            r#"{"mode":"idle","idle_seconds":300,"cpu_percent_threshold":20.0}"#,
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        }
+        let app = super::router_with_allowed_origins(sample_state(), &[]);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/sharing")
+                    .header(axum::http::header::AUTHORIZATION, "Bearer arbitrary-string")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+    }
+
+    #[tokio::test]
     async fn benchmark_status_requires_bearer_and_registered_identity() {
         let app = super::router_with_allowed_origins(sample_state(), &[]);
         let missing_bearer = app
@@ -1934,6 +2050,72 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(unregistered.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[tokio::test]
+    async fn sharing_settings_validate_ownership_and_apply_mode_without_stopping_work() {
+        for (owner, expected) in [
+            (None, StatusCode::UNAUTHORIZED),
+            (Some("another-worker"), StatusCode::FORBIDDEN),
+            (Some("worker-1"), StatusCode::OK),
+        ] {
+            let addr = ownership_master_node(owner.map(|id| {
+                hivemind_proto::GetProviderWorkerAssignmentsResponse {
+                    success: true,
+                    status_message: "OK".into(),
+                    worker_id: id.into(),
+                    assignments: vec![],
+                }
+            }))
+            .await
+            .expect("test Nodepool starts");
+            let state = sample_state();
+            state.set_nodepool_addr(addr.to_string());
+            let executor = state.executor.clone();
+            let app = super::router_with_allowed_origins(state, &[]);
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/api/sharing")
+                        .header(axum::http::header::AUTHORIZATION, "Bearer account-token")
+                        .header(axum::http::header::CONTENT_TYPE, "application/json")
+                        .body(Body::from(
+                            r#"{"mode":"idle","idle_seconds":86400,"cpu_percent_threshold":10.0}"#,
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), expected);
+            assert_eq!(
+                executor.sharing_status().settings.mode == hivemind_config::WorkerSharingMode::Idle,
+                expected == StatusCode::OK
+            );
+            if expected == StatusCode::OK {
+                let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+                let value: Value = serde_json::from_slice(&body).unwrap();
+                assert_eq!(value["settings"]["idle_seconds"], 86400);
+                let invalid = app
+                    .oneshot(
+                        Request::builder()
+                            .method("POST")
+                            .uri("/api/sharing")
+                            .header(axum::http::header::AUTHORIZATION, "Bearer account-token")
+                            .header(axum::http::header::CONTENT_TYPE, "application/json")
+                            .body(Body::from(r#"{"mode":"always","idle_seconds":0}"#))
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(invalid.status(), StatusCode::BAD_REQUEST);
+                assert_eq!(
+                    executor.sharing_status().settings.mode,
+                    hivemind_config::WorkerSharingMode::Idle
+                );
+            }
+        }
     }
 
     #[tokio::test]
