@@ -796,11 +796,17 @@ impl JobService for GrpcJobService {
             Err(message) => return Ok(Response::new(reply_create(false, message))),
         };
         let pool = self.state.scheduler.database().pool.clone();
+        let mut tx = pool
+            .begin()
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
+        // The account row is locked until this transaction ends. Creates for one account therefore run one at a
+        // time, and each one counts the jobs its predecessors have already recorded.
         let balance: Option<i64> = sqlx::query_scalar(
-            "SELECT balance FROM users WHERE username = $1 AND is_active = true",
+            "SELECT balance FROM users WHERE username = $1 AND is_active = true FOR UPDATE",
         )
         .bind(&owner)
-        .fetch_optional(&pool)
+        .fetch_optional(&mut *tx)
         .await
         .map_err(|e| Status::internal(e.to_string()))?;
         let Some(balance) = balance else {
@@ -822,7 +828,7 @@ impl JobService for GrpcJobService {
             "SELECT COUNT(*)::bigint FROM jobs WHERE owner = $1 AND state IN ('running', 'cancelling')",
         )
         .bind(&owner)
-        .fetch_one(&pool)
+        .fetch_one(&mut *tx)
         .await
         .map_err(|e| Status::internal(e.to_string()))?;
         if active >= JOB_MAX_ACTIVE_PER_OWNER {
@@ -834,10 +840,6 @@ impl JobService for GrpcJobService {
 
         let job_id = Uuid::new_v4();
         let item_count = req.inputs.len() as i32;
-        let mut tx = pool
-            .begin()
-            .await
-            .map_err(|e| Status::internal(e.to_string()))?;
         sqlx::query(
             "INSERT INTO jobs (id, owner, name, state, source, per_item_max_cpt, job_max_cpt,
                  replica_count, cpu_score, gpu_score, memory_gb, gpu_memory_gb, storage_gb,
@@ -1948,6 +1950,45 @@ mod db_tests {
             .unwrap()
             .into_inner();
         assert_eq!(mine.jobs.len(), 1);
+        fixture.cleanup().await.ok();
+    }
+
+    // The per-account limit is checked against the jobs already recorded. Creates for one account that
+    // arrive together must not all read the count before any of them is recorded.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_creates_for_one_account_stop_at_the_limit() {
+        let Some((state, fixture)) = fixture("job_quota_race").await else {
+            return;
+        };
+        let token = account(&state, "job-racer", 1_000_000).await;
+        let creates: Vec<_> = (0..2 * JOB_MAX_ACTIVE_PER_OWNER)
+            .map(|_| {
+                let state = state.clone();
+                let token = token.clone();
+                tokio::spawn(async move {
+                    GrpcJobService::new(state)
+                        .create_job(Request::new(create_request(&token, &["1"], 10, 10)))
+                        .await
+                        .unwrap()
+                        .into_inner()
+                })
+            })
+            .collect();
+        let mut admitted = 0;
+        for create in creates {
+            if create.await.unwrap().success {
+                admitted += 1;
+            }
+        }
+        assert_eq!(admitted, JOB_MAX_ACTIVE_PER_OWNER);
+        let active: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*)::bigint FROM jobs WHERE owner = $1 AND state IN ('running', 'cancelling')",
+        )
+        .bind("job-racer")
+        .fetch_one(&state.scheduler.database().pool)
+        .await
+        .unwrap();
+        assert_eq!(active, JOB_MAX_ACTIVE_PER_OWNER);
         fixture.cleanup().await.ok();
     }
 
