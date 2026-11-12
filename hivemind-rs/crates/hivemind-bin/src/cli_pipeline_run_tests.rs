@@ -22,6 +22,7 @@ struct MasterState {
     uploads: Vec<Value>,
     artifact_work: HashMap<String, Value>,
     artifact_bytes: HashMap<(String, String), Vec<u8>>,
+    network_default_replicas: Option<u16>,
     quote: i64,
 }
 
@@ -181,7 +182,28 @@ fn reply(state: &mut MasterState, method: &str, target: &str, body: &Value) -> (
         limits(DEFAULT_MAX_USAGE_UNITS, 10),
     );
     let (mut status, mut output, message) = match result {
-        Ok(report) => ("COMPLETED", report.output, String::new()),
+        Ok(report) => {
+            let required = state.network_default_replicas.map(|default| {
+                let replicas = u16::try_from(
+                    body["managed_replica_count"]
+                        .as_u64()
+                        .unwrap_or(u64::from(default)),
+                )
+                .unwrap();
+                required_task_budget(report.receipt.usage_units, replicas)
+                    .unwrap()
+                    .task_budget
+            });
+            if required.is_some_and(|cap| body["max_cpt"].as_i64().unwrap() < cap) {
+                (
+                    "FAILED",
+                    String::new(),
+                    "cap cannot fund replica policy".into(),
+                )
+            } else {
+                ("COMPLETED", report.output, String::new())
+            }
+        }
         Err(error) => ("FAILED", String::new(), format!("{error:?}")),
     };
     if state.fail.contains(&id) {
@@ -449,6 +471,106 @@ async fn refused_response_with_a_persisted_task_keeps_its_billing_on_retry() {
     c.resume = true;
     run_pipeline(&c).await.unwrap();
     assert_eq!(read_json(&dir.join("out.json"))["billed_cpt"], 40);
+}
+
+#[tokio::test]
+async fn submission_without_a_prepared_attempt_returns_a_contextual_error() {
+    let m = master().await;
+    let (dir, c) = fixture(&m);
+    let base = pipeline_base_dir(&c.path);
+    let pipeline = load_pipeline(Path::new(&c.path)).unwrap();
+    let (digest, item_digests) = fingerprint(&pipeline, &base).unwrap();
+    let mut runner = Runner {
+        command: &c,
+        client: reqwest::Client::new(),
+        token: "owner".into(),
+        state_path: dir.join("out.json.state.json").to_str().unwrap().into(),
+        base,
+        state: RunState {
+            version: STATE_VERSION,
+            prefix: "p".into(),
+            digest,
+            settings: settings(&c),
+            rows: vec![Row {
+                stage: 0,
+                item: 0,
+                attempts: Vec::new(),
+            }],
+        },
+        item_digests,
+        next_submit: Instant::now(),
+    };
+    let error = runner
+        .submit(0, &pipeline.stages[0].items[0], &[pipeline.input])
+        .await
+        .unwrap_err();
+    assert!(error
+        .to_string()
+        .contains("stage 1 item 1 has no prepared attempt"));
+    assert!(m.state.lock().unwrap().submitted.is_empty());
+}
+
+#[tokio::test]
+async fn omitted_replica_policy_is_explicit_in_quote_and_task_requests() {
+    let m = master().await;
+    let (dir, c) = fixture(&m);
+    assert_eq!(c.replicas, None);
+    m.state.lock().unwrap().network_default_replicas = Some(5);
+    let mut pipeline_json = read_json(&dir.join("pipe.json"));
+    pipeline_json["stages"][0]["items"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("max_cpt");
+    std::fs::write(dir.join("pipe.json"), pipeline_json.to_string()).unwrap();
+    let pipeline = load_pipeline(Path::new(&c.path)).unwrap();
+    let usage = run_item(
+        &dir,
+        &pipeline.stages[0].items[0],
+        &[pipeline.input],
+        limits(DEFAULT_MAX_USAGE_UNITS, 10),
+    )
+    .unwrap()
+    .usage_units;
+    let expected_cap = required_task_budget(usage, 3).unwrap().task_budget.max(5);
+    assert!(expected_cap < required_task_budget(usage, 5).unwrap().task_budget);
+
+    run_pipeline(&c).await.unwrap();
+    let quote = quote_body(&c);
+    assert_eq!(quote.get("managed_replica_count"), Some(&json!(3)));
+    assert_eq!(quote.get("managed_quorum"), Some(&json!(2)));
+    let state = m.state.lock().unwrap();
+    assert_eq!(state.submitted.len(), 3);
+    assert_eq!(state.submitted[0]["max_cpt"], expected_cap);
+    for task in &state.submitted {
+        assert_eq!(task["managed_replica_count"], 3);
+        assert_eq!(task["managed_quorum"], 2);
+    }
+    let saved = read_json(&dir.join("out.json.state.json"));
+    assert_eq!(saved["settings"]["replicas"], 3);
+}
+
+#[tokio::test]
+async fn default_replica_policy_and_explicit_three_can_resume_each_other() {
+    for (initial, resumed) in [(None, Some(3)), (Some(3), None)] {
+        let m = master().await;
+        let (dir, mut c) = fixture(&m);
+        c.replicas = initial;
+        run_pipeline(&c).await.unwrap();
+        c.resume = true;
+        c.replicas = resumed;
+        run_pipeline(&c).await.unwrap();
+        assert_eq!(m.state.lock().unwrap().submitted.len(), 3);
+        assert_eq!(
+            read_json(&dir.join("out.json.state.json"))["settings"]["replicas"],
+            3
+        );
+        c.replicas = Some(5);
+        assert!(run_pipeline(&c)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("replica settings changed"));
+    }
 }
 
 #[tokio::test]

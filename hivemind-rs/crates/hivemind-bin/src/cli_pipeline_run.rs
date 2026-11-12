@@ -22,6 +22,25 @@ struct Row {
     attempts: Vec<Attempt>,
 }
 
+impl Row {
+    fn current_attempt(&self) -> Result<&Attempt> {
+        self.attempts.last().ok_or_else(|| {
+            anyhow!(
+                "stage {} item {} has no prepared attempt",
+                self.stage + 1,
+                self.item + 1
+            )
+        })
+    }
+
+    fn current_attempt_mut(&mut self) -> Result<&mut Attempt> {
+        let (stage, item) = (self.stage + 1, self.item + 1);
+        self.attempts
+            .last_mut()
+            .ok_or_else(|| anyhow!("stage {stage} item {item} has no prepared attempt"))
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 struct Attempt {
     task_id: String,
@@ -73,7 +92,7 @@ fn task_id(prefix: &str, stage: usize, item: usize, retry: usize) -> String {
 }
 
 fn settings(c: &PipelineRunCommand) -> Value {
-    json!({"api":c.api_base,"username":c.username,"replicas":c.replicas,
+    json!({"api":c.api_base,"username":c.username,"replicas":c.replicas.unwrap_or(DEFAULT_REPLICAS),
         "cpu_score":c.cpu_score,"memory_gb":c.memory_gb,"gpu_score":c.gpu_score,
         "gpu_memory_gb":c.gpu_memory_gb,"storage_gb":c.storage_gb,"host_count":c.host_count})
 }
@@ -128,11 +147,11 @@ async fn atomic_json(path: &str, value: &impl Serialize) -> Result<()> {
 }
 
 fn quote_body(c: &PipelineRunCommand) -> serde_json::Map<String, Value> {
-    let mut body =
-        json!({"runtime":"hcode","task_source":"return 1;","torrent":"null","max_cpt":1})
-            .as_object()
-            .unwrap()
-            .clone();
+    let mut body = serde_json::Map::new();
+    body.insert("runtime".into(), "hcode".into());
+    body.insert("task_source".into(), "return 1;".into());
+    body.insert("torrent".into(), "null".into());
+    body.insert("max_cpt".into(), 1.into());
     let values = settings(c);
     for key in [
         "cpu_score",
@@ -146,13 +165,12 @@ fn quote_body(c: &PipelineRunCommand) -> serde_json::Map<String, Value> {
             body.insert(key.into(), values[key].clone());
         }
     }
-    if let Some(replicas) = c.replicas {
-        body.insert("managed_replica_count".into(), replicas.into());
-        body.insert(
-            "managed_quorum".into(),
-            super::super::check::majority(replicas).into(),
-        );
-    }
+    let replicas = c.replicas.unwrap_or(DEFAULT_REPLICAS);
+    body.insert("managed_replica_count".into(), replicas.into());
+    body.insert(
+        "managed_quorum".into(),
+        super::super::check::majority(replicas).into(),
+    );
     body
 }
 
@@ -424,7 +442,7 @@ impl Runner<'_> {
     }
 
     async fn submit(&mut self, index: usize, item: &StageItem, previous: &[Value]) -> Result<()> {
-        let attempt = self.state.rows[index].attempts.last().unwrap();
+        let attempt = self.state.rows[index].current_attempt()?;
         if attempt.complete() {
             return Ok(());
         }
@@ -475,7 +493,7 @@ impl Runner<'_> {
         if fresh || uncertain {
             // This checkpoint precedes the side effect. A lost reply must leave
             // SENDING on disk, so resume can reconcile or retry the same ID.
-            self.state.rows[index].attempts.last_mut().unwrap().status = "SENDING".into();
+            self.state.rows[index].current_attempt_mut()?.status = "SENDING".into();
             self.save().await?;
             let response = super::super::create_task(
                 &self.client,
@@ -487,7 +505,7 @@ impl Runner<'_> {
             )
             .await;
             let mut refusal = None;
-            let attempt = self.state.rows[index].attempts.last_mut().unwrap();
+            let attempt = self.state.rows[index].current_attempt_mut()?;
             match response {
                 Ok(TaskCreation::Created) => attempt.status = "SUBMITTED".into(),
                 Ok(TaskCreation::Exists(_)) if uncertain => attempt.status = "SUBMITTED".into(),
@@ -511,7 +529,7 @@ impl Runner<'_> {
             self.save().await?;
             if let Some(message) = refusal {
                 self.refresh().await?;
-                let attempt = self.state.rows[index].attempts.last_mut().unwrap();
+                let attempt = self.state.rows[index].current_attempt_mut()?;
                 if attempt.status == "SENDING" {
                     attempt.status = "SUBMIT_FAILED".into();
                     attempt.message = message.clone();
@@ -522,12 +540,12 @@ impl Runner<'_> {
             self.check_failure(&[index])?;
         }
         if let Some(prepared) = prepared {
-            let id = &self.state.rows[index].attempts.last().unwrap().task_id;
+            let id = &self.state.rows[index].current_attempt()?.task_id;
             prepared
                 .upload(&self.client, &self.command.api_base, &self.token, id)
                 .await?;
         }
-        self.state.rows[index].attempts.last_mut().unwrap().uploaded = true;
+        self.state.rows[index].current_attempt_mut()?.uploaded = true;
         self.save().await
     }
 
@@ -602,7 +620,7 @@ impl Runner<'_> {
             }
             previous = indices
                 .iter()
-                .map(|&i| validate_output(&self.state.rows[i].attempts.last().unwrap().output))
+                .map(|&i| validate_output(&self.state.rows[i].current_attempt()?.output))
                 .collect::<Result<_>>()?;
         }
         Ok(previous)

@@ -91,7 +91,7 @@ pub struct PipelineRunCommand {
     pub out_path: Option<String>,
     /// Run nothing on this machine: every item must name its `max_cpt`.
     pub no_local_run: bool,
-    /// Replicas to request per item. The network default applies when `None`.
+    /// Replicas to request per item. The CLI pins three when `None`.
     pub replicas: Option<u16>,
     /// Continue the run that `--task-prefix` and `--out` name, sending only
     /// what is still missing.
