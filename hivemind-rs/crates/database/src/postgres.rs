@@ -2082,8 +2082,19 @@ async fn run_migrations_inner(pool: &PgPool) -> Result<()> {
     )
     .execute(&mut *tx)
     .await?;
+    // The runner picks active jobs by when it last visited them, not by when they last changed. An idle job
+    // therefore cannot keep the front of the order and starve the jobs behind it.
     sqlx::query(
-        "CREATE INDEX IF NOT EXISTS jobs_active_idx ON jobs (updated_at)
+        "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS last_scanned_at TIMESTAMPTZ NOT NULL
+             DEFAULT TIMESTAMPTZ '1970-01-01 00:00:00+00';",
+    )
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query("DROP INDEX IF EXISTS jobs_active_idx;")
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS jobs_scan_idx ON jobs (last_scanned_at, id)
          WHERE state IN ('running', 'cancelling');",
     )
     .execute(&mut *tx)

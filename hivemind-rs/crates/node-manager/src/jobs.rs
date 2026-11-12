@@ -36,6 +36,8 @@ pub const JOB_MAX_ACTIVE_PER_OWNER: i64 = 10;
 pub const JOB_NAME_MAX_CHARS: usize = 128;
 /// Items one tick submits for one job. The runner ticks every few seconds, so this bounds the submission rate.
 pub const JOB_SUBMIT_PER_TICK: i64 = 10;
+/// Active jobs one tick advances. The runner visits the jobs it has visited least recently first.
+pub const JOB_SCAN_PER_TICK: i64 = 100;
 /// Time between runner ticks.
 pub const JOB_TICK_INTERVAL: Duration = Duration::from_secs(2);
 /// Characters of an item's output that a listing carries. Four bytes per character at most keeps it at 16 KiB.
@@ -683,12 +685,24 @@ pub async fn advance_job(state: &Arc<NodepoolState>, job_id: Uuid) -> Result<()>
     Ok(())
 }
 
-/// Advances every running or cancelling job once.
+/// Advances the running and cancelling jobs that were visited longest ago, up to `JOB_SCAN_PER_TICK`.
+///
+/// A job is stamped when it is picked, before it is advanced. A job that keeps waiting or failing therefore
+/// moves to the back of the order like any other, so it cannot hold a slot in every tick.
 pub async fn run_job_tick(state: &Arc<NodepoolState>) -> Result<()> {
     let pool = state.scheduler.database().pool.clone();
     let ids: Vec<Uuid> = sqlx::query_scalar(
-        "SELECT id FROM jobs WHERE state IN ('running', 'cancelling') ORDER BY updated_at LIMIT 100",
+        "UPDATE jobs SET last_scanned_at = NOW()
+         WHERE id IN (
+             SELECT id FROM jobs
+             WHERE state IN ('running', 'cancelling')
+             ORDER BY last_scanned_at, id
+             LIMIT $1
+             FOR UPDATE SKIP LOCKED
+         )
+         RETURNING id",
     )
+    .bind(JOB_SCAN_PER_TICK)
     .fetch_all(&pool)
     .await?;
     for id in ids {
@@ -1840,6 +1854,48 @@ mod db_tests {
             vec!["submitted", "submitted"]
         );
         assert_eq!(job_view(&service, &token, &created.job_id).await.note, "");
+        fixture.cleanup().await.ok();
+    }
+
+    // The runner advances a bounded batch of active jobs per tick. Idle unfunded jobs must not keep
+    // every slot of that batch, so a funded job created after them still advances.
+    #[tokio::test]
+    async fn a_funded_job_advances_past_persistently_unfunded_older_jobs() {
+        let Some((state, fixture)) = fixture("job_scan_fairness").await else {
+            return;
+        };
+        let service = GrpcJobService::new(state.clone());
+        // Ten accounts, each running the most jobs one account may hold: 100 idle jobs in all.
+        for owner in 0..10 {
+            let name = format!("job-idle-{owner}");
+            let token = account(&state, &name, 1000).await;
+            for _ in 0..JOB_MAX_ACTIVE_PER_OWNER {
+                let created = service
+                    .create_job(Request::new(create_request(&token, &["1"], 10, 10)))
+                    .await
+                    .unwrap()
+                    .into_inner();
+                assert!(created.success, "{}", created.status_message);
+            }
+            set_balance(&state, &name, 0).await;
+        }
+        run_job_tick(&state).await.unwrap();
+
+        let funded = account(&state, "job-funded-late", 1000).await;
+        let late = service
+            .create_job(Request::new(create_request(&funded, &["1"], 10, 10)))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(late.success, "{}", late.status_message);
+        for _ in 0..3 {
+            run_job_tick(&state).await.unwrap();
+        }
+
+        assert_eq!(
+            states(&items(&service, &funded, &late.job_id).await),
+            vec!["submitted"]
+        );
         fixture.cleanup().await.ok();
     }
 
