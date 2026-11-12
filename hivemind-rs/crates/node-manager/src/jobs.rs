@@ -364,7 +364,8 @@ fn job_items_query(filter: &str, select: &str) -> String {
                     t.status AS task_status,
                     t.output AS task_output,
                     t.billed_amount AS task_billed_amount,
-                    t.status_message AS task_status_message
+                    t.status_message AS task_status_message,
+                    t.billing_settled AS task_billing_settled
              FROM job_items i
              JOIN jobs j ON j.id = i.job_id
              LEFT JOIN tasks t ON t.task_id = i.task_id
@@ -433,11 +434,13 @@ async fn sync_submitted(tx: &mut Transaction<'_, Postgres>, job: &JobRow) -> Res
         task_output: Option<String>,
         task_billed_amount: Option<i64>,
         task_status_message: Option<String>,
+        task_billing_settled: Option<bool>,
     }
     let submitted: Vec<SubmittedTask> = sqlx::query_as(sqlx::AssertSqlSafe(job_items_query(
         "i.job_id = $1 AND i.state = 'submitted'",
         "SELECT item_index, updated_at, task_exists, task_matches, task_status,
-                    task_output, task_billed_amount, task_status_message FROM bound_items",
+                    task_output, task_billed_amount, task_status_message, task_billing_settled
+             FROM bound_items",
     )))
     .bind(job.id)
     .fetch_all(&mut **tx)
@@ -472,8 +475,12 @@ async fn sync_submitted(tx: &mut Transaction<'_, Postgres>, job: &JobRow) -> Res
             .await?;
             continue;
         }
+        let settled = task.task_billing_settled.unwrap_or(false);
         let next = match task.task_status.as_deref() {
-            Some("COMPLETED") => "completed",
+            // A completed task that is not settled (quorum reached but not yet billed) keeps its cap
+            // reserved, so the job does not commit more than its total until the charge is recorded.
+            Some("COMPLETED") if settled => "completed",
+            Some("COMPLETED") => continue,
             Some("FAILED" | "TIMED_OUT") => "failed",
             Some("CANCELLED") => "cancelled",
             _ => continue,
@@ -1332,6 +1339,7 @@ mod db_tests {
     }
 
     // Stands in for a worker: the task reaches its end with this status, output, and billed amount.
+    // A task that has recorded its final charge is settled, so the flag follows the recorded amount.
     async fn finish_task(
         state: &NodepoolState,
         task_id: &str,
@@ -1340,7 +1348,8 @@ mod db_tests {
         billed: i64,
     ) {
         sqlx::query(
-            "UPDATE tasks SET status = $2, output = $3, billed_amount = $4 WHERE task_id = $1",
+            "UPDATE tasks SET status = $2, output = $3, billed_amount = $4, billing_settled = true
+             WHERE task_id = $1",
         )
         .bind(task_id)
         .bind(status)
@@ -1734,6 +1743,70 @@ mod db_tests {
             .unwrap()
             .into_inner();
         assert!(again.success, "cancelling a cancelled job is not an error");
+        fixture.cleanup().await.ok();
+    }
+
+    #[tokio::test]
+    async fn a_completed_item_holds_its_cap_until_the_charge_is_settled() {
+        let Some((state, fixture)) = fixture("job_settlement").await else {
+            return;
+        };
+        let token = account(&state, "job-settle", 1000).await;
+        let service = GrpcJobService::new(state.clone());
+        // Two items of cap 100 each under a total of 100: only one may run at a time.
+        let created = service
+            .create_job(Request::new(create_request(&token, &["1", "2"], 100, 100)))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(created.success);
+        tick(&state, &created.job_id).await;
+        let first = items(&service, &token, &created.job_id).await;
+        assert_eq!(states(&first), vec!["submitted", "pending"]);
+
+        // The first task reached quorum but is not billed yet: quorum_stop_pending is
+        // COMPLETED with no settled charge. While it is unsettled the item keeps running.
+        sqlx::query(
+            "UPDATE tasks SET status = 'COMPLETED', output = '42',
+                billing_settled = false, billed_amount = 0 WHERE task_id = $1",
+        )
+        .bind(&first[0].task_id)
+        .execute(&state.scheduler.database().pool)
+        .await
+        .unwrap();
+        tick(&state, &created.job_id).await;
+        let held = items(&service, &token, &created.job_id).await;
+        assert_eq!(
+            states(&held),
+            vec!["submitted", "pending"],
+            "an unsettled charge must keep the item running and its cap reserved"
+        );
+        assert_eq!(
+            job_view(&service, &token, &created.job_id)
+                .await
+                .reserved_cpt,
+            100
+        );
+
+        // Settlement records the real charge. The item completes with it, and the budget
+        // then has no room left for the second item.
+        sqlx::query(
+            "UPDATE tasks SET billing_settled = true, billed_amount = 99 WHERE task_id = $1",
+        )
+        .bind(&first[0].task_id)
+        .execute(&state.scheduler.database().pool)
+        .await
+        .unwrap();
+        tick(&state, &created.job_id).await;
+        let settled = items(&service, &token, &created.job_id).await;
+        assert_eq!(states(&settled), vec!["completed", "refused"]);
+        assert_eq!(
+            settled[0].billed_cpt, 99,
+            "the settled charge is recorded, not zero"
+        );
+        let job = job_view(&service, &token, &created.job_id).await;
+        assert_eq!(job.state, "completed");
+        assert_eq!(job.spent_cpt, 99);
         fixture.cleanup().await.ok();
     }
 
