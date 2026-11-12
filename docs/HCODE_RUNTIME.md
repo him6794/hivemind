@@ -82,7 +82,7 @@ closed interpreter. Its runtime, backend, cost-model, and semantics identities
 are pinned by
 [`executor-rs/crates/managed-function-runtime/hcode-semantics.json`](../executor-rs/crates/managed-function-runtime/hcode-semantics.json)
 and digest
-`d4c641691b75ad5a673c1424d324be2a3412170e1fccd86ae7ecddb09d30e214`.
+`0c13a1da5fbbb94de2fbb5395ee807ab43e082b5c6d064deca7ece90700de822`.
 
 - Each managed task is assigned to three distinct Workers by default, with a
   two-replica quorum; at most seven replicas may be configured. A single Worker
@@ -212,6 +212,12 @@ CPU hcode also accepts `//` line comments. A comment runs from `//` to the end o
 CPU hcode also has `while`, `break`, `continue`, and `if` statements. `while` checks its bool condition before each pass through its body, and each pass counts as one loop iteration against the same limit as `for`. `break;` ends the innermost loop, and `continue;` ends the current pass. A leading `if` is a statement when its branches are statements, and an expression otherwise, as before. A function body starts a new loop context, so `break` and `continue` outside a loop are parse errors. The frozen v0 surface keeps these words as ordinary names.
 
 CPU hcode also has list builtins. `append(list, value)` returns a new list with the value at the end and leaves its argument unchanged; it costs the length of the new list. `sort(list)` returns a new ascending list whose items are all ints, all floats, or all strings, and it costs the list length times the number of bits in that length, charged before any comparison. Strings sort by their UTF-8 bytes. `keys(dict)` returns the dict keys as a list of strings in ascending order, and it costs one unit per key. `split(text, separator)` returns the pieces between occurrences of a non-empty separator, at one unit per byte of text and one per piece. `join(list, separator)` joins a list of strings with a separator that may be empty, at one unit per byte of the result.
+
+`split` and `join` check usage, value size, collection size, depth, and remaining
+cumulative materialization limits before allocating result storage. Safety sizing
+uses exact canonical JSON bytes, including string escapes and list delimiters;
+size arithmetic overflow fails with `value_limit_exceeded`. Each successful result
+consumes its canonical size from the materialization budget once.
 
 Expressions:
 

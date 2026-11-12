@@ -21,7 +21,7 @@ pub const V1_SEMANTICS_MANIFEST_JSON: &str = include_str!("../hcode-semantics.js
 /// SHA-256 of the canonical JSON bytes in [`V1_SEMANTICS_MANIFEST_JSON`],
 /// excluding the file's trailing newline.
 pub const V1_SEMANTICS_MANIFEST_SHA256: &str =
-    "d4c641691b75ad5a673c1424d324be2a3412170e1fccd86ae7ecddb09d30e214";
+    "0c13a1da5fbbb94de2fbb5395ee807ab43e082b5c6d064deca7ece90700de822";
 
 /// Versioned metering identity committed by the v1 semantics manifest.
 pub const V1_COST_MODEL_ID: &str = "hcode-execution-cpt-v1";
@@ -910,6 +910,10 @@ fn logical_usize(value: usize) -> Result<u64, RuntimeError> {
 
 fn checked_value_add(left: u64, right: u64) -> Result<u64, RuntimeError> {
     left.checked_add(right).ok_or_else(value_limit_error)
+}
+
+fn checked_value_mul(left: u64, right: u64) -> Result<u64, RuntimeError> {
+    left.checked_mul(right).ok_or_else(value_limit_error)
 }
 
 /// Sorts a list whose items are all ints, all floats, or all strings. Floats are finite, so total_cmp orders them
@@ -2913,18 +2917,35 @@ impl<'a> Evaluator<'a> {
                         "split separator must not be empty",
                     ));
                 }
-                // The text is scanned once, one unit per byte. Each piece then costs one unit.
-                let bytes = u64::try_from(text.len())
-                    .map_err(|_| RuntimeError::new("runtime_error", "length is out of range"))?;
-                self.charge(bytes)?;
-                let pieces: Vec<Value> = text
-                    .split(separator.as_str())
-                    .map(|piece| Value::String(piece.to_string()))
-                    .collect();
-                let piece_count = u64::try_from(pieces.len())
-                    .map_err(|_| RuntimeError::new("runtime_error", "length is out of range"))?;
-                self.charge(piece_count)?;
-                self.materialize_owned_value(Value::List(pieces)).map(Some)
+                // Preflight borrowed pieces: even empty pieces consume list
+                // storage, so no result may be allocated before all bounds and
+                // both usage charges have succeeded.
+                self.charge(logical_usize(text.len())?)?;
+                let mut metrics = ValueMetrics {
+                    canonical_bytes: 2,
+                    depth: 2, // A nonempty separator always produces at least one string.
+                    max_collection_items: 0,
+                };
+                for piece in text.split(separator.as_str()) {
+                    let comma = u64::from(metrics.max_collection_items > 0);
+                    metrics.canonical_bytes = checked_value_add(
+                        metrics.canonical_bytes,
+                        checked_value_add(comma, json_string_len(piece)?)?,
+                    )?;
+                    metrics.max_collection_items =
+                        checked_value_add(metrics.max_collection_items, 1)?;
+                }
+                self.charge(metrics.max_collection_items)?;
+                self.validate_value_metrics(metrics)?;
+                self.charge_value_materialization(metrics.canonical_bytes)?;
+                let capacity = usize::try_from(metrics.max_collection_items)
+                    .map_err(|_| value_limit_error())?;
+                let mut pieces = Vec::with_capacity(capacity);
+                pieces.extend(
+                    text.split(separator.as_str())
+                        .map(|piece| Value::String(piece.to_string())),
+                );
+                Ok(Some(Value::List(pieces)))
             }
             "join" if self.surface.hcode_extensions() => {
                 let [list, separator] = args else {
@@ -2942,26 +2963,49 @@ impl<'a> Evaluator<'a> {
                         "join expects a string separator",
                     ));
                 };
-                let mut texts = Vec::with_capacity(items.len());
-                for item in items {
+                let mut raw_bytes = 0;
+                let mut canonical_bytes = 2;
+                for item in &items {
                     let Value::String(text) = item else {
                         return Err(RuntimeError::new(
                             "type_error",
                             "join expects a list of strings",
                         ));
                     };
-                    texts.push(text);
+                    raw_bytes = checked_value_add(raw_bytes, logical_usize(text.len())?)?;
+                    canonical_bytes =
+                        checked_value_add(canonical_bytes, json_string_len(text)? - 2)?;
                 }
-                // One unit per byte of the joined text, counted before the text is built.
-                let separators = texts.len().saturating_sub(1);
-                let bytes =
-                    texts.iter().map(String::len).sum::<usize>() + separator.len() * separators;
-                let bytes = u64::try_from(bytes)
-                    .map_err(|_| RuntimeError::new("runtime_error", "length is out of range"))?;
-                self.charge(bytes)?;
-                let joined = texts.join(separator.as_str());
-                self.materialize_owned_value(Value::String(joined))
-                    .map(Some)
+                let separators = logical_usize(items.len().saturating_sub(1))?;
+                raw_bytes = checked_value_add(
+                    raw_bytes,
+                    checked_value_mul(logical_usize(separator.len())?, separators)?,
+                )?;
+                canonical_bytes = checked_value_add(
+                    canonical_bytes,
+                    checked_value_mul(json_string_len(&separator)? - 2, separators)?,
+                )?;
+                // One unit per raw UTF-8 byte; safety limits use escaped JSON
+                // bytes instead. Check both before allocating the result.
+                self.charge(raw_bytes)?;
+                self.validate_value_metrics(ValueMetrics {
+                    canonical_bytes,
+                    depth: 1,
+                    max_collection_items: 0,
+                })?;
+                self.charge_value_materialization(canonical_bytes)?;
+                let capacity = usize::try_from(raw_bytes).map_err(|_| value_limit_error())?;
+                let mut joined = String::with_capacity(capacity);
+                for (index, item) in items.iter().enumerate() {
+                    if index > 0 {
+                        joined.push_str(&separator);
+                    }
+                    let Value::String(text) = item else {
+                        unreachable!("join preflight validated every item")
+                    };
+                    joined.push_str(text);
+                }
+                Ok(Some(Value::String(joined)))
             }
             "abs" if self.surface.numeric_builtins() => {
                 let [arg] = args else {
@@ -4110,6 +4154,27 @@ mod tests {
         CpuGpuBackend, ExecutionLimits, ManagedExecutor, ManagedGpuExecutor, Value,
         render_output_bounded,
     };
+
+    #[test]
+    fn string_preflight_arithmetic_rejects_overflow_without_allocating() {
+        assert_eq!(super::checked_value_add(u64::MAX - 1, 1).unwrap(), u64::MAX);
+        assert_eq!(super::checked_value_mul(u64::MAX, 0).unwrap(), 0);
+        assert_eq!(super::checked_value_mul(u64::MAX, 1).unwrap(), u64::MAX);
+        assert_eq!(
+            super::checked_value_add(u64::MAX, 1).unwrap_err().code(),
+            "value_limit_exceeded"
+        );
+        assert_eq!(
+            super::checked_value_mul(u64::MAX, 2).unwrap_err().code(),
+            "value_limit_exceeded"
+        );
+        assert_eq!(
+            super::checked_value_mul(1 << 32, 1 << 32)
+                .unwrap_err()
+                .code(),
+            "value_limit_exceeded"
+        );
+    }
 
     #[test]
     fn bounded_canonical_renderer_matches_serde_json_escaping() {
