@@ -819,6 +819,9 @@ pub struct TokenResponse {
     pub expires_at: DateTime<Utc>,
 }
 
+/// Prefix of an API token. A bearer token with this prefix is opaque to the Master: Nodepool validates it.
+pub const API_TOKEN_PREFIX: &str = "hmk_";
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -884,6 +887,3 @@ mod tests {
         );
     }
 }
-
-/// Prefix of an API token. A bearer token with this prefix is opaque to the Master: Nodepool validates it.
-pub const API_TOKEN_PREFIX: &str = "hmk_";
