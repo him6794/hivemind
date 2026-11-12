@@ -123,6 +123,61 @@ async fn changing_sharing_to_busy_does_not_cancel_a_running_task() {
 }
 
 #[tokio::test]
+async fn idle_sharing_refuses_new_executor_attempt_before_starting_its_runner() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let executor = WorkerExecutor::new_with_task_runner(HivemindConfig::default(), {
+        let calls = calls.clone();
+        move |task, _| {
+            calls.fetch_add(1, Ordering::SeqCst);
+            async move {
+                Ok(TaskResult {
+                    task_id: task.task_id,
+                    success: true,
+                    output: Some("finished".into()),
+                    error: None,
+                    exit_code: 0,
+                    cpu_time_ms: None,
+                    wall_time_ms: None,
+                    peak_memory_mb: None,
+                    managed_executed_ops: 0,
+                    managed_output_bytes: 0,
+                    managed_receipt_json: None,
+                    general_compute_result_json: None,
+                    managed_gpu_result_json: None,
+                })
+            }
+        }
+    });
+    executor
+        .sharing
+        .configure(hivemind_config::WorkerSharingConfig {
+            mode: hivemind_config::WorkerSharingMode::Idle,
+            ..Default::default()
+        })
+        .unwrap();
+    *executor.sharing.observation_override.lock().unwrap() =
+        Some(idle::IdleObservation::LastInput(Some(Duration::ZERO)));
+    let error = executor
+        .execute_task(&test_task("idle-new-attempt"))
+        .await
+        .expect_err("the executor must recheck sharing at new-attempt registration");
+    assert_eq!(
+        error.to_string(),
+        "Worker is not accepting new tasks under its sharing settings"
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    executor.sharing.configure(Default::default()).unwrap();
+    assert!(
+        executor
+            .execute_task(&test_task("idle-new-attempt"))
+            .await
+            .unwrap()
+            .success
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
 async fn confirmed_attempt_stop_fences_late_execution() {
     let calls = Arc::new(AtomicUsize::new(0));
     let executor = WorkerExecutor::new_with_task_runner(HivemindConfig::default(), {

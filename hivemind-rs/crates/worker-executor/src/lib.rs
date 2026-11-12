@@ -33,6 +33,10 @@ pub enum StopTaskOutcome {
     NotRunning,
 }
 
+#[derive(Debug, thiserror::Error)]
+#[error("Worker is not accepting new tasks under its sharing settings")]
+pub(crate) struct SharingUnavailable;
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct ActiveTaskKey {
     task_id: String,
@@ -347,6 +351,12 @@ impl WorkerExecutor {
             if let Some(active_task) = active_tasks.running.get(&active_task_key) {
                 Some(active_task.result_rx.clone())
             } else {
+                // Recheck at the admission boundary: an RPC may have awaited
+                // authorization since its first sharing check. Existing attempts
+                // still join above, and a later mode change never cancels them.
+                if !self.sharing_status().accepts_tasks {
+                    return Err(SharingUnavailable.into());
+                }
                 active_tasks.running.insert(
                     active_task_key.clone(),
                     ActiveTaskEntry {
@@ -376,6 +386,15 @@ impl WorkerExecutor {
 
         Self::await_task_result(result_rx).await
     }
+
+    pub(crate) fn is_execution_attempt_running(&self, task_id: &str, attempt_id: &str) -> bool {
+        self.active_tasks.lock().is_ok_and(|tasks| {
+            tasks
+                .running
+                .contains_key(&ActiveTaskKey::new(task_id, attempt_id))
+        })
+    }
+
     async fn await_task_result(
         mut result_rx: watch::Receiver<Option<TaskResultMessage>>,
     ) -> Result<TaskResult> {

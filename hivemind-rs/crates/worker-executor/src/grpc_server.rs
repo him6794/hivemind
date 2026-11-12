@@ -297,6 +297,13 @@ struct WorkerTaskReport {
 }
 
 impl WorkerGrpcState {
+    fn require_new_work_availability(&self) -> Result<(), Status> {
+        if !self.executor.sharing_status().accepts_tasks {
+            return Err(Status::unavailable(crate::SharingUnavailable.to_string()));
+        }
+        Ok(())
+    }
+
     /// Construct a Worker state without an authority for in-process tests.
     #[cfg(test)]
     pub fn new(config: HivemindConfig, executor: Arc<WorkerExecutor>, worker_id: String) -> Self {
@@ -742,6 +749,7 @@ impl GrpcGeneralComputeChunkService {
                         "stale transfer lease generation cannot replace the admitted attempt",
                     ));
                 }
+                self.state.require_new_work_availability()?;
                 // A task retry rotates its attempt identity while retaining
                 // the same task id. Re-preparation is the explicit lifecycle
                 // boundary that replaces the previous pending assignment.
@@ -757,6 +765,7 @@ impl GrpcGeneralComputeChunkService {
                 ));
             }
         } else {
+            self.state.require_new_work_availability()?;
             reports.insert(
                 key,
                 WorkerTaskReport {
@@ -1397,6 +1406,22 @@ impl WorkerNodeService for GrpcWorkerNodeService {
                 ));
             }
         }
+        // BUSY is advisory to Nodepool's anti-steering scheduler. Enforce the
+        // owner's local sharing preference only after authenticated identity
+        // checks, while preserving retries of accepted/running work.
+        let attempt_id = match &admitted {
+            crate::runtime_admission::RuntimeRoute::GeneralComputeV1Alpha1(request) => {
+                request.attempt_id.as_str()
+            }
+            _ => request_identity.attempt_id.as_str(),
+        };
+        if !self
+            .state
+            .executor
+            .is_execution_attempt_running(&req.task_id, attempt_id)
+        {
+            self.state.require_new_work_availability()?;
+        }
         let hcode_artifact_access = if req.runtime.trim() == "hcode"
             && general_compute_runtime::hcode_artifacts::parse_input(&req.torrent)
                 .map_err(Status::invalid_argument)?
@@ -1586,6 +1611,9 @@ impl WorkerNodeService for GrpcWorkerNodeService {
                         .cache_consensus_result(&consensus_request, &response)?;
                 }
                 Ok(Response::new(response))
+            }
+            Err(error) if error.is::<crate::SharingUnavailable>() => {
+                Err(Status::unavailable(error.to_string()))
             }
             Err(_error) => {
                 if is_managed_gpu {
@@ -3369,6 +3397,286 @@ mod tests {
             "managed execution requires a consensus request"
         );
         assert!(service.report_for_task(task_id).unwrap().is_none());
+    }
+
+    fn sharing_consensus_request(task_id: &str) -> ExecuteTaskRequest {
+        let mut request = execute_request("hcode", "return 42;".into(), "{}".into(), 100);
+        request.task_id = task_id.into();
+        request.execution_id = format!("execution-{task_id}");
+        request.attempt_id = format!("attempt-{task_id}");
+        request.idempotency_key = format!("idempotency-{task_id}");
+        request.request_digest = digest_hex(task_id.as_bytes());
+        request.consensus_round_id = format!("round-{task_id}");
+        request.replica_id = format!("replica-{task_id}");
+        request.consensus_protocol_version = 1;
+        request.token = bound_consensus_token(
+            ASSIGNED_OWNER,
+            task_id,
+            &request.execution_id,
+            &request.attempt_id,
+            &request.idempotency_key,
+            &request.request_digest,
+            &request.consensus_round_id,
+            &request.replica_id,
+        );
+        request
+    }
+
+    fn set_idle_sharing(
+        service: &GrpcWorkerNodeService,
+        observation: crate::idle::IdleObservation,
+    ) {
+        service
+            .state
+            .executor
+            .sharing
+            .configure(hivemind_config::WorkerSharingConfig {
+                mode: hivemind_config::WorkerSharingMode::Idle,
+                idle_seconds: 60,
+                ..Default::default()
+            })
+            .unwrap();
+        *service
+            .state
+            .executor
+            .sharing
+            .observation_override
+            .lock()
+            .unwrap() = Some(observation);
+    }
+
+    #[tokio::test]
+    async fn idle_sharing_rejects_new_hcode_execution_and_preserves_authenticated_cache_replay() {
+        use crate::idle::IdleObservation;
+        let tmp = TempDir::new().unwrap();
+        let service = test_service(tmp.path());
+        let request = sharing_consensus_request("idle-hcode");
+        for observation in [
+            IdleObservation::LastInput(Some(Duration::ZERO)),
+            IdleObservation::LastInput(None),
+            IdleObservation::Unavailable,
+        ] {
+            set_idle_sharing(&service, observation);
+            let error = service
+                .execute_task(Request::new(request.clone()))
+                .await
+                .expect_err("idle-only sharing must refuse new execution before assignment");
+            assert_eq!(error.code(), Code::Unavailable);
+            assert!(service.report_for_task(&request.task_id).unwrap().is_none());
+            assert!(service
+                .state
+                .cached_consensus_result(&request)
+                .unwrap()
+                .is_none());
+        }
+
+        set_idle_sharing(
+            &service,
+            IdleObservation::LastInput(Some(Duration::from_secs(60))),
+        );
+        let completed = service
+            .execute_task(Request::new(request.clone()))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(completed.success, "{}", completed.status_message);
+        assert_eq!(completed.status_message, "42");
+        assert!(
+            completed
+                .managed_consensus_result
+                .as_ref()
+                .unwrap()
+                .usage_units
+                > 0
+        );
+
+        set_idle_sharing(&service, IdleObservation::LastInput(Some(Duration::ZERO)));
+        let replayed = service
+            .execute_task(Request::new(request.clone()))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(
+            replayed, completed,
+            "completed attempts remain replayable while busy"
+        );
+        let mut forged = request;
+        forged.token = "not-a-token".into();
+        assert_eq!(
+            service
+                .execute_task(Request::new(forged))
+                .await
+                .unwrap_err()
+                .code(),
+            Code::Unauthenticated
+        );
+
+        service
+            .state
+            .executor
+            .sharing
+            .configure(Default::default())
+            .unwrap();
+        let always = service
+            .execute_task(Request::new(sharing_consensus_request("always-hcode")))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(always.success, "always mode remains available");
+    }
+
+    #[tokio::test]
+    async fn idle_sharing_keeps_running_hcode_and_its_duplicate_rpc_alive() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use tokio::sync::Notify;
+        let tmp = TempDir::new().unwrap();
+        let mut service = test_service_with_successful_runner(tmp.path());
+        let started = Arc::new(Notify::new());
+        let finish = Arc::new(Notify::new());
+        let calls = Arc::new(AtomicUsize::new(0));
+        let config = service.state.config.clone();
+        Arc::get_mut(&mut service.state).unwrap().executor =
+            Arc::new(WorkerExecutor::new_with_task_runner(config, {
+                let started = started.clone();
+                let finish = finish.clone();
+                let calls = calls.clone();
+                move |task, cancellation| {
+                    let started = started.clone();
+                    let finish = finish.clone();
+                    let calls = calls.clone();
+                    async move {
+                        calls.fetch_add(1, Ordering::SeqCst);
+                        started.notify_one();
+                        finish.notified().await;
+                        assert!(
+                            !*cancellation.borrow(),
+                            "sharing must not cancel accepted work"
+                        );
+                        let mut result = successful_task_result();
+                        result.task_id = task.task_id;
+                        Ok(result)
+                    }
+                }
+            }));
+        let service = Arc::new(service);
+        let request = sharing_consensus_request("inflight-idle");
+        let running = {
+            let service = service.clone();
+            let request = request.clone();
+            tokio::spawn(async move { service.execute_task(Request::new(request)).await })
+        };
+        started.notified().await;
+        set_idle_sharing(
+            &service,
+            crate::idle::IdleObservation::LastInput(Some(Duration::ZERO)),
+        );
+        let mut duplicate = {
+            let service = service.clone();
+            tokio::spawn(async move { service.execute_task(Request::new(request)).await })
+        };
+        assert!(
+            tokio::time::timeout(Duration::from_millis(30), &mut duplicate)
+                .await
+                .is_err(),
+            "an active duplicate must await the accepted execution, not be refused"
+        );
+        finish.notify_one();
+        let completed = running.await.unwrap().unwrap().into_inner();
+        let replayed = duplicate.await.unwrap().unwrap().into_inner();
+        assert!(completed.success);
+        assert_eq!(completed, replayed);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn idle_sharing_refuses_new_artifact_preparation_but_keeps_existing_transfer_retries() {
+        let tmp = TempDir::new().unwrap();
+        let cas = TempDir::new().unwrap();
+        let store = Arc::new(CasChunkStore::new(cas.path()).unwrap());
+        let (worker, chunks) = chunk_test_components(tmp.path(), Some(store));
+        let manifest = general_compute_request_for_chunk_tests();
+        let task_id = "idle-prepare";
+        let token = bound_general_compute_token(ASSIGNED_OWNER, task_id, &manifest);
+        let request = general_compute_prepare_request(&manifest, &token, task_id);
+        set_idle_sharing(
+            &worker,
+            crate::idle::IdleObservation::LastInput(Some(Duration::ZERO)),
+        );
+        let error = chunks
+            .prepare_general_compute(Request::new(request.clone()))
+            .await
+            .expect_err("new artifact preparations must be refused while sharing is unavailable");
+        assert_eq!(error.code(), Code::Unavailable);
+        assert!(worker.report_for_task(task_id).unwrap().is_none());
+
+        worker
+            .state
+            .executor
+            .sharing
+            .configure(Default::default())
+            .unwrap();
+        chunks
+            .prepare_general_compute(Request::new(request.clone()))
+            .await
+            .unwrap();
+        set_idle_sharing(
+            &worker,
+            crate::idle::IdleObservation::LastInput(Some(Duration::ZERO)),
+        );
+        chunks
+            .prepare_general_compute(Request::new(request))
+            .await
+            .expect("retry of the exact already-prepared transfer remains available");
+    }
+
+    #[tokio::test]
+    async fn idle_sharing_change_during_admission_is_unavailable_not_a_failed_execution_result() {
+        struct BecomeBusyOnLeaseValidation(Arc<WorkerExecutor>);
+        #[tonic::async_trait]
+        impl TransferLeaseAuthority for BecomeBusyOnLeaseValidation {
+            async fn validate(
+                &self,
+                _token: &str,
+                _worker_id: &str,
+                _task_id: &str,
+                _execution_id: &str,
+                _attempt_id: &str,
+                _generation: i64,
+                _idempotency_key: &str,
+                _request_digest: &str,
+            ) -> Result<(), TransferLeaseAuthorityError> {
+                self.0
+                    .sharing
+                    .configure(hivemind_config::WorkerSharingConfig {
+                        mode: hivemind_config::WorkerSharingMode::Idle,
+                        ..Default::default()
+                    })
+                    .unwrap();
+                *self.0.sharing.observation_override.lock().unwrap() = Some(
+                    crate::idle::IdleObservation::LastInput(Some(Duration::ZERO)),
+                );
+                Ok(())
+            }
+        }
+        let tmp = TempDir::new().unwrap();
+        let (worker, _) = chunk_test_components(tmp.path(), None);
+        *worker.state.transfer_lease_authority.lock().unwrap() = Some(Arc::new(
+            BecomeBusyOnLeaseValidation(worker.state.executor.clone()),
+        ));
+        let manifest = general_compute_request_for_chunk_tests();
+        let task_id = "sharing-admission-race";
+        let token = bound_general_compute_token(ASSIGNED_OWNER, task_id, &manifest);
+        let error = worker
+            .execute_task(Request::new(general_compute_execute_request(
+                &manifest, &token, task_id,
+            )))
+            .await
+            .expect_err("a changed sharing preference must be rechecked before starting execution");
+        assert_eq!(error.code(), Code::Unavailable);
+        assert_eq!(
+            error.message(),
+            "Worker is not accepting new tasks under its sharing settings"
+        );
     }
 
     #[tokio::test]
