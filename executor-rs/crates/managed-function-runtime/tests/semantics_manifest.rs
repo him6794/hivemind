@@ -276,4 +276,4 @@ fn managed_function_v1_manifest_matches_budget_profile_and_cost_vectors() {
 }
 
 const EXPECTED_V1_MANIFEST_SHA256: &str =
-    "6621354e7117166c7f35ae543335c7f7d72425a25e8f179569478e232e7d05aa";
+    "d4c641691b75ad5a673c1424d324be2a3412170e1fccd86ae7ecddb09d30e214";

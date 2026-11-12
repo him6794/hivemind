@@ -82,7 +82,7 @@ closed interpreter. Its runtime, backend, cost-model, and semantics identities
 are pinned by
 [`executor-rs/crates/managed-function-runtime/hcode-semantics.json`](../executor-rs/crates/managed-function-runtime/hcode-semantics.json)
 and digest
-`6621354e7117166c7f35ae543335c7f7d72425a25e8f179569478e232e7d05aa`.
+`d4c641691b75ad5a673c1424d324be2a3412170e1fccd86ae7ecddb09d30e214`.
 
 - Each managed task is assigned to three distinct Workers by default, with a
   two-replica quorum; at most seven replicas may be configured. A single Worker

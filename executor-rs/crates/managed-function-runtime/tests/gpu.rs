@@ -10,7 +10,7 @@ use serde_json::Value as JsonValue;
 use sha2::{Digest, Sha256};
 
 const EXPECTED_GPU_MANIFEST_SHA256: &str =
-    "0fea0cfea0d2c68bbca7cccb951af6afa71b89fa9fd58e4c4d45944f1cdcd441";
+    "4ad70f9be7ae18660566c727759a6dd780a8d70cecc6b2a075584c2c8567293f";
 
 #[test]
 fn gpu_manifest_and_runtime_identifiers_are_pinned() {
@@ -55,6 +55,7 @@ fn gpu_manifest_and_runtime_identifiers_are_pinned() {
             "cpu_fallback",
             "determinism",
             "interpreter",
+            "json_float_input",
             "language",
             "max_rank",
             "max_tensor_bytes",

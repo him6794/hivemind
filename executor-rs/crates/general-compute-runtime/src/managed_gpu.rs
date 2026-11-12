@@ -19,7 +19,7 @@ pub const MANAGED_GPU_RUNTIME_VERSION: &str = "hcode-gpu";
 /// This is the raw digest of the canonical managed GPU semantics manifest. It
 /// deliberately uses the same representation as the interpreter crate.
 pub const MANAGED_GPU_SEMANTICS_MANIFEST_SHA256: &str =
-    "0fea0cfea0d2c68bbca7cccb951af6afa71b89fa9fd58e4c4d45944f1cdcd441";
+    "4ad70f9be7ae18660566c727759a6dd780a8d70cecc6b2a075584c2c8567293f";
 pub const MANAGED_GPU_OPERATION_REGISTRY_VERSION: &str = "hcode-gpu-ops-v1";
 pub const MANAGED_GPU_BILLING_VERSION: &str = "hcode-gpu-billing-v1";
 pub const MANAGED_GPU_COST_MODEL_VERSION: &str = "hcode-gpu-metering-v1";

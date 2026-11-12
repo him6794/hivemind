@@ -21,7 +21,7 @@ pub const V1_SEMANTICS_MANIFEST_JSON: &str = include_str!("../hcode-semantics.js
 /// SHA-256 of the canonical JSON bytes in [`V1_SEMANTICS_MANIFEST_JSON`],
 /// excluding the file's trailing newline.
 pub const V1_SEMANTICS_MANIFEST_SHA256: &str =
-    "6621354e7117166c7f35ae543335c7f7d72425a25e8f179569478e232e7d05aa";
+    "d4c641691b75ad5a673c1424d324be2a3412170e1fccd86ae7ecddb09d30e214";
 
 /// Versioned metering identity committed by the v1 semantics manifest.
 pub const V1_COST_MODEL_ID: &str = "hcode-execution-cpt-v1";
@@ -30,7 +30,7 @@ pub const V1_COST_MODEL_ID: &str = "hcode-execution-cpt-v1";
 pub const GPU_SEMANTICS_MANIFEST_JSON: &str = include_str!("../hcode-gpu-semantics.json");
 /// SHA-256 of the canonical GPU-v1 manifest excluding its trailing newline.
 pub const GPU_SEMANTICS_MANIFEST_SHA256: &str =
-    "0fea0cfea0d2c68bbca7cccb951af6afa71b89fa9fd58e4c4d45944f1cdcd441";
+    "4ad70f9be7ae18660566c727759a6dd780a8d70cecc6b2a075584c2c8567293f";
 
 pub mod artifacts;
 mod deterministic_math;
