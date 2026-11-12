@@ -1,0 +1,14 @@
+// A shard receives the same global weights as its peers. The last feature is
+// always 1.0, so the final row of the weight matrix trains the class biases.
+let params = get(input, "params");
+let state = get(input, "previous")[0];
+let x = tensor(get(params, "x"));
+let targets = tensor(get(params, "y"));
+let weights = tensor(get(state, "weights"));
+let rate = get(params, "learning_rate");
+for step in range(get(params, "local_steps")) {
+    let probabilities = softmax(matmul(x, weights));
+    let gradient = matmul(transpose(x), probabilities - targets) / float(len(x));
+    let weights = weights - gradient * rate;
+}
+return {"weights": tolist(weights), "loss_history": get(state, "loss_history")};

@@ -1,0 +1,3 @@
+# Generated fixtures are compared byte-for-byte on Windows and Unix.
+*.json text eol=lf
+*.hcode text eol=lf

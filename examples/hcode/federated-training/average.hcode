@@ -1,0 +1,21 @@
+// All shards have six examples, so equal averaging is sample-weighted FedAvg.
+let updates = get(input, "previous");
+let weights = tensor(get(updates[0], "weights"));
+for index in range(1, len(updates)) {
+    let weights = weights + tensor(get(updates[index], "weights"));
+}
+let weights = weights / float(len(updates));
+let params = get(input, "params");
+let x = tensor(get(params, "x"));
+let targets = get(params, "y");
+let probabilities = softmax(matmul(x, weights));
+let loss = 0.0;
+for row in range(len(x)) {
+    for label in range(len(targets[row])) {
+        if targets[row][label] > 0.0 {
+            let loss = loss - ln(probabilities[row][label]);
+        }
+    }
+}
+let loss = loss / float(len(x));
+return {"weights": tolist(weights), "loss_history": append(get(updates[0], "loss_history"), loss)};

@@ -1,0 +1,122 @@
+{
+  "input": {
+    "weights": [
+      [
+        0.0,
+        0.0,
+        0.0
+      ],
+      [
+        0.0,
+        0.0,
+        0.0
+      ],
+      [
+        0.0,
+        0.0,
+        0.0
+      ]
+    ],
+    "loss_history": [
+      1.0986122886681098
+    ]
+  },
+  "stages": [
+    {
+      "items": [
+        {
+          "source": "train.hcode",
+          "params_file": "params/shard-1.json"
+        },
+        {
+          "source": "train.hcode",
+          "params_file": "params/shard-2.json"
+        },
+        {
+          "source": "train.hcode",
+          "params_file": "params/shard-3.json"
+        }
+      ]
+    },
+    {
+      "items": [
+        {
+          "source": "average.hcode",
+          "params_file": "params/evaluation.json"
+        }
+      ]
+    },
+    {
+      "items": [
+        {
+          "source": "train.hcode",
+          "params_file": "params/shard-1.json"
+        },
+        {
+          "source": "train.hcode",
+          "params_file": "params/shard-2.json"
+        },
+        {
+          "source": "train.hcode",
+          "params_file": "params/shard-3.json"
+        }
+      ]
+    },
+    {
+      "items": [
+        {
+          "source": "average.hcode",
+          "params_file": "params/evaluation.json"
+        }
+      ]
+    },
+    {
+      "items": [
+        {
+          "source": "train.hcode",
+          "params_file": "params/shard-1.json"
+        },
+        {
+          "source": "train.hcode",
+          "params_file": "params/shard-2.json"
+        },
+        {
+          "source": "train.hcode",
+          "params_file": "params/shard-3.json"
+        }
+      ]
+    },
+    {
+      "items": [
+        {
+          "source": "average.hcode",
+          "params_file": "params/evaluation.json"
+        }
+      ]
+    },
+    {
+      "items": [
+        {
+          "source": "train.hcode",
+          "params_file": "params/shard-1.json"
+        },
+        {
+          "source": "train.hcode",
+          "params_file": "params/shard-2.json"
+        },
+        {
+          "source": "train.hcode",
+          "params_file": "params/shard-3.json"
+        }
+      ]
+    },
+    {
+      "items": [
+        {
+          "source": "average.hcode",
+          "params_file": "params/evaluation.json"
+        }
+      ]
+    }
+  ]
+}
