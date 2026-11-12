@@ -7,6 +7,8 @@ use std::time::{Duration, Instant};
 mod artifacts;
 #[path = "cli_check.rs"]
 mod check;
+#[path = "cli_model.rs"]
+pub mod model;
 #[path = "cli_pipeline.rs"]
 mod pipeline;
 
@@ -22,6 +24,7 @@ pub enum CliCommand {
     Batch(BatchCommand),
     Check(CheckCommand),
     Pipeline(PipelineCommand),
+    Model(model::ModelCommand),
 }
 
 /// One function run over many inputs. Inputs come one JSON value per line of `inputs_path`.
@@ -108,6 +111,9 @@ pub fn parse_cli_args(args: &[String]) -> Result<CliCommand> {
 
     if command == "pipeline" {
         return Ok(CliCommand::Pipeline(pipeline::parse_pipeline_args(args)?));
+    }
+    if command == "model" {
+        return Ok(CliCommand::Model(model::parse_model_args(args)?));
     }
 
     if command != "submit" {

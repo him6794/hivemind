@@ -172,6 +172,9 @@ pub async fn run_from_cli(args: Vec<String>) -> Result<()> {
             cli::PipelineCommand::Run(run) => cli::run_pipeline(&run).await,
         };
     }
+    if let cli::CliCommand::Model(model) = command {
+        return cli::model::run_model(model).await;
+    }
     let service = match command {
         cli::CliCommand::Service(service) => service,
         _ => unreachable!(),
