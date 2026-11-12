@@ -1,0 +1,285 @@
+{
+  "schema_version": 1,
+  "status": "passed",
+  "source_commit": "d65b8f38",
+  "same_host": true,
+  "cross_host_evidence": false,
+  "platform": "native Windows application processes; Docker Desktop disposable PostgreSQL and Redis",
+  "started_at": "2026-11-12T00:59:28.765294+00:00",
+  "finished_at": "2026-11-12T00:59:57.613244+00:00",
+  "binary_sha256": "16f80c6475829fc0a41c05fde97665a0f4d904a21e1c2de751da04bbccd4d685",
+  "topology": {
+    "nodepool": 1,
+    "master": 1,
+    "workers": 3,
+    "distinct_worker_owners": 3,
+    "replicas_per_task": 3,
+    "required_quorum": 2
+  },
+  "ordinary": {
+    "elapsed_seconds": 3.5,
+    "tasks": [
+      {
+        "stage": 1,
+        "item": 1,
+        "task_id": "ordinary-1-1",
+        "usage_units": 81,
+        "billed_cpt": 89,
+        "max_cpt": 89,
+        "worker_wall_time_ms": 0,
+        "consensus": {
+          "protocol_version": 1,
+          "state": "quorum_reached",
+          "replica_count": 3,
+          "required_quorum": 2,
+          "votes_received": 3,
+          "matching_votes": 2,
+          "result_digest": "sha256:3f994460242080fbee3d7c7065b81a51ffe224accf39d5725795aee60d81fb96",
+          "certificate_id": "08c36434-5679-4e62-a895-fc52cb4a7faa",
+          "evidence_level": "replicated",
+          "decided_at": "2026-11-12T00:59:45.265121+00:00",
+          "mode": "enforce",
+          "settlement_id": "",
+          "settlement_authorized": true
+        },
+        "created_at": "2026-11-12T00:59:44.995749+00:00",
+        "completed_at": "2026-11-12T00:59:45.265121+00:00",
+        "latency_ms": 269.372
+      },
+      {
+        "stage": 1,
+        "item": 2,
+        "task_id": "ordinary-1-2",
+        "usage_units": 81,
+        "billed_cpt": 89,
+        "max_cpt": 89,
+        "worker_wall_time_ms": 0,
+        "consensus": {
+          "protocol_version": 1,
+          "state": "quorum_reached",
+          "replica_count": 3,
+          "required_quorum": 2,
+          "votes_received": 3,
+          "matching_votes": 2,
+          "result_digest": "sha256:b7a0bfd0071dd577e9957b67a18dc0cd679c5aaff8eb23333df8cf0b46982a83",
+          "certificate_id": "0050cdad-8703-4fe0-b7b5-e94e2bcc62d0",
+          "evidence_level": "replicated",
+          "decided_at": "2026-11-12T00:59:46.274418+00:00",
+          "mode": "enforce",
+          "settlement_id": "",
+          "settlement_authorized": true
+        },
+        "created_at": "2026-11-12T00:59:46.005903+00:00",
+        "completed_at": "2026-11-12T00:59:46.274418+00:00",
+        "latency_ms": 268.515
+      },
+      {
+        "stage": 2,
+        "item": 1,
+        "task_id": "ordinary-2-1",
+        "usage_units": 66,
+        "billed_cpt": 72,
+        "max_cpt": 72,
+        "worker_wall_time_ms": 0,
+        "consensus": {
+          "protocol_version": 1,
+          "state": "quorum_reached",
+          "replica_count": 3,
+          "required_quorum": 2,
+          "votes_received": 3,
+          "matching_votes": 2,
+          "result_digest": "sha256:a2aba7e89dad8c900737c02487b5c4fea36e0403dbce61e6b870a1c9a8b4f443",
+          "certificate_id": "c5f0c0de-8bc1-4b9b-a374-80def7c39118",
+          "evidence_level": "replicated",
+          "decided_at": "2026-11-12T00:59:47.367543+00:00",
+          "mode": "enforce",
+          "settlement_id": "",
+          "settlement_authorized": true
+        },
+        "created_at": "2026-11-12T00:59:47.124551+00:00",
+        "completed_at": "2026-11-12T00:59:47.367543+00:00",
+        "latency_ms": 242.992
+      }
+    ],
+    "stages": [
+      {
+        "stage": 1,
+        "items": 2,
+        "usage_units": 162,
+        "billed_cpt": 178,
+        "max_task_latency_ms": 269.372
+      },
+      {
+        "stage": 2,
+        "items": 1,
+        "usage_units": 66,
+        "billed_cpt": 72,
+        "max_task_latency_ms": 242.992
+      }
+    ],
+    "usage_units": 228,
+    "billed_cpt": 250,
+    "final_output": [
+      13
+    ]
+  },
+  "model": {
+    "elapsed_seconds": 6.640999999828637,
+    "tasks": [
+      {
+        "stage": 1,
+        "item": 1,
+        "task_id": "model-1-1",
+        "usage_units": 1518,
+        "billed_cpt": 1669,
+        "max_cpt": 1669,
+        "worker_wall_time_ms": 0,
+        "consensus": {
+          "protocol_version": 1,
+          "state": "quorum_reached",
+          "replica_count": 3,
+          "required_quorum": 2,
+          "votes_received": 3,
+          "matching_votes": 2,
+          "result_digest": "sha256:e1bd5d60c34cee010a104bb19e5d9049c4bcea3de5d27503194de1c38898be24",
+          "certificate_id": "673dd7cd-c038-4c0f-a62b-29691b595465",
+          "evidence_level": "replicated",
+          "decided_at": "2026-11-12T00:59:49.787947+00:00",
+          "mode": "enforce",
+          "settlement_id": "",
+          "settlement_authorized": true
+        },
+        "created_at": "2026-11-12T00:59:48.84707+00:00",
+        "completed_at": "2026-11-12T00:59:49.787947+00:00",
+        "latency_ms": 940.877
+      },
+      {
+        "stage": 1,
+        "item": 2,
+        "task_id": "model-1-2",
+        "usage_units": 2124,
+        "billed_cpt": 2336,
+        "max_cpt": 2336,
+        "worker_wall_time_ms": 0,
+        "consensus": {
+          "protocol_version": 1,
+          "state": "quorum_reached",
+          "replica_count": 3,
+          "required_quorum": 2,
+          "votes_received": 3,
+          "matching_votes": 2,
+          "result_digest": "sha256:30069fae18cd6171ddbc94de9e80a45f950c1ceefc098cc388f06ae88dad02b6",
+          "certificate_id": "78ac9b6b-1287-416f-82cc-23ab7644fda1",
+          "evidence_level": "replicated",
+          "decided_at": "2026-11-12T00:59:51.144511+00:00",
+          "mode": "enforce",
+          "settlement_id": "",
+          "settlement_authorized": true
+        },
+        "created_at": "2026-11-12T00:59:49.859928+00:00",
+        "completed_at": "2026-11-12T00:59:51.144511+00:00",
+        "latency_ms": 1284.583
+      },
+      {
+        "stage": 1,
+        "item": 3,
+        "task_id": "model-1-3",
+        "usage_units": 2124,
+        "billed_cpt": 2336,
+        "max_cpt": 2336,
+        "worker_wall_time_ms": 0,
+        "consensus": {
+          "protocol_version": 1,
+          "state": "quorum_reached",
+          "replica_count": 3,
+          "required_quorum": 2,
+          "votes_received": 3,
+          "matching_votes": 2,
+          "result_digest": "sha256:73049892057ec86d63d8e6d1344774fcadf8c61e0954195aae768c71f84e159b",
+          "certificate_id": "a35db839-601f-4073-a47f-84901205f559",
+          "evidence_level": "replicated",
+          "decided_at": "2026-11-12T00:59:51.483045+00:00",
+          "mode": "enforce",
+          "settlement_id": "",
+          "settlement_authorized": true
+        },
+        "created_at": "2026-11-12T00:59:50.867907+00:00",
+        "completed_at": "2026-11-12T00:59:51.483045+00:00",
+        "latency_ms": 615.138
+      },
+      {
+        "stage": 2,
+        "item": 1,
+        "task_id": "model-2-1",
+        "usage_units": 1872,
+        "billed_cpt": 2059,
+        "max_cpt": 2059,
+        "worker_wall_time_ms": 0,
+        "consensus": {
+          "protocol_version": 1,
+          "state": "quorum_reached",
+          "replica_count": 3,
+          "required_quorum": 2,
+          "votes_received": 3,
+          "matching_votes": 2,
+          "result_digest": "sha256:75cd350296ebe7ae2e1d38b5942c0b5c2d08def4d625d0ec84b5d57391085147",
+          "certificate_id": "8e925cca-262d-4fc8-8eb8-5f23379730e3",
+          "evidence_level": "replicated",
+          "decided_at": "2026-11-12T00:59:54.745059+00:00",
+          "mode": "enforce",
+          "settlement_id": "",
+          "settlement_authorized": true
+        },
+        "created_at": "2026-11-12T00:59:52.028762+00:00",
+        "completed_at": "2026-11-12T00:59:54.745059+00:00",
+        "latency_ms": 2716.297
+      }
+    ],
+    "stages": [
+      {
+        "stage": 1,
+        "items": 3,
+        "usage_units": 5766,
+        "billed_cpt": 6341,
+        "max_task_latency_ms": 1284.583
+      },
+      {
+        "stage": 2,
+        "items": 1,
+        "usage_units": 1872,
+        "billed_cpt": 2059,
+        "max_task_latency_ms": 2716.297
+      }
+    ],
+    "usage_units": 7638,
+    "billed_cpt": 8400,
+    "final_output": [
+      [
+        [
+          0.0022121818309278644,
+          0.03099975472361578,
+          0.9667880634454564
+        ],
+        [
+          0.00013054534906521668,
+          0.007629065781460444,
+          0.9922403888694744
+        ]
+      ]
+    ]
+  },
+  "evidence": {
+    "replica_rows": 21,
+    "workers_with_successful_reports": 3,
+    "artifacts": 4,
+    "artifact_bytes": 3248
+  },
+  "cleanup": "stopped the five owned processes and removed only this run's disposable containers and temporary workspace",
+  "limitations": [
+    "Not cross-host/public-network evidence",
+    "Not Linux headless/idle-mode E2E evidence",
+    "Not GPU or general-compute isolation evidence",
+    "Not a performance benchmark"
+  ],
+  "raw_report": "test_logs/phase3-e2e-20261112-reviewed/summary.json"
+}

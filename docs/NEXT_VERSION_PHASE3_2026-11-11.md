@@ -83,7 +83,9 @@
 
 ### 閒置判斷只在 Worker 本機
 
-Worker 自己判斷電腦是否閒置，不閒置時在心跳中回報 `BUSY`。Nodepool 已經接受這個狀態，排程器不會把新工作派給 `BUSY` 的 Worker，所以不改 Nodepool。已經在執行的任務會跑完，不中斷。
+Worker 自己判斷電腦是否閒置，不閒置時在心跳中回報 `BUSY`，並在本機拒收新的執行與權重準備。已經在執行的任務會跑完，不中斷。
+
+2026-11-12 審查修正原先假設：現有共識排程器刻意將 `BUSY` 納入隨機選樣，避免依 Worker 自報的狀態選擇副本；不能只靠心跳阻止執行。本階段不更動這個 Nodepool 規則，也不降低副本數。本機拒收後可能無法達成共識而失敗，其他副本的有效工作仍可能計費，不能承諾透明補派。
 
 這是 Worker 對自己可用性的宣告，不涉及結果或計費的信任。
 
@@ -175,3 +177,70 @@ Worker 自己判斷電腦是否閒置，不閒置時在心跳中回報 `BUSY`。
 - `hivemind-rs`：`cargo fmt --all -- --check`、受影響 crate 的 clippy `-D warnings` 與測試。
 - `frontend/worker-ui`：`npm test`、`npm run build`。
 - 端到端：見 P7。
+
+## 2026-11-12 實作與審查補記
+
+P1／P2 已在前次提交；本次接續 P3–P7。實作、審查與最終同機整合複驗完成；廣域測試的既有逾時例外列於下方。只在本機提交，沒有 push 或部署。
+
+| 切片 | 狀態 | 本機提交／證據 |
+|---|---|---|
+| P1 concat | 完成（前次） | `3a3addc8` |
+| P2 pipeline check | 完成（前次） | `8d89dc8c` |
+| P3 pipeline run | 完成 | `97b6e82a`；預設副本政策與無 panic 後續修正 `28dcb5e5` |
+| P4 model init／split | 完成 | `84ae15fa`；無 panic 整理 `7c88bf8c` |
+| P5 小型訓練 | 完成 | `a1a03db3` |
+| P6 閒置分享 | 完成 | `e183fa65`；實際接收檢查 `daa81e02` |
+| P7 文件與同機 E2E | 完成 | 本次文件與驗證提交；可重跑腳本 `scripts/phase3_e2e.py`，結果見下方及 E2E 文件 |
+
+共同前置修正：`5babdc1e` 修正浮點數往返與語意摘要；`d65b8f38` 只把原本位於測試模組後的 `API_TOKEN_PREFIX` 移到模組前，排除既有 clippy 錯誤，常數值與 API 不變。
+
+### 採用的細節
+
+- P3 的 `--task-prefix` 可省略並自動產生；`--resume` 必須給同一前綴。任務 ID 從 `prefix-1-1` 起，重試用 `-r1`、`-r2`。每次建立前保存狀態，回應不確定時先查原 ID，不另建可能重複計費的任務。
+- 摘要涵蓋輸入、原始碼、參數與權重內容，且送出前核對實際保留的位元組。上限不納入摘要，所以預算不足後可調高再續跑；歷次費用與未結算上限仍全部計入。`billing_settled=false` 時不能把 API 的零金額當成免費。
+- JSON 結果檔包含成功、部分結果與失敗原因。完全沒嘗試送出的新執行不留狀態檔；有過送出嘗試，即使被拒、回應遺失或逾時，也保留可接續的紀錄。
+- 管線預設明確要求三副本，請求、估價與狀態檔使用同一數字。`model split`、`pipeline check` 與 `pipeline run` 均支援 `--replicas 2..7`。舊草稿的狀態若未固定實際副本政策，不能安全猜測，續跑會拒絕。
+- P4 以實際 canonical JSON 大小和 Worker 限制量測。中間張量採特徵列，最後轉回樣本列；softmax 在完整特徵合併後執行。中間結果若太大，仍嘗試與下一個縮小形狀的層打包，避免錯誤拒絕可執行模型。
+- P5 是三個分片、四回合 softmax 迴歸；固定參考損失由 `1.0986122886681098` 降至 `0.2206224401578563`，獨立參考容差 `1e-12`。這不是用浮點容差取代副本共識。
+- P6 的心跳之外另有本機接收檢查；檢查在身分驗證後，且執行器在登錄新任務時再檢查一次。執行中請求可加入等待，已快取回應可重取；完成到快取發布之間的重複請求仍可能暫時收到 `Unavailable`，但不會因此再執行一次。
+
+### 數值契約的前置修正
+
+P4 的逐位元比較找到 JSON 浮點數解析的二次捨入問題；例如 `-1.2392947103274559` 經預設解析器可能偏移一個 ULP，模型最後可偏移八個 ULP。兩個 Rust workspace 啟用 `serde_json/float_roundtrip`，並更新 CPU／GPU active 語意清單與所有固定摘要，沒有放寬比較或共識規則。
+
+- CPU：`d4c641691b75ad5a673c1424d324be2a3412170e1fccd86ae7ecddb09d30e214`。
+- GPU：`4ad70f9be7ae18660566c727759a6dd780a8d70cecc6b2a075584c2c8567293f`。
+- Frozen v0 不變。CLI、Nodepool 與 Worker 需使用相容的同版數值契約。
+
+### 審查
+
+先探測外部 Codex：本機找不到獨立 CLI，也沒有可用的獨立審查連接器，沒有宣稱外部 Codex 審查成功。改由獨立協作代理交叉審查，加上主代理完整 diff 核對。
+
+已將審查發現轉為回歸測試：未結算零金額、HTTP 400／500 的已持久化任務、同階段檔案變動、權重上傳回應遺失、預設副本數未固定，以及 `BUSY` 不會阻止排程的假設錯誤。P6 修正另檢查新任務拒收、未知閒置狀態、已有執行與重複請求、準備階段及接收競態。
+
+操作指南見 [管線、模型與閒置分享](PIPELINES_AND_MODELS.zh-TW.md)；實際執行方法與每階段證據見 [同機端到端驗證](PHASE3_LOCAL_E2E.md)。同機三 Worker 不代表跨主機、公網、Linux headless 或效能測試。
+
+### 最終驗證紀錄
+
+| 範圍 | 結果 |
+|---|---|
+| 最終 minimal CLI library | 109 通過，含 20 個網路管線與 10 個模型測試；all-target clippy `-D warnings` 通過 |
+| 最終 Worker | library 205、helper 4、integration 9＋2＋14、doc 1，共 235 通過；all-target clippy 與 fmt 通過 |
+| Config | 45 通過 |
+| Worker UI | 69 通過，正式建置通過 |
+| Master UI | 98 通過 |
+| 官網 | 104 通過，28 頁正式建置通過；只增加文件，不增加操作控制台 |
+| 訓練範例 | Python 4 通過；實際 Rust CLI 整合通過 |
+| E2E 腳本 | 9 個無服務單元測試通過；release-doc 契約通過 |
+| executor-rs | managed-function／general-compute 全測試、受影響 crate strict clippy、workspace fmt 通過 |
+| hivemind-rs 靜態檢查 | `cargo clippy --workspace --all-targets -- -D warnings` 與 `cargo fmt --all -- --check` 通過 |
+
+executor 的一項 supervisor 時序測試曾在平行負載下失敗，未改碼的串行完整複驗通過。
+
+廣域真 DB 執行使用 `HIVEMIND_REQUIRE_TEST_DATABASE=1`、獨立 PostgreSQL，以及 `cargo test --workspace --no-fail-fast -j 1 -- --test-threads=1`。合計 **1,156 通過、1 失敗、2 明確忽略**，程序以非零狀態結束；完整本機輸出留在 `test_logs/phase3-workspace-20261112.log`。其中 artifact20、auth38、default-bin120＋訓練整合1、client-core14、client-runtime88、config45、database25、consensus15、master71、models9、node-manager192、proto24、VPN49、Worker200＋helper／integration／doc30 通過；scheduler215 通過、1 失敗。兩個忽略項目分別需要外部 Resend API 和獨立 live Headscale，不是資料庫不可用時偷偷略過測試。
+
+唯一失敗是既有 `connect_transport_error_is_redispatchable_without_worker_penalty` 的外層 2 秒逾時，未改碼的 exact 重跑 **7／7 通過**。失敗發生在取得連線錯誤之前，尚未執行產品分類斷言。該測試與分類邏輯早於本次變更；本機 Windows 關閉埠的 OS 拒絕實測約 2 秒，而測試依賴內層 1 秒計時先返回。證據支持環境／計時不穩定，但沒有當時排程追蹤，不能斷言確切負載原因。未放寬逾時或修改無關產品程式，也不宣稱廣域測試全綠。
+
+上述廣域執行檔在最後 P3／P6 修正前已完成編譯，因此它的 CLI／Worker 數字不能代替最終版本驗證；最後修正另以表中的 CLI109、Worker235、strict clippy／fmt 和重新建置 binary 的 E2E 覆核。測試用 PostgreSQL 的確切容器 ID 已在全部 DB 測試結束後刪除，沒有動其他服務。
+
+最終 binary（程式碼提交 `d65b8f38`）於 **2026-11-12 00:59:28–00:59:57 UTC** 通過同機 E2E；SHA-256 為 `16f80c6475829fc0a41c05fde97665a0f4d904a21e1c2de751da04bbccd4d685`。一般管線 3 任務、228 單位、250 CPT；模型 4 任務、7,638 單位、8,400 CPT；21 筆成功副本回報，4 個完整權重 artifact。每階段時間與費用見 [實跑紀錄](PHASE3_LOCAL_E2E.md)，可版本控制的原始欄位見 [JSON 證據](evidence/phase3-same-host-2026-11-12.json)。五個程序、兩個專用容器和暫存工作目錄均已核對清除。

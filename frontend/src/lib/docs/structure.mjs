@@ -14,6 +14,7 @@ export const DOCS_PAGE_SLUGS = [
   'collections',
   'text',
   'budget',
+  'pipelines-models',
   'master-api',
   'templates-numbers',
   'templates-records',

@@ -58,6 +58,7 @@ export const docsPagesEn = [
       },
       { type: 'h2', id: 'worker', text: 'Share this computer (optional)' },
       { type: 'p', text: 'Worker runs replicas of other users tasks on this computer. Read the Trust and security page before you turn sharing on.' },
+      { type: 'p', text: 'In Worker settings, choose always (default) or idle sharing and an idle duration. Windows uses the last keyboard or mouse input. Headless Linux uses system CPU utilization below the configured threshold for that duration; the UI identifies this source. While active, Worker reports BUSY and locally refuses new work; existing tasks finish. Nodepool can still select a BUSY Worker: a refusal can prevent quorum, and valid work by other replicas may still incur charges. Sign in to the local Worker UI to change these settings.' },
       {
         type: 'steps',
         items: [
@@ -284,6 +285,82 @@ export const docsPagesEn = [
       { type: 'callout', tone: 'note', text: 'Automatic paid retries are disabled. Retry work is never charged to the task owner.' },
       { type: 'links', slugs: ['billing', 'master-api'] },
     ],
+  },
+  {
+    "slug": "pipelines-models",
+    "group": "tutorials",
+    "title": "Pipelines and models",
+    "description": "Run dependent stages, split a feed-forward CPU model, and try a small federated training example with the local CLI.",
+    "blocks": [
+      {
+        "type": "h2",
+        "id": "flow",
+        "text": "Pass results between stages"
+      },
+      {
+        "type": "p",
+        "text": "A pipeline JSON file contains stages, each with items. Each item names a source file, optional params or params_file, artifacts, and max_cpt. Paths are relative to the pipeline file. Tasks receive {params, previous}; previous holds the preceding stage outputs in item order. The first stage receives [pipeline.input]. Return a JSON value; printed text cannot feed the next stage."
+      },
+      {
+        "type": "h2",
+        "id": "run",
+        "text": "Check and run from your Master"
+      },
+      {
+        "type": "code",
+        "lang": "powershell",
+        "code": "hivemind-bin pipeline check ./pipeline.json\nhivemind-bin pipeline run ./pipeline.json --api http://127.0.0.1:8082 --username alice --replicas 3 --max-total-cpt 10000 --task-prefix demo --out ./results.json"
+      },
+      {
+        "type": "p",
+        "text": "Set HIVEMIND_PASSWORD in your local environment. check runs every stage locally and reports usage and output sizes. Use the same --replicas value (2–7, default 3) for model split, pipeline check and pipeline run. run submits hcode tasks through Master and waits for every item before advancing. Missing caps are measured locally; --no-local-run requires every max_cpt to be written. Caps must cover the resource quote. The total budget includes previous attempts and reserves unsettled tasks at their caps."
+      },
+      {
+        "type": "h2",
+        "id": "resume",
+        "text": "Continue an interrupted run"
+      },
+      {
+        "type": "p",
+        "text": "Repeat the command with --resume and the same prefix, output path, account, API and resource/replica settings. Keep results.json.state.json, which records each attempt before submission. Completed items are reused; failures get IDs ending in -r1, -r2. Changed input, source, parameters or weights prevent resume. Caps and the total budget may increase. Partial failures are recorded; already submitted tasks can still finish and incur charges after the CLI stops."
+      },
+      {
+        "type": "h2",
+        "id": "model",
+        "text": "Split a CPU model"
+      },
+      {
+        "type": "code",
+        "lang": "powershell",
+        "code": "hivemind-bin model init ./weights.safetensors --activation relu --final softmax --out ./model.json\nhivemind-bin model split ./model.json --weights ./weights.safetensors --input (Get-Content -Raw ./input.json) --out-dir ./split-model\nhivemind-bin pipeline check ./split-model/pipeline.json"
+      },
+      {
+        "type": "p",
+        "text": "init reads F32/F64 N.weight and optional N.bias tensors. Choose hidden and final activations explicitly: linear, relu, gelu and softmax layers are supported. --input accepts JSON text, not a filename; the PowerShell example reads input.json. Input and final output have one row per sample. split measures JSON sizes and runtime allocations, packs adjacent layers, partitions large output rows, and writes sources, weight shards and a pipeline with measured caps. Same-shaped values can differ in encoded size. Assigned Workers can see weights and intermediate values. Use matching CLI, Nodepool and Worker versions: concat and exact binary64 JSON roundtrips update the active semantics digest."
+      },
+      {
+        "type": "h2",
+        "id": "training",
+        "text": "Try federated averaging"
+      },
+      {
+        "type": "p",
+        "text": "The examples/hcode/federated-training example generates synthetic data using only the Python standard library. Each round trains softmax regression on three shards in parallel, averages weights, then feeds the average into the next round. Run its pipeline.json with pipeline check first. Regression tests compare decreasing losses with a fixed independent reference."
+      },
+      {
+        "type": "callout",
+        "tone": "note",
+        "text": "This is batch CPU inference and small-scale training, not interactive token generation or GPU splitting. Each stage has scheduling and consensus overhead. Splitting does not change CPT prices. Three Workers on one computer demonstrate same-host execution, not cross-host deployment."
+      },
+      {
+        "type": "links",
+        "slugs": [
+          "budget",
+          "limits",
+          "master-api"
+        ]
+      }
+    ]
   },
   {
     slug: 'master-api',

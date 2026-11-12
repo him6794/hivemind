@@ -57,6 +57,7 @@ export const docsPagesZh = [
       },
       { type: 'h2', id: 'worker', text: '分享這台電腦（選用）' },
       { type: 'p', text: 'Worker 會在這台電腦上執行其他使用者工作的副本。開始分享之前，請先閱讀「信任與安全」頁面。' },
+      { type: 'p', text: '在 Worker 設定選擇 always（預設）或 idle 分享與閒置秒數。Windows 看最後一次鍵盤或滑鼠輸入；Linux headless 要求系統 CPU 使用率持續低於門檻達到設定時間，介面會標示判斷來源。不閒置時回報 BUSY 並在本機拒收新工作，既有任務繼續完成。Nodepool 仍可能選到 BUSY Worker；拒收可能使任務無法達成共識，而其他副本的有效工作仍可能計費。請登入本機 Worker UI 調整設定。' },
       {
         type: 'steps',
         items: [
@@ -283,6 +284,82 @@ export const docsPagesZh = [
       { type: 'callout', tone: 'note', text: '自動付費重試已停用。重試的用量不會向任務擁有者收費。' },
       { type: 'links', slugs: ['billing', 'master-api'] },
     ],
+  },
+  {
+    "slug": "pipelines-models",
+    "group": "tutorials",
+    "title": "管線與模型切分",
+    "description": "使用本機 CLI 執行有先後依賴的階段、切分 CPU 前饋模型，並試跑小型聯邦訓練範例。",
+    "blocks": [
+      {
+        "type": "h2",
+        "id": "flow",
+        "text": "在階段之間傳遞結果"
+      },
+      {
+        "type": "p",
+        "text": "管線 JSON 含 stages，各階段有 items。每個項目指定 source，以及選填的 params 或 params_file、artifacts、max_cpt。路徑相對於管線檔。任務收到 {params, previous}，previous 是上一階段依項目順序排列的輸出；第一階段收到 [pipeline.input]。請 return JSON 值，print 的文字不能傳給下一階段。"
+      },
+      {
+        "type": "h2",
+        "id": "run",
+        "text": "透過自己的 Master 檢查與執行"
+      },
+      {
+        "type": "code",
+        "lang": "powershell",
+        "code": "hivemind-bin pipeline check ./pipeline.json\nhivemind-bin pipeline run ./pipeline.json --api http://127.0.0.1:8082 --username alice --replicas 3 --max-total-cpt 10000 --task-prefix demo --out ./results.json"
+      },
+      {
+        "type": "p",
+        "text": "先在本機環境設定 HIVEMIND_PASSWORD。check 本機跑完整條管線並列出用量與輸出大小。model split、pipeline check 與 pipeline run 請使用相同的 --replicas（2 至 7，預設 3）。run 經 Master 送出 hcode 任務，所有項目完成後才進入下一階段。缺少上限時會本機量測；--no-local-run 要求寫好每個 max_cpt。上限不得低於資源報價。總預算計入歷次嘗試的費用，未結算任務以上限保留。"
+      },
+      {
+        "type": "h2",
+        "id": "resume",
+        "text": "接續中斷的執行"
+      },
+      {
+        "type": "p",
+        "text": "以相同前綴、輸出路徑、帳號、API、資源與副本設定重跑指令，並加上 --resume。請保留 results.json.state.json，它在每次提交前記錄嘗試。已完成項目沿用，失敗項目用 -r1、-r2 結尾的新 ID。輸入、原始碼、參數或權重內容改變會拒絕續跑，但可以提高上限與總預算。結果也保存部分失敗；CLI 停止後，已送出的任務仍可能完成與計費。"
+      },
+      {
+        "type": "h2",
+        "id": "model",
+        "text": "切分 CPU 模型"
+      },
+      {
+        "type": "code",
+        "lang": "powershell",
+        "code": "hivemind-bin model init ./weights.safetensors --activation relu --final softmax --out ./model.json\nhivemind-bin model split ./model.json --weights ./weights.safetensors --input (Get-Content -Raw ./input.json) --out-dir ./split-model\nhivemind-bin pipeline check ./split-model/pipeline.json"
+      },
+      {
+        "type": "p",
+        "text": "init 讀取 F32／F64 的 N.weight 與選填 N.bias。請明確選擇隱藏層與輸出層活化函式；支援 linear、relu、gelu、softmax。--input 接受 JSON 文字，不是檔名；PowerShell 範例會讀取 input.json。輸入及最後輸出以樣本為列。split 量測 JSON 大小與執行配置量，打包相鄰層、切分大層輸出列，並寫出原始碼、權重分片與量好上限的管線。相同形狀的數值仍可能有不同文字大小。被指派的 Worker 能看到權重與中間結果。CLI、Nodepool 與 Worker 須同版：concat 與精確 binary64 JSON 往返已更新 active 語意摘要。"
+      },
+      {
+        "type": "h2",
+        "id": "training",
+        "text": "試跑聯邦平均"
+      },
+      {
+        "type": "p",
+        "text": "examples/hcode/federated-training 範例只用 Python 標準函式庫產生合成資料。每回合在三份分片平行訓練 softmax 迴歸，再平均權重並傳給下一回合。先以 pipeline check 跑範例的 pipeline.json。回歸測試會比較逐步下降的損失與固定的獨立參考值。"
+      },
+      {
+        "type": "callout",
+        "tone": "note",
+        "text": "這是批次 CPU 推論與小型訓練，不是互動式逐 token 生成或 GPU 切分。每段都有派工與共識開銷，切分不會改變 CPT 單價。同一台電腦的三個 Worker 只證明同機執行，不代表跨主機部署。"
+      },
+      {
+        "type": "links",
+        "slugs": [
+          "budget",
+          "limits",
+          "master-api"
+        ]
+      }
+    ]
   },
   {
     slug: 'master-api',

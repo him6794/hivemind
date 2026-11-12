@@ -126,8 +126,8 @@ CPU hcode 支援 signed `i64` 整數、有限的 `f64` 浮點數、boolean、str
 
 ### 不支援的語法
 
-- `while`、`break`、`continue`、member-dot access（例如 `input.values`）。
-- Source comments：不要在 hcode source 加 `//`、`#` 或 `/* ... */`。
+- Member-dot access（例如 `input.values`）；請使用 `get(input, "values")`。
+- `#` 或 `/* ... */` 註解。CPU hcode 已支援 `//` 行註解及上方的 `while`、`break`、`continue`。
 - 任意 host function、第三方套件、GPU kernel 或使用者 executable。
 
 **中文資料放 JSON input，不要直接寫在 source string literals。** Source lexer 的字串是 byte-wise decoding，無法保證 non-ASCII literal 原樣保留，也不接受 `\uXXXX`。可用的 source escapes 是 `\"`、`\\`、`\n`、`\r`、`\t`。JSON input 與輸出支援 UTF-8；例如把 `{"message":"你好"}` 當 input，source 使用 `get(input, "message");`。
@@ -151,7 +151,7 @@ CPU 新任務固定使用 `"runtime": "hcode"`：
 - `task_source` 是 source text，不是檔案路徑或下載 URL。
 - `torrent` 是歷史沿用的欄位名稱；hcode 在此放 **JSON 字串**，不是 JSON object，也不是 torrent、ZIP 或 executable。
 - Source 與 input 都必須非空；不需要資料時，可用 JSON 字串 `"null"` 作為 `torrent`。
-- JSON number 必須能表示為 signed i64 整數；不要使用小數、超大整數或指數形式假設會被接受。
+- JSON 整數可表示為 signed i64 時保留整數；其餘數字轉為有限 binary64 浮點數，超大整數可能捨入，需要精確整數時應限制於 i64 範圍。NaN、無限大與無法表示為有限 binary64 的數值不接受。JSON 浮點數解析保留 binary64 往返精度，適用於模型階段之間的傳遞。
 - Task ID 在同一帳號的工作流程中應唯一；重送前先確認原請求是否已成功，避免重複工作。
 - CPU／GPU 分數及記憶體等 requirements 是排程篩選條件；不是更換語言或取得 GPU execution 的方式。
 
@@ -286,7 +286,7 @@ hivemind-bin batch ./sum.hdsl \
 - **每筆的上限。** 預設是該輸入自己的精確需求（副本數 × 用量，加 10% 平台費），但不低於資源報價（報價只計算資源預留，不含程式執行的用量）。總額是各筆上限相加，再與 `--max-total-cpt` 比較。
 - **固定上限。** 指定 `--max-cpt-per-task` 時，每筆都用這個上限，需要超過它的輸入同樣在預檢被擋下，不會等到 Worker 以 `budget_exhausted` 失敗。
 
-`--replicas`（2 到 7）選擇副本數，並隨任務送給 Nodepool；沒有指定時以網路預設的 3 個副本估算。`--no-precheck` 關閉預檢，此時每筆上限預設為 100 CPT（不低於資源報價），超過上限的任務會以 `budget_exhausted` 失敗，依目前的計費規則，未達 quorum 的任務不收費。
+`--replicas`（2 到 7）選擇副本數，並隨任務送給 Nodepool；`batch` 沒有指定時以 3 個副本估算，Nodepool 的預設若不同，應明確指定。`--no-precheck` 關閉預檢，此時每筆上限預設為 100 CPT（不低於資源報價），超過上限的任務會以 `budget_exhausted` 失敗。未達 quorum 不代表免費，有效副本用量仍可能結算。
 
 提交速度預設為每分鐘 50 筆，低於 Master 的每分鐘提交上限（預設 60）；遇到 429 會等候視窗重置後再試。全部任務結束或超過 `--timeout-secs`（預設 3600）後，結果寫入 CSV，欄位為 `index,task_id,status,output,billed_cpt,message,input`。只有全部任務都 `COMPLETED` 時命令才以成功結束；被跳過的輸入不算完成，所以使用 `--skip-invalid` 時命令仍以失敗結束，結果檔會標出是哪幾筆。
 
@@ -295,6 +295,28 @@ hivemind-bin batch ./sum.hdsl \
 函式、任何一筆輸入、資源或副本設定與狀態檔不同時，`--resume` 會拒絕，因為任務 ID 由前綴與序號決定，續跑會把舊的任務 ID 配到不同的資料上。沒有 `--resume` 時，已有狀態檔的批次不會被覆寫；要重跑同一批資料，請換一個 `--task-prefix` 或 `--out`。
 
 密碼可以用 `HIVEMIND_PASSWORD` 環境變數提供，不必出現在命令列。CLI 的 `--password` 仍可能被本機程序檢視工具看見；不要在共享機器的命令列硬寫正式帳密，也不要把命令輸出、token 或私密 input 貼到公開紀錄。原生 Master／Worker UI 執行檔不是這個 CLI。
+
+### 多階段管線、模型與訓練
+
+多筆獨立輸入使用 `batch`；前後步驟需要傳遞結果時，可建立含 `stages`／
+`items` 的管線。`pipeline check` 本機執行，`pipeline run` 經 Master 送出，
+每個項目仍使用一般的 hcode 副本共識。
+
+```powershell
+hivemind-bin pipeline check ./pipeline.json
+hivemind-bin pipeline run ./pipeline.json --username alice --max-total-cpt 10000 --task-prefix demo --out ./results.json
+```
+
+各項目使用 `get(input, "previous")` 讀前一階段依序排列的結果，固定參數
+放在 `params`。請用 `return` 回傳 JSON；文字輸出不能傳給下一階段。
+中斷後以相同指令加上 `--resume`，已完成項目不會重送；若原始碼、參數、
+輸入或權重改變，續跑會被拒絕。
+管線預設明確要求三副本；`model split`、`pipeline check` 與 `pipeline run`
+可用相同的 `--replicas`（2 至 7）調整，不依 Nodepool 的未指定預設值估價。
+
+`model init` 與 `model split` 能從 safetensors 建立前饋模型並切成管線。
+softmax 迴歸的四回合聯邦平均範例位於 `examples/hcode/federated-training/`。
+完整可執行範例、預算與續跑規則見 [管線與模型操作指南](PIPELINES_AND_MODELS.zh-TW.md)。
 
 ## 7. 限制與錯誤排查
 
@@ -317,8 +339,8 @@ hcode 沒有另一個固定的 operation／loop work ceiling 取代預算；每�
 
 | 現象／code | 先檢查 |
 | --- | --- |
-| `parse_error` | 分號、`if...else`、裸 assignment、註解或 member-dot access |
-| `type_error` | JSON number 是否為 i64、運算元型別、list／dict 的 builtin 用法 |
+| `parse_error` | 分號、`if...else`、裸 assignment、不支援的註解形式或 member-dot access |
+| `type_error` | 整數是否超出 i64、浮點數是否有限、運算元型別、list／dict 的 builtin 用法 |
 | `index_error` | Index 是否越界；需要缺值回 null 時可考慮 `get` |
 | `integer_arithmetic_overflow` | 中間運算是否超出 signed i64 範圍 |
 | `budget_exhausted` | 實際每副本額度，不只看 task-wide `max_cpt` |

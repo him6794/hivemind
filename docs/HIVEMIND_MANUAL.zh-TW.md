@@ -553,6 +553,24 @@ v0 manifest／metering／billing／canonical evidence 保持 frozen，以便讀�
 
 歷史已 settlement 的 v1／v0 records 也不會因新 task-wide cap 自動重新計算退款。使用者查看舊任務時應核對當時的 billing version，而不是只看 runtime ID。
 
+### 7.7 管線、模型分段與訓練
+
+`hivemind-bin pipeline check <pipeline.json>` 在本機依階段執行 hcode；
+`pipeline run` 經 Master 送出，必填 `--max-total-cpt`，可用 `--out`、
+`--task-prefix` 與 `--resume` 保存並接續工作。每個項目接收
+`{"params": ..., "previous": [...]}`；上個階段全部完成後，才送出下個階段。
+狀態檔保留重送前的計費，未結算任務以上限保留預算，非 JSON 輸出會停止管線。
+
+`model init` 從 F32／F64 safetensors 的 `N.weight`／`N.bias` 建立模型描述；
+`model split` 依量測大小分層、分列，輸出原始碼、權重分片及寫好上限的管線。
+支援 linear、relu、gelu、softmax，輸入與最終輸出以樣本為列。
+完整格式、指令與聯邦訓練範例見 [管線與模型操作指南](PIPELINES_AND_MODELS.zh-TW.md)。
+
+Worker 可在本機 UI 切換 always／idle 分享。Windows 看最後輸入時間，
+Linux headless 看 CPU 使用率；不閒置時回報 BUSY 並在本機拒收新工作，既有任務繼續完成。
+Nodepool 仍可能選到 BUSY Worker；拒收可能使任務無法達成共識，其他副本的有效工作仍可能計費。
+這是 Worker 可用性設定，不是 Nodepool 的計費信任依據。
+
 <a id="settlement"></a>
 
 ## 8. 計量、共識、CPT 與結算
