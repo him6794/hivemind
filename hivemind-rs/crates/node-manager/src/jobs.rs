@@ -320,6 +320,70 @@ fn build_upload(job: &JobRow, task_id: &str, input: &str) -> UploadTaskRequest {
     }
 }
 
+/// Whether task `t`, with its consensus policy `p`, is the work of item `i` of job `j`.
+///
+/// A task id does not show that. Ids are unique across accounts, and a Worker that ran one item of a job can
+/// work out the ids of the items not yet submitted and create those tasks first. A task is an item's work only
+/// when the owner, program, input, cap, resources, and consensus policy stored for it are the ones the runner
+/// submits for that item. Each of those columns is written once, when the task is created.
+///
+/// A tensor input raises the stored memory to at least 1 GB, so a job that asks for none matches either value.
+const ITEM_TASK_IS_WORK: &str = "t.owner = j.owner AND t.runtime = 'hcode'
+     AND t.task_source = j.source AND t.torrent_source = i.input_json
+     AND t.max_cpt = j.per_item_max_cpt
+     AND t.req_cpu_score = j.cpu_score AND t.req_gpu_score = j.gpu_score
+     AND (t.req_memory_gb = j.memory_gb OR (j.memory_gb = 0 AND t.req_memory_gb = 1))
+     AND t.req_gpu_memory_gb = j.gpu_memory_gb
+     AND t.req_storage_gb = j.storage_gb AND t.host_count = j.host_count
+     AND t.deterministic AND NOT t.side_effects
+     AND t.general_compute_manifest_json IS NULL
+     AND t.managed_gpu_manifest_json IS NULL
+     AND t.managed_dsl_backend_id IS NULL
+     AND t.managed_dsl_semantics_manifest_sha256 IS NULL
+     AND p.protocol_version = 1 AND p.replica_count = j.replica_count
+     AND p.quorum = j.replica_count / 2 + 1 AND p.deterministic_required
+     AND p.mode IN ('enforce', 'observe')";
+
+/// The query behind every read of a job's items.
+///
+/// `bound_items` pairs each item with the task and consensus policy stored under its task id, and says whether
+/// that task is really the item's work. `safe_items` hides the private details of an item whose stored task is
+/// not its own: its state stays, so the counts stay honest, but its output, billing, and message are blanked, so
+/// a colliding task cannot leak a stranger's work or spend. The runner uses the same view to decide whether an
+/// item may adopt a task, and a read uses it to keep a mismatched item from exposing what it does not own.
+fn job_items_query(filter: &str, select: &str) -> String {
+    format!(
+        "WITH bound_items AS (
+             SELECT i.job_id, i.item_index, i.task_id, i.input_json, i.state, i.updated_at,
+                    j.per_item_max_cpt,
+                    i.output AS raw_output,
+                    i.billed_cpt AS raw_billed_cpt,
+                    i.status_message AS raw_status_message,
+                    t.task_id IS NOT NULL AS task_exists,
+                    COALESCE({ITEM_TASK_IS_WORK}, false) AS task_matches,
+                    t.status AS task_status,
+                    t.output AS task_output,
+                    t.billed_amount AS task_billed_amount,
+                    t.status_message AS task_status_message
+             FROM job_items i
+             JOIN jobs j ON j.id = i.job_id
+             LEFT JOIN tasks t ON t.task_id = i.task_id
+             LEFT JOIN managed_consensus_policies p ON p.task_id = t.task_id
+             WHERE {filter}
+         ),
+         safe_items AS (
+             SELECT job_id, item_index, task_id, input_json, state, updated_at, per_item_max_cpt,
+                    task_exists, task_matches, task_status, task_output, task_billed_amount,
+                    task_status_message,
+                    CASE WHEN task_exists AND NOT task_matches THEN '' ELSE raw_output END AS output,
+                    CASE WHEN task_exists AND NOT task_matches THEN 0::bigint ELSE raw_billed_cpt END AS billed_cpt,
+                    CASE WHEN task_exists AND NOT task_matches THEN '' ELSE raw_status_message END AS status_message
+             FROM bound_items
+         )
+         {select}"
+    )
+}
+
 async fn fetch_job_locked(
     tx: &mut Transaction<'_, Postgres>,
     job_id: Uuid,
@@ -359,51 +423,69 @@ async fn set_item(
 
 /// Follows the tasks of submitted items. A task that reached an end moves its item to the matching state.
 async fn sync_submitted(tx: &mut Transaction<'_, Postgres>, job: &JobRow) -> Result<()> {
-    let submitted: Vec<(i32, String, DateTime<Utc>)> = sqlx::query_as(
-        "SELECT item_index, task_id, updated_at FROM job_items WHERE job_id = $1 AND state = 'submitted'",
-    )
+    #[derive(FromRow)]
+    struct SubmittedTask {
+        item_index: i32,
+        updated_at: DateTime<Utc>,
+        task_exists: bool,
+        task_matches: bool,
+        task_status: Option<String>,
+        task_output: Option<String>,
+        task_billed_amount: Option<i64>,
+        task_status_message: Option<String>,
+    }
+    let submitted: Vec<SubmittedTask> = sqlx::query_as(sqlx::AssertSqlSafe(job_items_query(
+        "i.job_id = $1 AND i.state = 'submitted'",
+        "SELECT item_index, updated_at, task_exists, task_matches, task_status,
+                    task_output, task_billed_amount, task_status_message FROM bound_items",
+    )))
     .bind(job.id)
     .fetch_all(&mut **tx)
     .await?;
-    if submitted.is_empty() {
-        return Ok(());
-    }
-    let task_ids: Vec<String> = submitted
-        .iter()
-        .map(|(_, task_id, _)| task_id.clone())
-        .collect();
-    // `output` and `status_message` are nullable on tasks, so they are read as options.
-    type TaskRow = (String, String, Option<String>, i64, Option<String>);
-    let tasks: Vec<TaskRow> = sqlx::query_as(
-        "SELECT task_id, status, output, billed_amount, status_message FROM tasks WHERE task_id = ANY($1)",
-    )
-    .bind(&task_ids)
-    .fetch_all(&mut **tx)
-    .await?;
-    let by_id: std::collections::HashMap<&str, &TaskRow> =
-        tasks.iter().map(|task| (task.0.as_str(), task)).collect();
-    for (index, task_id, submitted_at) in &submitted {
-        let Some(task) = by_id.get(task_id.as_str()) else {
+    for task in submitted {
+        if !task.task_exists {
             // The task is created before the submission is recorded, so a missing task means it was lost.
-            if Utc::now() - *submitted_at > chrono::Duration::seconds(60) {
-                set_item(tx, job.id, *index, "failed", 0, "", "task not found").await?;
+            if Utc::now() - task.updated_at > chrono::Duration::seconds(60) {
+                set_item(
+                    tx,
+                    job.id,
+                    task.item_index,
+                    "failed",
+                    0,
+                    "",
+                    "task not found",
+                )
+                .await?;
             }
             continue;
-        };
-        let next = match task.1.as_str() {
-            "COMPLETED" => "completed",
-            "FAILED" | "TIMED_OUT" => "failed",
-            "CANCELLED" => "cancelled",
+        }
+        if !task.task_matches {
+            set_item(
+                tx,
+                job.id,
+                task.item_index,
+                "refused",
+                0,
+                "",
+                "task binding mismatch",
+            )
+            .await?;
+            continue;
+        }
+        let next = match task.task_status.as_deref() {
+            Some("COMPLETED") => "completed",
+            Some("FAILED" | "TIMED_OUT") => "failed",
+            Some("CANCELLED") => "cancelled",
             _ => continue,
         };
         set_item(
             tx,
             job.id,
-            *index,
+            task.item_index,
             next,
-            task.3,
-            task.2.as_deref().unwrap_or_default(),
-            task.4.as_deref().unwrap_or_default(),
+            task.task_billed_amount.unwrap_or_default(),
+            task.task_output.as_deref().unwrap_or_default(),
+            task.task_status_message.as_deref().unwrap_or_default(),
         )
         .await?;
     }
@@ -461,9 +543,22 @@ async fn submit_pending(
             Ok(response) => {
                 let reply = response.into_inner();
                 if reply.success || reply.status_message == "task_id already exists" {
-                    // A task that already exists was created by an earlier tick that stopped before recording it.
-                    set_item(tx, job.id, index, "submitted", 0, "", "").await?;
-                    reserved += job.per_item_max_cpt;
+                    // Recover an interrupted create only if the persisted task is exactly this item.
+                    let matches: bool = sqlx::query_scalar(sqlx::AssertSqlSafe(job_items_query(
+                        "i.job_id = $1 AND i.item_index = $2",
+                        "SELECT task_matches FROM bound_items",
+                    )))
+                    .bind(job.id)
+                    .bind(index)
+                    .fetch_one(&mut **tx)
+                    .await?;
+                    if matches {
+                        set_item(tx, job.id, index, "submitted", 0, "", "").await?;
+                        reserved += job.per_item_max_cpt;
+                    } else {
+                        set_item(tx, job.id, index, "refused", 0, "", "task binding mismatch")
+                            .await?;
+                    }
                 } else if reply.status_message.starts_with("insufficient balance") {
                     // Later items would fail the same way, so the job waits for funds instead of refusing them.
                     note = "waiting for CPT".into();
@@ -488,10 +583,11 @@ async fn count_item_states(
     tx: &mut Transaction<'_, Postgres>,
     job_id: Uuid,
 ) -> Result<StateCounts> {
-    let rows: Vec<(String, i64, i64)> = sqlx::query_as(
+    let rows: Vec<(String, i64, i64)> = sqlx::query_as(sqlx::AssertSqlSafe(job_items_query(
+        "i.job_id = $1",
         "SELECT state, COUNT(*)::bigint, COALESCE(SUM(billed_cpt), 0)::bigint
-         FROM job_items WHERE job_id = $1 GROUP BY state",
-    )
+             FROM safe_items GROUP BY state",
+    )))
     .bind(job_id)
     .fetch_all(&mut **tx)
     .await?;
@@ -511,10 +607,10 @@ async fn cancel_items(
     .bind(job.id)
     .execute(&mut **tx)
     .await?;
-    let running: Vec<(String,)> = sqlx::query_as(
-        "SELECT task_id FROM job_items
-         WHERE job_id = $1 AND state = 'submitted' AND status_message <> 'stop requested'",
-    )
+    let running: Vec<(String,)> = sqlx::query_as(sqlx::AssertSqlSafe(job_items_query(
+        "i.job_id = $1 AND i.state = 'submitted' AND i.status_message <> 'stop requested'",
+        "SELECT task_id FROM bound_items WHERE task_matches",
+    )))
     .bind(job.id)
     .fetch_all(&mut **tx)
     .await?;
@@ -639,10 +735,11 @@ impl GrpcJobService {
         let Some(job) = job else {
             return Ok(None);
         };
-        let rows: Vec<(String, i64, i64)> = sqlx::query_as(
+        let rows: Vec<(String, i64, i64)> = sqlx::query_as(sqlx::AssertSqlSafe(job_items_query(
+            "i.job_id = $1",
             "SELECT state, COUNT(*)::bigint, COALESCE(SUM(billed_cpt), 0)::bigint
-             FROM job_items WHERE job_id = $1 GROUP BY state",
-        )
+                 FROM safe_items GROUP BY state",
+        )))
         .bind(job_id)
         .fetch_all(pool)
         .await
@@ -814,14 +911,16 @@ impl JobService for GrpcJobService {
                 .await
                 .map_err(|e| Status::internal(e.to_string()))?;
         let ids: Vec<Uuid> = jobs.iter().map(|job| job.id).collect();
-        let rows: Vec<(Uuid, String, i64, i64)> = sqlx::query_as(
-            "SELECT job_id, state, COUNT(*)::bigint, COALESCE(SUM(billed_cpt), 0)::bigint
-             FROM job_items WHERE job_id = ANY($1) GROUP BY job_id, state",
-        )
-        .bind(&ids)
-        .fetch_all(pool)
-        .await
-        .map_err(|e| Status::internal(e.to_string()))?;
+        let rows: Vec<(Uuid, String, i64, i64)> =
+            sqlx::query_as(sqlx::AssertSqlSafe(job_items_query(
+                "i.job_id = ANY($1)",
+                "SELECT job_id, state, COUNT(*)::bigint, COALESCE(SUM(billed_cpt), 0)::bigint
+                 FROM safe_items GROUP BY job_id, state",
+            )))
+            .bind(&ids)
+            .fetch_all(pool)
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
         let views = jobs
             .iter()
             .map(|job| {
@@ -873,15 +972,15 @@ impl JobService for GrpcJobService {
         let offset = req.offset.max(0);
         let limit = req.limit.clamp(1, 100);
         #[allow(clippy::type_complexity)]
-        let rows: Vec<(i32, String, String, i64, i64, String, i32, String, i64)> = sqlx::query_as(
-            "SELECT i.item_index, i.task_id, i.state, j.per_item_max_cpt, i.billed_cpt,
-                    left(i.output, $4), octet_length(i.output), i.status_message, octet_length(i.input_json)::bigint
-             FROM job_items i
-             JOIN jobs j ON j.id = i.job_id
-             WHERE i.job_id = $1 AND j.owner = $2
-             ORDER BY i.item_index
-             OFFSET $3 LIMIT $5",
-        )
+        let rows: Vec<(i32, String, String, i64, i64, String, i32, String, i64)> =
+            sqlx::query_as(sqlx::AssertSqlSafe(job_items_query(
+                "i.job_id = $1 AND j.owner = $2",
+                "SELECT item_index, task_id, state, per_item_max_cpt, billed_cpt,
+                        left(output, $4), octet_length(output), status_message, octet_length(input_json)::bigint
+                 FROM safe_items
+                 ORDER BY item_index
+                 OFFSET $3 LIMIT $5",
+            )))
         .bind(job_id)
         .bind(&owner)
         .bind(offset)
@@ -1103,6 +1202,7 @@ mod db_tests {
     use crate::NodeManager;
     use hivemind_auth::api_tokens::ApiTokenStore;
     use hivemind_config::HivemindConfig;
+    use hivemind_proto::master_node_service_server::MasterNodeService;
     use hivemind_task_scheduler::TaskScheduler;
 
     // Without a database these tests return early, as the other database tests in this crate do.
@@ -1255,6 +1355,273 @@ mod db_tests {
         advance_job(state, Uuid::parse_str(job_id).unwrap())
             .await
             .unwrap();
+    }
+
+    async fn precreate_item_task(
+        state: &Arc<NodepoolState>,
+        job_id: &str,
+        token: &str,
+        mismatch: &str,
+    ) -> String {
+        let job: JobRow = sqlx::query_as("SELECT * FROM jobs WHERE id = $1")
+            .bind(Uuid::parse_str(job_id).unwrap())
+            .fetch_one(&state.scheduler.database().pool)
+            .await
+            .unwrap();
+        let (task_id, input): (String, String) = sqlx::query_as(
+            "SELECT task_id, input_json FROM job_items WHERE job_id = $1 AND item_index = 0",
+        )
+        .bind(job.id)
+        .fetch_one(&state.scheduler.database().pool)
+        .await
+        .unwrap();
+        let mut upload = build_upload(&job, &task_id, &input);
+        upload.token = token.into();
+        match mismatch {
+            "source" => upload.task_source = "return 987654321;".into(),
+            "input" => upload.torrent = "{\"private\":true}".into(),
+            "cap" => upload.max_cpt += 10,
+            "resources" => upload.requirements.as_mut().unwrap().cpu_score += 1,
+            "policy" => {
+                upload.managed_replica_count = 5;
+                upload.managed_quorum = 3;
+            }
+            "owner" | "exact" => {}
+            _ => panic!("unknown mismatch"),
+        }
+        let response = GrpcMasterNodeService::new(state.clone())
+            .upload_task(Request::new(upload))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(response.success, "{}", response.status_message);
+        task_id
+    }
+
+    async fn assert_item_collision_is_refused(mismatch: &str, already_submitted: bool) {
+        let (state, fixture) = fixture("job_binding_conflict")
+            .await
+            .expect("binding regressions require the test database");
+        let owner = account(&state, "binding-owner", 1000).await;
+        let other = account(&state, "binding-other", 1000).await;
+        let service = GrpcJobService::new(state.clone());
+        let created = service
+            .create_job(Request::new(create_request(&owner, &["1"], 20, 20)))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(created.success);
+        let task_id = precreate_item_task(
+            &state,
+            &created.job_id,
+            if mismatch == "owner" { &other } else { &owner },
+            mismatch,
+        )
+        .await;
+        finish_task(
+            &state,
+            &task_id,
+            "COMPLETED",
+            "private-conflicting-output",
+            7,
+        )
+        .await;
+        if already_submitted {
+            sqlx::query("UPDATE job_items SET state = 'submitted' WHERE task_id = $1")
+                .bind(&task_id)
+                .execute(&state.scheduler.database().pool)
+                .await
+                .unwrap();
+        }
+        tick(&state, &created.job_id).await;
+        tick(&state, &created.job_id).await;
+        let result = items(&service, &owner, &created.job_id).await;
+        assert_eq!(
+            result[0].state, "refused",
+            "must not adopt {mismatch} collision"
+        );
+        assert!(result[0].output_preview.is_empty());
+        assert_eq!(result[0].output_bytes, 0);
+        assert_eq!(result[0].billed_cpt, 0);
+        assert_eq!(
+            job_view(&service, &owner, &created.job_id).await.spent_cpt,
+            0
+        );
+        fixture.cleanup().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn task_binding_collision_cannot_adopt_another_accounts_task() {
+        assert_item_collision_is_refused("owner", false).await;
+    }
+
+    #[tokio::test]
+    async fn task_binding_collision_requires_exact_source_input_resources_cap_and_policy() {
+        for mismatch in ["source", "input", "resources", "cap", "policy"] {
+            assert_item_collision_is_refused(mismatch, false).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn task_binding_is_rechecked_for_preexisting_submitted_rows() {
+        for mismatch in ["owner", "source", "input"] {
+            assert_item_collision_is_refused(mismatch, true).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn task_binding_mismatch_hides_historical_cached_output_and_billing() {
+        let (state, fixture) = fixture("job_binding_history").await.unwrap();
+        let owner = account(&state, "history-owner", 1000).await;
+        let victim = account(&state, "history-victim", 1000).await;
+        let service = GrpcJobService::new(state.clone());
+        let created = service
+            .create_job(Request::new(create_request(&owner, &["1"], 20, 20)))
+            .await
+            .unwrap()
+            .into_inner();
+        let task_id = precreate_item_task(&state, &created.job_id, &victim, "owner").await;
+        finish_task(&state, &task_id, "COMPLETED", "victim-secret", 7).await;
+        sqlx::query(
+            "UPDATE job_items SET state = 'completed', output = 'victim-secret', billed_cpt = 7,
+             status_message = 'victim-private-message' WHERE task_id = $1",
+        )
+        .bind(&task_id)
+        .execute(&state.scheduler.database().pool)
+        .await
+        .unwrap();
+        sqlx::query("UPDATE jobs SET state = 'completed' WHERE id = $1")
+            .bind(Uuid::parse_str(&created.job_id).unwrap())
+            .execute(&state.scheduler.database().pool)
+            .await
+            .unwrap();
+        let exposed = items(&service, &owner, &created.job_id).await;
+        assert!(
+            exposed[0].output_preview.is_empty(),
+            "historical cross-owner output must not escape"
+        );
+        assert_eq!(exposed[0].output_bytes, 0);
+        assert_eq!(exposed[0].billed_cpt, 0);
+        assert!(!exposed[0].status_message.contains("victim"));
+        assert_eq!(
+            job_view(&service, &owner, &created.job_id).await.spent_cpt,
+            0
+        );
+        let listed = service
+            .list_jobs(Request::new(ListJobsRequest { token: owner }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(listed.jobs[0].spent_cpt, 0);
+        fixture.cleanup().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn task_binding_mismatch_never_cancels_an_unrelated_same_owner_task() {
+        let (state, fixture) = fixture("job_binding_cancel").await.unwrap();
+        let owner = account(&state, "cancel-binding-owner", 1000).await;
+        let service = GrpcJobService::new(state.clone());
+        let created = service
+            .create_job(Request::new(create_request(&owner, &["1"], 20, 20)))
+            .await
+            .unwrap()
+            .into_inner();
+        let task_id = precreate_item_task(&state, &created.job_id, &owner, "source").await;
+        sqlx::query("UPDATE job_items SET state = 'submitted' WHERE task_id = $1")
+            .bind(&task_id)
+            .execute(&state.scheduler.database().pool)
+            .await
+            .unwrap();
+        service
+            .cancel_job(Request::new(CancelJobRequest {
+                token: owner,
+                job_id: created.job_id.clone(),
+            }))
+            .await
+            .unwrap();
+        tick(&state, &created.job_id).await;
+        let task = state.scheduler.get_task(&task_id).await.unwrap().unwrap();
+        assert_eq!(
+            task.status.as_str(),
+            "PENDING",
+            "cancellation must not touch a differently bound task"
+        );
+        fixture.cleanup().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn task_binding_exact_match_recovers_after_create_before_item_checkpoint() {
+        let (state, fixture) = fixture("job_binding_recovery").await.unwrap();
+        let owner = account(&state, "recover-binding-owner", 1000).await;
+        let service = GrpcJobService::new(state.clone());
+        let created = service
+            .create_job(Request::new(create_request(&owner, &["1"], 20, 20)))
+            .await
+            .unwrap()
+            .into_inner();
+        let task_id = precreate_item_task(&state, &created.job_id, &owner, "exact").await;
+        tick(&state, &created.job_id).await;
+        assert_eq!(
+            items(&service, &owner, &created.job_id).await[0].state,
+            "submitted"
+        );
+        finish_task(&state, &task_id, "COMPLETED", "2", 7).await;
+        tick(&state, &created.job_id).await;
+        let result = items(&service, &owner, &created.job_id).await;
+        assert_eq!(result[0].state, "completed");
+        assert_eq!(result[0].output_preview, "2");
+        assert_eq!(result[0].billed_cpt, 7);
+        let task_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM tasks WHERE task_id = $1")
+            .bind(task_id)
+            .fetch_one(&state.scheduler.database().pool)
+            .await
+            .unwrap();
+        assert_eq!(task_count, 1);
+        fixture.cleanup().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn task_binding_recovery_preserves_canonical_tensor_memory_and_persisted_policy() {
+        let (state, fixture) = fixture("job_binding_canonical").await.unwrap();
+        let owner = account(&state, "canonical-binding-owner", 1000).await;
+        let service = GrpcJobService::new(state.clone());
+        let digest = general_compute_runtime::sha256_digest(&[0; 10]);
+        let input = serde_json::json!({
+            "$hcode_tensor_inputs": 1,
+            "input": 1,
+            "artifacts": [{
+                "artifact_id": "tensor", "role": "input", "size_bytes": 10,
+                "mime_type": "application/x-safetensors", "sha256": digest,
+                "chunks": [{ "offset": 0, "size_bytes": 10, "sha256": digest }]
+            }]
+        })
+        .to_string();
+        let mut request = create_request(&owner, &[&input], 20, 20);
+        request.replica_count = 5;
+        let created = service
+            .create_job(Request::new(request))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(created.success);
+        let task_id = precreate_item_task(&state, &created.job_id, &owner, "exact").await;
+        sqlx::query("UPDATE managed_consensus_policies SET mode = 'observe' WHERE task_id = $1")
+            .bind(&task_id)
+            .execute(&state.scheduler.database().pool)
+            .await
+            .unwrap();
+        let memory: i32 = sqlx::query_scalar("SELECT req_memory_gb FROM tasks WHERE task_id = $1")
+            .bind(&task_id)
+            .fetch_one(&state.scheduler.database().pool)
+            .await
+            .unwrap();
+        assert_eq!(memory, 1);
+        tick(&state, &created.job_id).await;
+        assert_eq!(
+            items(&service, &owner, &created.job_id).await[0].state,
+            "submitted"
+        );
+        fixture.cleanup().await.unwrap();
     }
 
     #[tokio::test]
