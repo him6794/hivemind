@@ -226,6 +226,8 @@ export default function MasterApp() {
   const [dryRun, setDryRun] = useState(null);
   const [dryRunLoading, setDryRunLoading] = useState(false);
   const resourceValues = { cpuScore, gpuScore, memoryGb, gpuMemoryGb, storageGb, hostCount };
+  const currentDryRunSignature = useRef('');
+  currentDryRunSignature.current = dryRunSignature(taskSource, taskInput, resourceValues);
 
   const [tasks, setTasks] = useState([]);
   const [selectedTask, setSelectedTask] = useState('');
@@ -631,7 +633,7 @@ export default function MasterApp() {
         undefined,
         DRY_RUN_REQUEST_TIMEOUT_MS,
       );
-      if (tokenRef.current !== token) return;
+      if (tokenRef.current !== token || currentDryRunSignature.current !== signature) return;
       let view = interpretDryRun({ ok, status: httpStatus, data });
       if (view.kind === 'quote') {
         // The Master refuses a cap below the price of the reserved resources, so that price
@@ -646,14 +648,20 @@ export default function MasterApp() {
         } catch {
           resourcePriceCpt = null;
         }
-        if (tokenRef.current !== token) return;
+        if (tokenRef.current !== token || currentDryRunSignature.current !== signature) return;
         view = { ...view, resourcePriceCpt };
       }
       setDryRun({ signature, view });
-      const fill = capToFill(view, maxCpt);
-      if (fill !== null) setMaxCpt(fill);
+      // Source/resources and the cap can change during either request. Read the
+      // latest cap when React applies this update, never the pre-request value.
+      setMaxCpt((currentCap) => {
+        if (tokenRef.current !== token || currentDryRunSignature.current !== signature) return currentCap;
+        return capToFill(view, currentCap) ?? currentCap;
+      });
     } catch (err) {
-      if (tokenRef.current === token) refuse(errorMessage(err, 'The dry run was not accepted.'));
+      if (tokenRef.current === token && currentDryRunSignature.current === signature) {
+        refuse(errorMessage(err, 'The dry run was not accepted.'));
+      }
     } finally {
       setDryRunLoading(false);
     }
