@@ -133,6 +133,211 @@ fn reserve_loopback_addr() -> Option<SocketAddr> {
     Some(addr)
 }
 
+/// Run a single router test with no VPN bootstrap and no inherited auth key.
+/// A child process avoids racing tests that also consult environment variables.
+pub(crate) fn isolated_local_mode(test_name: &str) -> bool {
+    const CHILD: &str = "HIVEMIND_DRY_RUN_AUTH_TEST_CHILD";
+    if std::env::var_os(CHILD).is_some() {
+        return false;
+    }
+    let result = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", test_name, "--nocapture"])
+        .env(CHILD, "1")
+        .env("HIVEMIND_DISABLE_WEBSITE_VPN", "1")
+        .env_remove("MASTER_VPN_AUTHKEY")
+        .env_remove("MASTER_VPN_AUTH_KEY")
+        .env_remove("TS_AUTHKEY")
+        .output()
+        .unwrap();
+    assert!(
+        result.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&result.stdout),
+        String::from_utf8_lossy(&result.stderr)
+    );
+    true
+}
+
+async fn dry_run_request(app: axum::Router, token: &str) -> (StatusCode, serde_json::Value) {
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/tasks/dry-run")
+                .header(header::CONTENT_TYPE, "application/json")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .body(Body::from(
+                    serde_json::json!({ "task_source": "42;", "torrent": "{}" }).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = response.status();
+    let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let body = serde_json::from_slice(&bytes).unwrap();
+    (status, body)
+}
+
+fn assert_dry_run_not_executed(value: &serde_json::Value) {
+    assert_eq!(value["success"], false);
+    assert_eq!(value["output"], "");
+    assert_eq!(value["output_bytes"], 0);
+    assert!(value["usage_units"].is_null());
+    assert!(value["quote"].is_null());
+    assert!(value["error"].is_null());
+}
+
+#[tokio::test]
+async fn dry_run_authorization_uses_live_nodepool_sessions() {
+    if isolated_local_mode("integration_tests::dry_run_authorization_uses_live_nodepool_sessions") {
+        return;
+    }
+    let mut fixture = nodepool_test_fixture()
+        .await
+        .expect("isolated test database required for dry-run authentication");
+    let mut client = fixture.take_client().unwrap();
+    let password = "dry-run-integration-password";
+    for username in ["dry-run-alice", "dry-run-bob"] {
+        sqlx::query("INSERT INTO users (username, password_hash, balance) VALUES ($1, $2, 0)")
+            .bind(username)
+            .bind(bcrypt::hash(password, 4).unwrap())
+            .execute(&fixture.db.pool)
+            .await
+            .unwrap();
+    }
+    let alice = client.login("dry-run-alice", password).await.unwrap();
+    let bob = client.login("dry-run-bob", password).await.unwrap();
+    assert!(alice.success && bob.success);
+    let api = client
+        .create_api_token(&alice.token, "dry-run", 1)
+        .await
+        .unwrap();
+    assert!(api.success);
+    let mut config = fixture.api_config();
+    let nodepool_secret = config.auth.jwt_secret.clone();
+    // The Master deliberately does not know Nodepool's signing secret.
+    config.auth.jwt_secret = "master-is-not-the-token-authority".into();
+    let master_secret = config.auth.jwt_secret.clone();
+    let app = crate::routes::create_router(crate::handlers::AppState {
+        grpc_client: client.clone(),
+        config,
+        task_submit_limiter: Arc::new(tokio::sync::Mutex::new(
+            crate::handlers::TaskSubmitRateLimiter::new(),
+        )),
+    });
+
+    // Authenticated dry runs work at zero balance, without reserving funds.
+    for token in [&alice.token, &bob.token, &api.api_token] {
+        let (status, value) = dry_run_request(app.clone(), token).await;
+        assert_eq!(status, StatusCode::OK, "{value}");
+        assert_eq!(value["success"], true);
+        assert_eq!(value["output"], "42");
+        assert!(value["usage_units"].as_u64().unwrap() > 0);
+        assert!(value["quote"].is_object());
+    }
+
+    let payload = jsonwebtoken::dangerous::insecure_decode::<serde_json::Value>(&alice.token)
+        .unwrap()
+        .claims;
+    let forged = jsonwebtoken::encode(
+        &jsonwebtoken::Header::default(),
+        &payload,
+        &jsonwebtoken::EncodingKey::from_secret(master_secret.as_bytes()),
+    )
+    .unwrap();
+    let mut crossed_payload = payload;
+    let bob_payload = jsonwebtoken::dangerous::insecure_decode::<serde_json::Value>(&bob.token)
+        .unwrap()
+        .claims;
+    crossed_payload["sub"] = bob_payload["sub"].clone();
+    crossed_payload["user_id"] = bob_payload["user_id"].clone();
+    // Even an authority-signed JWT must not pair Bob's identity with Alice's session.
+    let crossed = jsonwebtoken::encode(
+        &jsonwebtoken::Header::default(),
+        &crossed_payload,
+        &jsonwebtoken::EncodingKey::from_secret(nodepool_secret.as_bytes()),
+    )
+    .unwrap();
+    for (case, token) in [
+        ("unknown API token", "hmk_forged_not_a_real_token"),
+        ("Master-signed JWT", forged.as_str()),
+        ("cross-account session", crossed.as_str()),
+    ] {
+        let (status, value) = dry_run_request(app.clone(), token).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "{case}: {value}");
+        assert_dry_run_not_executed(&value);
+        assert!(!value.to_string().contains(token));
+    }
+
+    // Revocation is checked again on the same router, not cached after success.
+    assert!(
+        client
+            .revoke_api_token(&alice.token, &api.token_id)
+            .await
+            .unwrap()
+            .success
+    );
+    let (status, value) = dry_run_request(app.clone(), &api.api_token).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert_dry_run_not_executed(&value);
+    sqlx::query("UPDATE account_sessions SET revoked_at = NOW() WHERE username = $1")
+        .bind("dry-run-alice")
+        .execute(&fixture.db.pool)
+        .await
+        .unwrap();
+    let (status, value) = dry_run_request(app.clone(), &alice.token).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert_dry_run_not_executed(&value);
+
+    let bob_api = client
+        .create_api_token(&bob.token, "inactive-owner", 1)
+        .await
+        .unwrap();
+    assert!(bob_api.success);
+    sqlx::query("UPDATE users SET is_active = false WHERE username = $1")
+        .bind("dry-run-bob")
+        .execute(&fixture.db.pool)
+        .await
+        .unwrap();
+    for token in [&bob.token, &bob_api.api_token] {
+        let (status, value) = dry_run_request(app.clone(), token).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_dry_run_not_executed(&value);
+    }
+    // A dry run must not reserve or spend funds on the caller's account.
+    let balances: Vec<i64> = sqlx::query_scalar(
+        "SELECT balance FROM users WHERE username = ANY($1::text[]) ORDER BY username",
+    )
+    .bind(&["dry-run-alice".to_string(), "dry-run-bob".to_string()])
+    .fetch_all(&fixture.db.pool)
+    .await
+    .unwrap();
+    assert_eq!(balances, vec![0, 0]);
+    let task_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM tasks")
+        .fetch_one(&fixture.db.pool)
+        .await
+        .unwrap();
+    assert_eq!(task_count, 0);
+
+    // A previously authorized caller cannot reuse that decision during an outage.
+    sqlx::query("UPDATE users SET is_active = true WHERE username = $1")
+        .bind("dry-run-bob")
+        .execute(&fixture.db.pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        dry_run_request(app.clone(), &bob.token).await.0,
+        StatusCode::OK
+    );
+    fixture.cleanup().await;
+    let (status, value) = dry_run_request(app, &bob.token).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_dry_run_not_executed(&value);
+}
+
 #[tokio::test]
 async fn task_list_http_filter_reaches_old_owned_tasks_and_rejects_invalid_ids() {
     let mut fixture = nodepool_test_fixture()

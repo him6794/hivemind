@@ -104,7 +104,11 @@ pub fn create_router(state: AppState) -> Router {
         .route(
             "/api/tasks/dry-run",
             post(super::dry_run::dry_run_task)
-                .layer(DefaultBodyLimit::max(super::dry_run::MAX_REQUEST_BYTES)),
+                .layer(DefaultBodyLimit::max(super::dry_run::MAX_REQUEST_BYTES))
+                .layer(middleware::from_fn_with_state(
+                    state.clone(),
+                    mw::nodepool_authorization_gate,
+                )),
         )
         .route(
             "/api/tasks",

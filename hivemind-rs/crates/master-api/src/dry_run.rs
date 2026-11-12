@@ -111,7 +111,7 @@ impl DryRunResponse {
         }
     }
 
-    fn rejected(message: impl Into<String>) -> Self {
+    pub(crate) fn rejected(message: impl Into<String>) -> Self {
         Self::empty(false, message)
     }
 }
@@ -558,6 +558,115 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    }
+
+    #[tokio::test]
+    async fn a_forged_api_token_cannot_run_without_nodepool() {
+        if crate::integration_tests::isolated_local_mode(
+            "dry_run::tests::a_forged_api_token_cannot_run_without_nodepool",
+        ) {
+            return;
+        }
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let endpoint = listener.local_addr().unwrap().to_string();
+        drop(listener);
+        let mut config = hivemind_config::HivemindConfig::default();
+        config.server.nodepool_grpc_endpoint = Some(endpoint.clone());
+        let router = crate::routes::create_router(crate::handlers::AppState {
+            grpc_client: crate::grpc_client::GrpcClient::new(endpoint),
+            config,
+            task_submit_limiter: Arc::new(tokio::sync::Mutex::new(
+                crate::handlers::TaskSubmitRateLimiter::new(),
+            )),
+        });
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/tasks/dry-run")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header(header::AUTHORIZATION, "Bearer hmk_forged_not_a_real_token")
+                    .body(Body::from(
+                        serde_json::json!({ "task_source": "42;", "torrent": "{}" }).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(value["success"], false);
+        assert_eq!(value["output"], "");
+        assert!(value["usage_units"].is_null());
+        assert!(value["quote"].is_null());
+        assert!(!value.to_string().contains("hmk_forged_not_a_real_token"));
+    }
+
+    #[tokio::test]
+    async fn a_stalled_nodepool_fails_closed_before_dry_run_admission() {
+        if crate::integration_tests::isolated_local_mode(
+            "dry_run::tests::a_stalled_nodepool_fails_closed_before_dry_run_admission",
+        ) {
+            return;
+        }
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = listener.local_addr().unwrap().to_string();
+        let server = tokio::spawn(async move {
+            let (_connection, _) = listener.accept().await.unwrap();
+            std::future::pending::<()>().await;
+        });
+        let held_slots = Arc::clone(slots())
+            .acquire_many_owned(MAX_CONCURRENT_RUNS as u32)
+            .await
+            .unwrap();
+        let mut config = hivemind_config::HivemindConfig::default();
+        config.server.nodepool_grpc_endpoint = Some(endpoint.clone());
+        let router = crate::routes::create_router(crate::handlers::AppState {
+            grpc_client: crate::grpc_client::GrpcClient::new(endpoint),
+            config,
+            task_submit_limiter: Arc::new(tokio::sync::Mutex::new(
+                crate::handlers::TaskSubmitRateLimiter::new(),
+            )),
+        });
+        let response = tokio::time::timeout(
+            Duration::from_secs(10),
+            router.oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/tasks/dry-run")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header(
+                        header::AUTHORIZATION,
+                        "Bearer hmk_unverified_pending_authority",
+                    )
+                    .body(Body::from(
+                        serde_json::json!({ "task_source": "42;", "torrent": "{}" }).to_string(),
+                    ))
+                    .unwrap(),
+            ),
+        )
+        .await
+        .expect("Nodepool authorization must have a bounded timeout")
+        .unwrap();
+        server.abort();
+        drop(held_slots);
+        // Authorization failure wins over a full local execution queue.
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(value["success"], false);
+        assert_eq!(value["output"], "");
+        assert!(value["usage_units"].is_null());
+        assert!(value["quote"].is_null());
+        assert!(!value
+            .to_string()
+            .contains("hmk_unverified_pending_authority"));
     }
 
     #[tokio::test]

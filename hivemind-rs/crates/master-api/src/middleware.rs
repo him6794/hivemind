@@ -116,7 +116,9 @@ pub async fn auth_middleware(
     }
 }
 
-fn bearer_token(value: &str) -> Option<&str> {
+/// The bearer part of an Authorization header, or none if the header is not a
+/// well-formed bearer.
+pub(crate) fn bearer_token(value: &str) -> Option<&str> {
     let mut parts = value.split_whitespace();
     let scheme = parts.next()?;
     let token = parts.next()?;
@@ -124,6 +126,65 @@ fn bearer_token(value: &str) -> Option<&str> {
         return None;
     }
     (!token.is_empty()).then_some(token)
+}
+
+/// How long the Master will wait for Nodepool to answer an authorization check.
+/// A caller that cannot be confirmed within this bound is not run.
+const NODEPOOL_AUTH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Nodepool authorization for a request the Master would otherwise run locally.
+///
+/// The Master signs no tokens, so a caller is who Nodepool says it is. The check fails
+/// closed: a request Nodepool refuses, or cannot answer within a bound, is not run. A live
+/// Nodepool that rejects the caller is "not you" (401); an unreachable or slow Nodepool is
+/// retryable (503).
+pub(crate) async fn nodepool_authorized(state: &AppState, token: &str) -> Result<(), StatusCode> {
+    let mut grpc = state.grpc_client.clone();
+    // Identity comes from the token alone; an empty username never overrides it.
+    let call = tokio::time::timeout(NODEPOOL_AUTH_TIMEOUT, grpc.get_balance("", token));
+    match call.await {
+        // Nodepool did not answer in time: fail closed, retryable.
+        Err(_) => Err(StatusCode::SERVICE_UNAVAILABLE),
+        // A live Nodepool answered and accepted the token.
+        Ok(Ok(_)) => Ok(()),
+        Ok(Err(status)) => match status.code() {
+            tonic::Code::Unauthenticated
+            | tonic::Code::NotFound
+            | tonic::Code::PermissionDenied => Err(StatusCode::UNAUTHORIZED),
+            _ => Err(StatusCode::SERVICE_UNAVAILABLE),
+        },
+    }
+}
+
+/// The route gate for a locally executed endpoint: it asks Nodepool to authorize the bearer
+/// token before the request may run. A refused or unanswered authorization returns a dry-run
+/// shaped rejection so the caller can tell the run did not happen.
+pub(crate) async fn nodepool_authorization_gate(
+    State(state): State<AppState>,
+    request: Request,
+    next: Next,
+) -> Response {
+    let token = request
+        .headers()
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(bearer_token)
+        .map(str::to_string);
+    let Some(token) = token else {
+        return next.run(request).await;
+    };
+    match nodepool_authorized(&state, &token).await {
+        Ok(()) => next.run(request).await,
+        Err(status) => {
+            let body =
+                super::dry_run::DryRunResponse::rejected(if status == StatusCode::UNAUTHORIZED {
+                    "Sign in again, then try again"
+                } else {
+                    "The service is deciding who you are; try again"
+                });
+            (status, Json(body)).into_response()
+        }
+    }
 }
 
 /// The claims a bearer token gives the Master for routing and rate limiting.
