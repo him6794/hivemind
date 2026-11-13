@@ -94,6 +94,12 @@ impl std::fmt::Debug for ResendConfig {
 }
 
 impl AccountSettings {
+    /// True when no mail transport is configured, so verification mail cannot be sent at all.
+    /// Retrying later does not change that; only the operator can.
+    pub fn mail_is_off(&self) -> bool {
+        matches!(self.mail, MailTransport::Disabled)
+    }
+
     /// Reads the account mail settings from the process environment. See `from_lookup`.
     pub fn load_from_env() -> Result<Self> {
         Self::from_lookup(|name| std::env::var(name).ok())

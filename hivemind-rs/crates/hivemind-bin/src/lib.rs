@@ -255,10 +255,19 @@ fn validate_service_config(config: &HivemindConfig, role: ServiceRole) -> Result
 }
 
 /// Refuses to start Nodepool with incomplete account mail settings. A missing Resend key then
-/// shows up at startup, not as mail that is silently never delivered.
+/// shows up at startup, not as mail that is silently never delivered. An unset `MAIL_TRANSPORT`
+/// still starts, because dev and test stacks run without mail, but it is logged loudly: nobody
+/// can verify an email or receive the welcome credit until mail is configured.
 #[cfg(feature = "nodepool")]
 fn validate_account_mail() -> Result<()> {
     hivemind_node_manager::account::AccountSettings::load_from_env()?;
+    if std::env::var("MAIL_TRANSPORT").map_or(true, |value| value.trim().is_empty()) {
+        tracing::warn!(
+            "MAIL_TRANSPORT is not set, so verification email is off: new accounts cannot verify \
+             their email or receive the welcome credit. Set MAIL_TRANSPORT=disabled to acknowledge \
+             this, or set file or resend to send mail."
+        );
+    }
     Ok(())
 }
 

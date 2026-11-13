@@ -474,7 +474,11 @@ impl UserService for GrpcUserService {
             Ok(()) => "Account created. Check your email to verify it.".to_string(),
             Err(error) => {
                 tracing::warn!(%error, "verification email could not be sent");
-                "Account created, but the verification email could not be sent. Sign in and use Resend verification.".to_string()
+                if self.account.mail_is_off() {
+                    "Account created, but email verification is turned off on this server. Contact the operator to receive the welcome credit.".to_string()
+                } else {
+                    "Account created, but the verification email could not be sent. Sign in and use Resend verification.".to_string()
+                }
             }
         };
         Ok(Response::new(RegisterUserResponse {
@@ -1033,6 +1037,15 @@ impl UserService for GrpcUserService {
                 status_message: "This email address is already in use.".into(),
             }));
         }
+        // With no mail transport, waiting cannot help, so say so before the resend cooldown,
+        // which the failed sign-up attempt may already have started.
+        if self.account.mail_is_off() {
+            return Ok(Response::new(ResendVerificationResponse {
+                success: false,
+                status_message:
+                    "Email verification is turned off on this server. Contact the operator.".into(),
+            }));
+        }
         if account::cooldown_active(pool, account.id, account::PURPOSE_EMAIL_VERIFICATION)
             .await
             .map_err(internal_status)?
@@ -1107,7 +1120,11 @@ impl UserService for GrpcUserService {
             Ok(()) => "Email added. Check your email to verify it.",
             Err(error) => {
                 tracing::warn!(%error, "verification email could not be sent after binding");
-                "Email added, but the verification email could not be sent. Use Resend verification."
+                if self.account.mail_is_off() {
+                    "Email added, but email verification is turned off on this server. Contact the operator to receive the welcome credit."
+                } else {
+                    "Email added, but the verification email could not be sent. Use Resend verification."
+                }
             }
         };
         Ok(Response::new(hivemind_proto::BindEmailResponse {
@@ -7674,6 +7691,52 @@ mod tests {
             .await
             .unwrap()
             .into_inner()
+    }
+
+    /// With no mail transport, sign-up and resend say that verification is turned off on this
+    /// server. They must not suggest that a later retry will deliver the email.
+    #[tokio::test]
+    async fn sign_up_and_resend_say_when_verification_mail_is_off() {
+        let lock = grpc_db_lock();
+        let _lock_guard = lock.lock().await;
+        let (service, _task_id, _other_token, _owner) = match test_service().await {
+            Some(parts) => parts,
+            None => return,
+        };
+        let user_service = GrpcUserService::new(service.state.clone()).with_account_settings(
+            account::AccountSettings {
+                site_url: "http://localhost:3000".into(),
+                mail: account::MailTransport::Disabled,
+            },
+        );
+        let username = format!("mail-off-{}", uuid::Uuid::new_v4().simple());
+
+        let registration =
+            register_account(&user_service, &username, &format!("{username}@example.com")).await;
+        assert!(registration.success, "{}", registration.status_message);
+        assert!(
+            registration
+                .status_message
+                .contains("turned off on this server"),
+            "{}",
+            registration.status_message
+        );
+
+        let login = login_response(&user_service, &username, "valid-test-password").await;
+        assert!(login.success, "{}", login.status_message);
+        let resend = user_service
+            .resend_verification(Request::new(ResendVerificationRequest {
+                token: login.token,
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(!resend.success);
+        assert!(
+            resend.status_message.contains("turned off on this server"),
+            "{}",
+            resend.status_message
+        );
     }
 
     #[tokio::test]
