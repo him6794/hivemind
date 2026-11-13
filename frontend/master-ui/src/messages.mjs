@@ -1,4 +1,6 @@
 export const zh = {
+  'Waiting for {needed} Workers from different owners; {available} available now.': '等待 {needed} 個不同擁有者的 Worker；目前可用 {available} 個。',
+  'Waiting for {needed} eligible Workers; {available} available now.': '等待 {needed} 個符合條件的 Worker；目前可用 {available} 個。',
   'Language': '語言',
   'Could not read the language preference. Using English.': '無法讀取語言偏好，暫時使用英文。',
   'Language changed, but saving could not be confirmed.': '語言已切換，但無法確認是否已儲存。',

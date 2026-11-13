@@ -1448,6 +1448,37 @@ impl TaskRepository {
             .collect())
     }
 
+    /// Records why a queued managed task is waiting for Workers. Only queued rows change, and a
+    /// message that is already current is not rewritten, so repeated dispatch passes stay cheap.
+    pub(crate) async fn note_waiting_for_workers(
+        &self,
+        task_id: &str,
+        message: &str,
+    ) -> Result<()> {
+        sqlx::query(
+            "UPDATE tasks SET status_message = $2
+             WHERE task_id = $1 AND status IN ('PENDING', 'QUEUED') AND worker_id IS NULL
+               AND status_message IS DISTINCT FROM $2",
+        )
+        .bind(task_id)
+        .bind(message)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Clears a waiting reason once the task has been placed on Workers.
+    pub(crate) async fn clear_waiting_for_workers(&self, task_id: &str) -> Result<()> {
+        sqlx::query(
+            "UPDATE tasks SET status_message = NULL
+             WHERE task_id = $1 AND status_message LIKE 'Waiting for %'",
+        )
+        .bind(task_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
     pub(crate) async fn set_managed_consensus_policy(
         &self,
         task_id: &str,

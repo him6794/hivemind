@@ -1,13 +1,15 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use axum::{
     body::Body,
     http::{header, Request, StatusCode},
 };
 use hivemind_auth::AuthManager;
-use hivemind_config::HivemindConfig;
+use hivemind_config::{HivemindConfig, ManagedConsensusConfig};
 use hivemind_database::{postgres::IsolatedTestPool, DatabaseManager};
+use hivemind_node_manager::account::{self, AccountSettings, MailTransport};
 use hivemind_node_manager::grpc::{
     artifact_root_for_config, GrpcGeneralComputeArtifactService, GrpcMasterNodeService,
     GrpcNodeManagerService, GrpcUserService, NodepoolState,
@@ -19,6 +21,7 @@ use hivemind_proto::{
     node_manager_service_server::NodeManagerServiceServer, user_service_server::UserServiceServer,
     ResourceSpec,
 };
+use hivemind_task_scheduler::dispatcher::Dispatcher;
 use hivemind_task_scheduler::TaskScheduler;
 use tower::ServiceExt;
 
@@ -53,6 +56,14 @@ impl NodepoolTestFixture {
 
 // Test-only nodepool fixture: spins up an in-process gRPC server against a throwaway test DB.
 async fn nodepool_test_fixture() -> Option<NodepoolTestFixture> {
+    nodepool_test_fixture_with_account(None).await
+}
+
+/// The same fixture with explicit account mail settings. `None` keeps the environment
+/// defaults that `nodepool_test_fixture` has always used.
+async fn nodepool_test_fixture_with_account(
+    account_settings: Option<AccountSettings>,
+) -> Option<NodepoolTestFixture> {
     let addr = reserve_loopback_addr()?;
     let endpoint = addr.to_string();
     let mut config = HivemindConfig::for_test();
@@ -90,7 +101,11 @@ async fn nodepool_test_fixture() -> Option<NodepoolTestFixture> {
         artifact_root: artifact_root_for_config(&config),
     });
 
-    let user_svc = UserServiceServer::new(GrpcUserService::new(state.clone()));
+    let user_service = match account_settings {
+        Some(settings) => GrpcUserService::new(state.clone()).with_account_settings(settings),
+        None => GrpcUserService::new(state.clone()),
+    };
+    let user_svc = UserServiceServer::new(user_service);
     let node_svc = NodeManagerServiceServer::new(GrpcNodeManagerService::new(state.clone()));
     let artifact_svc = GeneralComputeArtifactServiceServer::new(
         GrpcGeneralComputeArtifactService::new(state.clone()),
@@ -1338,4 +1353,198 @@ async fn task_submission_routes_reject_invalid_resource_values_before_grpc() {
         .await
         .ok();
     fixture.cleanup().await;
+}
+
+/// Reads the verification token from the newest outbox message that contains the link.
+fn verification_token_from_outbox(outbox: &std::path::Path) -> String {
+    const MARKER: &str = "/#/verify-email/";
+    let mut paths: Vec<_> = std::fs::read_dir(outbox)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .collect();
+    paths.sort();
+    for path in paths.iter().rev() {
+        let content = std::fs::read_to_string(path).unwrap();
+        if let Some(index) = content.find(MARKER) {
+            return content[index + MARKER.len()..]
+                .chars()
+                .take_while(|c| c.is_ascii_hexdigit())
+                .collect();
+        }
+    }
+    panic!("no outbox message contains the verification link");
+}
+
+/// One request to the Master router. Returns the status and the JSON body (null when empty).
+async fn master_json(
+    app: axum::Router,
+    method: &str,
+    uri: &str,
+    token: &str,
+    body: Option<serde_json::Value>,
+) -> (StatusCode, serde_json::Value) {
+    let mut request = Request::builder()
+        .method(method)
+        .uri(uri)
+        .header(header::AUTHORIZATION, format!("Bearer {token}"));
+    let body = match body {
+        Some(body) => {
+            request = request.header(header::CONTENT_TYPE, "application/json");
+            Body::from(body.to_string())
+        }
+        None => Body::empty(),
+    };
+    let response = app.oneshot(request.body(body).unwrap()).await.unwrap();
+    let status = response.status();
+    let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    (
+        status,
+        serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null),
+    )
+}
+
+/// The path a new requester takes: register, verify the email from the mail outbox, log in,
+/// quote and submit the first template, and run one dispatch pass with no Workers online.
+/// The task list must then say why the task has not started. Each step's time is printed.
+#[tokio::test]
+async fn requester_first_run_from_registration_to_a_task_that_says_why_it_waits() {
+    let started = Instant::now();
+    let outbox = std::env::temp_dir().join(format!("hivemind-first-run-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&outbox).unwrap();
+    let mut fixture = nodepool_test_fixture_with_account(Some(AccountSettings {
+        site_url: "http://localhost:3000".into(),
+        mail: MailTransport::File(outbox.clone()),
+    }))
+    .await
+    .expect("isolated test database required");
+    let pool = fixture.db.pool.clone();
+    let mut client = fixture.take_client().unwrap();
+    let username = format!(
+        "first-run-{}",
+        &uuid::Uuid::new_v4().simple().to_string()[..12]
+    );
+    let password = "first-run-password";
+    let mut timings: Vec<(&str, Duration)> = Vec::new();
+
+    // 1. Register. The account exists with an unverified email and no credit.
+    let step = Instant::now();
+    let registration = client
+        .register_user(&username, password, &format!("{username}@example.com"))
+        .await
+        .unwrap();
+    timings.push(("register", step.elapsed()));
+    assert!(registration.success, "{}", registration.status_message);
+    let balance_before: i64 = sqlx::query_scalar("SELECT balance FROM users WHERE username = $1")
+        .bind(&username)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(balance_before, 0);
+
+    // 2. Verify with the link the mail outbox received. Verifying pays the welcome credit.
+    let step = Instant::now();
+    let verified = client
+        .verify_email(&verification_token_from_outbox(&outbox))
+        .await
+        .unwrap();
+    timings.push(("verify email", step.elapsed()));
+    assert!(verified.success, "{}", verified.status_message);
+    assert_eq!(verified.welcome_grant_status, "granted");
+
+    // 3. Log in and check the welcome credit.
+    let step = Instant::now();
+    let login = client.login(&username, password).await.unwrap();
+    assert!(login.success, "{}", login.status_message);
+    let balance = client.get_balance(&username, &login.token).await.unwrap();
+    timings.push(("login and balance", step.elapsed()));
+    assert_eq!(balance.balance, account::WELCOME_GRANT_CPT);
+    let token = login.token;
+
+    let app = crate::routes::create_router(crate::handlers::AppState {
+        grpc_client: client,
+        config: fixture.api_config(),
+        task_submit_limiter: Arc::new(tokio::sync::Mutex::new(
+            crate::handlers::TaskSubmitRateLimiter::new(),
+        )),
+    });
+
+    // 4. Quote the first template, then submit it with the quoted cap.
+    let source = "let total = 0;\nfor value in get(input, \"values\") {\n  let total = total + value;\n}\ntotal;";
+    let input = r#"{"values": [10, 20, 30]}"#;
+    let step = Instant::now();
+    let (status, quote) = master_json(
+        app.clone(),
+        "POST",
+        "/api/tasks/dry-run",
+        &token,
+        Some(serde_json::json!({ "task_source": source, "torrent": input })),
+    )
+    .await;
+    timings.push(("dry run", step.elapsed()));
+    assert_eq!(status, StatusCode::OK, "{quote}");
+    assert_eq!(quote["success"], true, "{quote}");
+    assert_eq!(quote["output"], "60");
+    let max_cpt = quote["quote"]["required_max_cpt"].as_i64().unwrap();
+
+    let task_id = format!("first-run-task-{}", uuid::Uuid::new_v4().simple());
+    let step = Instant::now();
+    let (status, submitted) = master_json(
+        app.clone(),
+        "POST",
+        "/api/tasks",
+        &token,
+        Some(serde_json::json!({
+            "task_id": task_id,
+            "runtime": "hcode",
+            "task_source": source,
+            "torrent": input,
+            "memory_gb": 1,
+            "cpu_score": 1,
+            "storage_gb": 1,
+            "max_cpt": max_cpt,
+        })),
+    )
+    .await;
+    timings.push(("submit", step.elapsed()));
+    assert!(status.is_success(), "submit returned {status}: {submitted}");
+
+    // 5. One dispatch pass with no Workers online.
+    let step = Instant::now();
+    let dispatcher = Dispatcher::new(DatabaseManager { pool: pool.clone() }, 30, 0)
+        .with_managed_consensus_config(&ManagedConsensusConfig::default());
+    let dispatched = dispatcher
+        .dispatch_pending_from_registered_workers_and_execute()
+        .await
+        .unwrap();
+    timings.push(("dispatch pass", step.elapsed()));
+    assert_eq!(dispatched, 0);
+
+    // 6. The task list must say why nothing has started.
+    let (status, listing) = master_json(app, "GET", "/api/tasks", &token, None).await;
+    assert_eq!(status, StatusCode::OK);
+    let task = listing["tasks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|task| task["task_id"] == task_id)
+        .unwrap_or_else(|| panic!("the task list lacks {task_id}: {listing}"));
+    assert_eq!(task["status"], "PENDING");
+    assert_eq!(task["dispatch_status"], "QUEUED");
+    assert_eq!(
+        task["status_message"],
+        "Waiting for 3 Workers from different owners; 0 available now."
+    );
+
+    for (step, took) in &timings {
+        println!("first run: {step:<20} {:>9.1} ms", took.as_secs_f64() * 1e3);
+    }
+    println!(
+        "first run: {:<20} {:>9.1} ms",
+        "total",
+        started.elapsed().as_secs_f64() * 1e3
+    );
+    fixture.cleanup().await;
+    let _ = std::fs::remove_dir_all(&outbox);
 }

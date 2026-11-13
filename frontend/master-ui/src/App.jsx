@@ -43,6 +43,7 @@ import {
   taskResponseError,
 } from './taskResponsePolicy.mjs';
 import { normalizeTaskObservability } from './taskObservability.mjs';
+import { waitingForWorkersMessage } from './taskWaitingPolicy.mjs';
 import { SUBMIT_TEMPLATES } from './submitTemplates.mjs';
 import {
   DRY_RUN_PATH,
@@ -1157,6 +1158,7 @@ export default function MasterApp() {
                           const statusText = String(task.status || task.Status || '').trim();
                           const normalizedStatus = statusText.toUpperCase();
                           const message = task.status_message || task.StatusMessage || '';
+                          const waitingMessage = waitingForWorkersMessage(message);
                           const runtime = String(task.runtime || task.runtime_version || task.Runtime || '').trim();
                           const isManagedTask = runtime === 'managed-function-v0' || runtime === 'hcode';
                           const wallTimeValue = task.wall_time_ms ?? task.WallTimeMs;
@@ -1182,7 +1184,7 @@ export default function MasterApp() {
                                     <strong className="task-id">{id || t("Task ID unavailable")}</strong>
                                     <Badge variant={statusVariant}>{t(statusText || 'Unknown status')}</Badge>
                                   </div>
-                                  {message ? <p className="task-message">{message}</p> : null}
+                                  {message ? <p className="task-message">{waitingMessage ? t(waitingMessage) : message}</p> : null}
                                   {outputView ? (
                                     <div className="task-output-block">
                                       <div className="task-output-heading">

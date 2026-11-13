@@ -285,6 +285,14 @@ impl Dispatcher {
             self.managed_consensus_owner_rule,
             &mut rng,
         ) else {
+            let message = waiting_for_workers_message(
+                usize::from(initial),
+                &candidates,
+                self.managed_consensus_owner_rule,
+            );
+            self.repo
+                .note_waiting_for_workers(&task.task_id, &message)
+                .await?;
             return Ok(None);
         };
         let spare_workers = if initial < policy.replica_count {
@@ -310,6 +318,7 @@ impl Dispatcher {
         else {
             return Ok(None);
         };
+        self.repo.clear_waiting_for_workers(&task.task_id).await?;
         info!(
             task_id = %task.task_id,
             attempt_id = %attempt.id,
@@ -2679,6 +2688,32 @@ struct ManagedConsensusEscalation {
 /// Replicas assigned at dispatch. Enforce-mode hcode starts at `initial_replicas` and
 /// escalates for the rest; unset means the full set, as before. Every other managed
 /// attempt assigns its full replica set.
+/// Why a managed task is waiting for its first replicas, phrased for the requester. Under the
+/// owner rule the count is of distinct owners, because two Workers of one owner cannot both
+/// take a replica. `candidates` are the Workers that pass the task's resource requirements.
+fn waiting_for_workers_message(
+    needed: usize,
+    candidates: &[WorkerNode],
+    owner_rule: scheduler::OwnerRule,
+) -> String {
+    match owner_rule {
+        scheduler::OwnerRule::Distinct => {
+            let owners: HashSet<&str> = candidates
+                .iter()
+                .map(|worker| worker.username.trim())
+                .collect();
+            format!(
+                "Waiting for {needed} Workers from different owners; {} available now.",
+                owners.len()
+            )
+        }
+        scheduler::OwnerRule::Shared => format!(
+            "Waiting for {needed} eligible Workers; {} available now.",
+            candidates.len()
+        ),
+    }
+}
+
 fn initial_replica_count(
     runtime: Option<&str>,
     mode: &str,
@@ -9588,6 +9623,123 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(attempts, 0);
+
+        fixture.cleanup().await.ok();
+    }
+
+    #[tokio::test]
+    async fn managed_consensus_dispatch_says_why_it_waits_and_clears_the_reason_once_placed() {
+        let lock = dispatcher_db_lock();
+        let _guard = lock.lock().await;
+        let Some((db, fixture)) = test_db("dispatcher_consensus_waiting_reason").await else {
+            return;
+        };
+        let repo = Arc::new(TaskRepository::new(db.pool.clone()));
+        let dispatcher = Dispatcher::new(
+            hivemind_database::DatabaseManager {
+                pool: db.pool.clone(),
+            },
+            30,
+            0,
+        )
+        .with_managed_consensus_config(&ManagedConsensusConfig::default());
+        let unique = uuid::Uuid::new_v4().to_string();
+        let owner = format!("dispatcher-waiting-owner-{unique}");
+        sqlx::query(
+            "INSERT INTO users (username, password_hash, balance) VALUES ($1, 'hash', 1000)",
+        )
+        .bind(&owner)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+        // One Worker per owner, so the count of owners equals the count of Workers.
+        let mut workers = Vec::new();
+        for (index, label) in ["a", "b", "c"].iter().enumerate() {
+            let provider = format!("dispatcher-waiting-provider-{label}-{unique}");
+            sqlx::query(
+                "INSERT INTO users (username, password_hash, balance) VALUES ($1, 'hash', 0)",
+            )
+            .bind(&provider)
+            .execute(&db.pool)
+            .await
+            .unwrap();
+            let worker_id = format!("dispatcher-waiting-worker-{index}-{unique}");
+            sqlx::query(
+                "INSERT INTO worker_nodes (worker_id, username, ip, cpu_cores, memory_gb,
+                 cpu_score, gpu_score, gpu_memory_gb, storage_total_gb, storage_available_gb)
+                 VALUES ($1, $2, '127.0.0.1:1', 4, 16, 400, 0, 0, 500, 200)",
+            )
+            .bind(&worker_id)
+            .bind(&provider)
+            .execute(&db.pool)
+            .await
+            .unwrap();
+            workers.push(public_managed_dsl_worker(&worker_id, &provider));
+        }
+
+        let task_id = format!("dispatcher-waiting-task-{unique}");
+        let mut row = make_task(&task_id, TaskStatus::Pending, 0);
+        row.owner = owner.clone();
+        row.runtime = Some(MANAGED_DSL_V1_RUNTIME_VERSION.into());
+        row.task_source = Some("return input".into());
+        row.torrent_source = Some("{}".into());
+        row.deterministic = true;
+        row.max_cpt = 100;
+        row.req_cpu_score = 0;
+        row.req_memory_gb = 0;
+        row.req_storage_gb = 0;
+        let task = repo.create(&row).await.unwrap();
+        repo.set_managed_consensus_policy(
+            &task_id,
+            u32::from(CONSENSUS_PROTOCOL_VERSION),
+            3,
+            2,
+            "enforce",
+        )
+        .await
+        .unwrap();
+        let status_message = |pool: sqlx::PgPool| {
+            let task_id = task_id.clone();
+            async move {
+                sqlx::query_scalar::<_, Option<String>>(
+                    "SELECT status_message FROM tasks WHERE task_id = $1",
+                )
+                .bind(&task_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap()
+            }
+        };
+
+        // One owner online: the task waits, and the reason gives the owner counts.
+        assert!(dispatcher
+            .dispatch_managed_consensus(&task, &workers[..1])
+            .await
+            .unwrap()
+            .is_none());
+        assert_eq!(
+            status_message(db.pool.clone()).await.as_deref(),
+            Some("Waiting for 3 Workers from different owners; 1 available now.")
+        );
+
+        // The reason follows the count when another owner comes online.
+        assert!(dispatcher
+            .dispatch_managed_consensus(&task, &workers[..2])
+            .await
+            .unwrap()
+            .is_none());
+        assert_eq!(
+            status_message(db.pool.clone()).await.as_deref(),
+            Some("Waiting for 3 Workers from different owners; 2 available now.")
+        );
+
+        // Three owners: the task is placed and the waiting reason is cleared.
+        assert!(dispatcher
+            .dispatch_managed_consensus(&task, &workers)
+            .await
+            .unwrap()
+            .is_some());
+        assert_eq!(status_message(db.pool.clone()).await, None);
 
         fixture.cleanup().await.ok();
     }

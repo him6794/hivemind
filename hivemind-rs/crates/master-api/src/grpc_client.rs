@@ -30,6 +30,7 @@ use hivemind_proto::{
     UpdateWorkerTrustControlResponse, UploadTaskRequest, UploadTaskResponse,
 };
 use hivemind_proto::{ClaimDailyAllowanceRequest, ClaimDailyAllowanceResponse};
+use hivemind_proto::{VerifyEmailRequest, VerifyEmailResponse};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio::time::{sleep, Duration};
@@ -243,6 +244,21 @@ impl GrpcClient {
             .await
             .map_err(|_| Status::deadline_exceeded("nodepool login timed out after 10 seconds"))?
             .map(|r| r.into_inner())
+        })
+        .await
+    }
+
+    pub async fn verify_email(
+        &mut self,
+        verification_token: &str,
+    ) -> Result<VerifyEmailResponse, tonic::Status> {
+        let verification_token = verification_token.to_string();
+        self.with_clients(|mut clients| async move {
+            clients
+                .user
+                .verify_email(Request::new(VerifyEmailRequest { verification_token }))
+                .await
+                .map(|r| r.into_inner())
         })
         .await
     }
