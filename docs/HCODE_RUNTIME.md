@@ -82,7 +82,7 @@ closed interpreter. Its runtime, backend, cost-model, and semantics identities
 are pinned by
 [`executor-rs/crates/managed-function-runtime/hcode-semantics.json`](../executor-rs/crates/managed-function-runtime/hcode-semantics.json)
 and digest
-`0c13a1da5fbbb94de2fbb5395ee807ab43e082b5c6d064deca7ece90700de822`.
+`12d0802b6ddd3b022be897b18a8b3037b0526ff52150ce005ad5a4b72bf45122`.
 
 - Each managed task is assigned to three distinct Workers by default, with a
   two-replica quorum; at most seven replicas may be configured. A single Worker
@@ -134,8 +134,8 @@ Input:
   all configured replicas (three by default); Nodepool deterministically splits
   the fee-exclusive execution budget into identical integer per-replica runtime
   allowances, with any remainder staying with the owner
-- structural safety limits such as call depth, value size, output size, and the
-  task deadline
+- structural safety limits such as call depth, nesting depth, value size, output
+  size, and the task deadline
 
 Output:
 
@@ -144,6 +144,19 @@ Output:
 - execution receipt
 - structured failure when parsing, validation, metering, or runtime evaluation
   fails
+
+Nesting limits:
+
+- source may nest at most 128 levels of expressions, blocks, unary or
+  logical-not prefixes, and else-if branches; deeper source fails with
+  `parse_error` before anything is charged
+- at most 1024 expression and statement frames may be active at once, counted
+  across user function calls; exceeding that fails with
+  `nesting_limit_exceeded`, after the work done up to that point is charged
+- counting charges nothing, so a program within both limits is billed exactly
+  as before
+- each execution runs on its own thread, so the limits do not depend on the
+  stack size of the calling thread
 
 Hivemind task integration:
 

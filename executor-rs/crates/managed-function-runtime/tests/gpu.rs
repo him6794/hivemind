@@ -3,14 +3,29 @@ use std::{collections::BTreeSet, sync::atomic::AtomicBool};
 use managed_function_runtime::{
     CpuGpuBackend, ExecutionLimits, GPU_BILLING_VERSION, GPU_COST_MODEL_VERSION,
     GPU_OPERATION_REGISTRY_VERSION, GPU_RUNTIME_VERSION, GPU_SEMANTICS_MANIFEST_JSON,
-    GPU_SEMANTICS_MANIFEST_SHA256, GpuBackend, GpuOperation, GpuTensor, ManagedExecutor,
-    ManagedGpuExecutor, Value,
+    GPU_SEMANTICS_MANIFEST_SHA256, GpuBackend, GpuOperation, GpuTensor, MAX_EVALUATION_NESTING,
+    MAX_PARSE_NESTING, ManagedExecutor, ManagedGpuExecutor, Value,
 };
 use serde_json::Value as JsonValue;
 use sha2::{Digest, Sha256};
 
 const EXPECTED_GPU_MANIFEST_SHA256: &str =
-    "4ad70f9be7ae18660566c727759a6dd780a8d70cecc6b2a075584c2c8567293f";
+    "fc13caef0f9b800ab8082a92d43c2a9021d8e06eac1095356189b8aea5927fd3";
+
+#[test]
+fn gpu_manifest_records_the_nesting_limits_the_runtime_enforces() {
+    let manifest: JsonValue =
+        serde_json::from_str(GPU_SEMANTICS_MANIFEST_JSON).expect("GPU manifest must be valid JSON");
+
+    assert_eq!(
+        manifest["nesting_limits"]["max_parse_nesting"],
+        MAX_PARSE_NESTING
+    );
+    assert_eq!(
+        manifest["nesting_limits"]["max_evaluation_nesting"],
+        MAX_EVALUATION_NESTING
+    );
+}
 
 #[test]
 fn gpu_manifest_and_runtime_identifiers_are_pinned() {
@@ -59,10 +74,12 @@ fn gpu_manifest_and_runtime_identifiers_are_pinned() {
             "language",
             "max_rank",
             "max_tensor_bytes",
+            "nesting_limits",
             "numeric_builtins",
             "operation_registry",
             "operations",
             "runtime",
+            "source_nesting",
             "supported_dtype",
             "tensor_abi",
         ])

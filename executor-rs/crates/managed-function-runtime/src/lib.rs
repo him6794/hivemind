@@ -21,7 +21,7 @@ pub const V1_SEMANTICS_MANIFEST_JSON: &str = include_str!("../hcode-semantics.js
 /// SHA-256 of the canonical JSON bytes in [`V1_SEMANTICS_MANIFEST_JSON`],
 /// excluding the file's trailing newline.
 pub const V1_SEMANTICS_MANIFEST_SHA256: &str =
-    "0c13a1da5fbbb94de2fbb5395ee807ab43e082b5c6d064deca7ece90700de822";
+    "12d0802b6ddd3b022be897b18a8b3037b0526ff52150ce005ad5a4b72bf45122";
 
 /// Versioned metering identity committed by the v1 semantics manifest.
 pub const V1_COST_MODEL_ID: &str = "hcode-execution-cpt-v1";
@@ -30,7 +30,23 @@ pub const V1_COST_MODEL_ID: &str = "hcode-execution-cpt-v1";
 pub const GPU_SEMANTICS_MANIFEST_JSON: &str = include_str!("../hcode-gpu-semantics.json");
 /// SHA-256 of the canonical GPU-v1 manifest excluding its trailing newline.
 pub const GPU_SEMANTICS_MANIFEST_SHA256: &str =
-    "4ad70f9be7ae18660566c727759a6dd780a8d70cecc6b2a075584c2c8567293f";
+    "fc13caef0f9b800ab8082a92d43c2a9021d8e06eac1095356189b8aea5927fd3";
+
+/// Deepest syntactic nesting the parser accepts. Each nested expression, block,
+/// unary or logical-not prefix, and else-if counts one level.
+pub const MAX_PARSE_NESTING: usize = 128;
+
+/// Deepest evaluation nesting: the expression and statement frames active at
+/// once, counted across user function calls. Frames are not charged, so
+/// accepted programs keep their usage units.
+pub const MAX_EVALUATION_NESTING: usize = 1024;
+
+/// Stack reserved for one execution. The nesting limits are counted in frames,
+/// so the stack must hold them in the largest frames a build produces. Measured
+/// at both limits, release builds need about 4 MiB and debug builds about
+/// 40 MiB, which a 2 MiB thread cannot hold. The reservation is address space,
+/// not committed memory.
+const EXECUTION_STACK_BYTES: usize = 128 * 1024 * 1024;
 
 pub mod artifacts;
 mod deterministic_math;
@@ -53,7 +69,10 @@ use std::{
     collections::{BTreeMap, HashMap},
     error::Error,
     fmt::{Display, Formatter, Write},
-    sync::atomic::{AtomicBool, Ordering},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        mpsc,
+    },
 };
 
 /// Language surface selected for one execution.
@@ -546,9 +565,11 @@ impl<'a> ManagedGpuExecutor<'a> {
         source: &str,
         limits: ExecutionLimits,
     ) -> Result<ExecutionResult, RuntimeError> {
-        let tokens = Lexer::with_surface(source, Surface::HcodeGpu).tokenize()?;
-        let program = Parser::new(tokens, Surface::HcodeGpu).parse_program()?;
-        Evaluator::with_gpu(limits, self.backend, None).eval_program(&program)
+        run_gpu_execution(&mut *self.backend, move |gpu| {
+            let tokens = Lexer::with_surface(source, Surface::HcodeGpu).tokenize()?;
+            let program = Parser::new(tokens, Surface::HcodeGpu).parse_program()?;
+            Evaluator::with_gpu(limits, gpu, None).eval_program(&program)
+        })
     }
 
     pub fn execute_json_input(
@@ -567,13 +588,15 @@ impl<'a> ManagedGpuExecutor<'a> {
         input_json: &str,
         cancelled: Option<&AtomicBool>,
     ) -> Result<ExecutionResult, RuntimeError> {
-        let input = Value::from_json_str_with_surface(input_json, Surface::HcodeGpu)?;
-        let tokens = Lexer::with_surface(source, Surface::HcodeGpu).tokenize()?;
-        let program = Parser::new(tokens, Surface::HcodeGpu).parse_program()?;
-        let mut evaluator = Evaluator::with_gpu(limits, self.backend, cancelled);
-        evaluator.validate_external_value(&input)?;
-        evaluator.current_scope().insert("input".to_string(), input);
-        evaluator.eval_program(&program)
+        run_gpu_execution(&mut *self.backend, move |gpu| {
+            let input = Value::from_json_str_with_surface(input_json, Surface::HcodeGpu)?;
+            let tokens = Lexer::with_surface(source, Surface::HcodeGpu).tokenize()?;
+            let program = Parser::new(tokens, Surface::HcodeGpu).parse_program()?;
+            let mut evaluator = Evaluator::with_gpu(limits, gpu, cancelled);
+            evaluator.validate_external_value(&input)?;
+            evaluator.current_scope().insert("input".to_string(), input);
+            evaluator.eval_program(&program)
+        })
     }
 }
 
@@ -588,9 +611,11 @@ impl ManagedExecutor {
         limits: ExecutionLimits,
     ) -> Result<ExecutionResult, RuntimeError> {
         let surface = Surface::for_cpu_limits(&limits);
-        let tokens = Lexer::with_surface(source, surface).tokenize()?;
-        let program = Parser::new(tokens, surface).parse_program()?;
-        Evaluator::new(limits, surface).eval_program(&program)
+        run_on_execution_stack(move || {
+            let tokens = Lexer::with_surface(source, surface).tokenize()?;
+            let program = Parser::new(tokens, surface).parse_program()?;
+            Evaluator::new(limits, surface).eval_program(&program)
+        })
     }
 
     pub fn execute_json_input(
@@ -600,13 +625,15 @@ impl ManagedExecutor {
         input_json: &str,
     ) -> Result<ExecutionResult, RuntimeError> {
         let surface = Surface::for_cpu_limits(&limits);
-        let input = Value::from_json_str_with_surface(input_json, surface)?;
-        let tokens = Lexer::with_surface(source, surface).tokenize()?;
-        let program = Parser::new(tokens, surface).parse_program()?;
-        let mut evaluator = Evaluator::new(limits, surface);
-        evaluator.validate_external_value(&input)?;
-        evaluator.current_scope().insert("input".to_string(), input);
-        evaluator.eval_program(&program)
+        run_on_execution_stack(move || {
+            let input = Value::from_json_str_with_surface(input_json, surface)?;
+            let tokens = Lexer::with_surface(source, surface).tokenize()?;
+            let program = Parser::new(tokens, surface).parse_program()?;
+            let mut evaluator = Evaluator::new(limits, surface);
+            evaluator.validate_external_value(&input)?;
+            evaluator.current_scope().insert("input".to_string(), input);
+            evaluator.eval_program(&program)
+        })
     }
 
     pub fn execute_json_input_with_cancel(
@@ -617,13 +644,15 @@ impl ManagedExecutor {
         cancelled: &AtomicBool,
     ) -> Result<ExecutionResult, RuntimeError> {
         let surface = Surface::for_cpu_limits(&limits);
-        let input = Value::from_json_str_with_surface(input_json, surface)?;
-        let tokens = Lexer::with_surface(source, surface).tokenize()?;
-        let program = Parser::new(tokens, surface).parse_program()?;
-        let mut evaluator = Evaluator::with_cancellation(limits, surface, cancelled);
-        evaluator.validate_external_value(&input)?;
-        evaluator.current_scope().insert("input".to_string(), input);
-        evaluator.eval_program(&program)
+        run_on_execution_stack(move || {
+            let input = Value::from_json_str_with_surface(input_json, surface)?;
+            let tokens = Lexer::with_surface(source, surface).tokenize()?;
+            let program = Parser::new(tokens, surface).parse_program()?;
+            let mut evaluator = Evaluator::with_cancellation(limits, surface, cancelled);
+            evaluator.validate_external_value(&input)?;
+            evaluator.current_scope().insert("input".to_string(), input);
+            evaluator.eval_program(&program)
+        })
     }
 }
 
@@ -645,18 +674,108 @@ impl ManagedExecutor {
                 "tensor artifacts require CPU hcode",
             ));
         }
-        let input = Value::from_json_str_with_surface(input_json, surface)?;
-        let tokens = Lexer::with_surface(source, surface).tokenize()?;
-        let program = Parser::new(tokens, surface).parse_program()?;
-        let mut evaluator = Evaluator {
-            artifacts: Some(artifacts),
-            cancelled,
-            ..Evaluator::new(limits, surface)
-        };
-        evaluator.validate_external_value(&input)?;
-        evaluator.current_scope().insert("input".to_string(), input);
-        evaluator.eval_program(&program)
+        run_on_execution_stack(move || {
+            let input = Value::from_json_str_with_surface(input_json, surface)?;
+            let tokens = Lexer::with_surface(source, surface).tokenize()?;
+            let program = Parser::new(tokens, surface).parse_program()?;
+            let mut evaluator = Evaluator {
+                artifacts: Some(artifacts),
+                cancelled,
+                ..Evaluator::new(limits, surface)
+            };
+            evaluator.validate_external_value(&input)?;
+            evaluator.current_scope().insert("input".to_string(), input);
+            evaluator.eval_program(&program)
+        })
     }
+}
+
+/// Runs one CPU hcode execution on a thread with [`EXECUTION_STACK_BYTES`] of
+/// stack. Parsing, evaluation, and dropping the tree all recurse, and the
+/// nesting limits only bound them if the stack can hold them.
+fn run_on_execution_stack<T: Send>(
+    work: impl FnOnce() -> Result<T, RuntimeError> + Send,
+) -> Result<T, RuntimeError> {
+    std::thread::scope(|scope| {
+        let execution = std::thread::Builder::new()
+            .stack_size(EXECUTION_STACK_BYTES)
+            .spawn_scoped(scope, work)
+            .map_err(|error| execution_thread_error(&error))?;
+        join_execution(execution)
+    })
+}
+
+/// Runs one hcode-gpu execution on a thread with [`EXECUTION_STACK_BYTES`] of
+/// stack. The backend stays on the calling thread, which answers each GPU
+/// operation the execution requests. A backend can hold device handles that
+/// belong to the thread that created them, so it cannot move to another thread.
+fn run_gpu_execution<T: Send>(
+    backend: &mut dyn GpuBackend,
+    work: impl FnOnce(GpuPort) -> Result<T, RuntimeError> + Send,
+) -> Result<T, RuntimeError> {
+    let (requests, inbox) = mpsc::channel::<GpuRequest>();
+    let (outbox, replies) = mpsc::channel::<GpuReply>();
+    std::thread::scope(|scope| {
+        let execution = std::thread::Builder::new()
+            .stack_size(EXECUTION_STACK_BYTES)
+            .spawn_scoped(scope, move || work(GpuPort { requests, replies }))
+            .map_err(|error| execution_thread_error(&error))?;
+        // The loop ends when the execution drops its port, which happens when
+        // it finishes or unwinds.
+        for request in inbox {
+            let reply = backend.execute(request.operation, &request.inputs);
+            if outbox.send(reply).is_err() {
+                break;
+            }
+        }
+        join_execution(execution)
+    })
+}
+
+fn join_execution<T>(
+    execution: std::thread::ScopedJoinHandle<'_, Result<T, RuntimeError>>,
+) -> Result<T, RuntimeError> {
+    execution
+        .join()
+        .unwrap_or_else(|payload| std::panic::resume_unwind(payload))
+}
+
+fn execution_thread_error(error: &std::io::Error) -> RuntimeError {
+    RuntimeError::new(
+        "runtime_error",
+        format!("cannot start the execution thread: {error}"),
+    )
+}
+
+/// One GPU operation, sent from an execution thread to the thread that owns the backend.
+struct GpuRequest {
+    operation: GpuOperation,
+    inputs: Vec<GpuTensor>,
+}
+
+type GpuReply = Result<GpuTensor, GpuBackendError>;
+
+/// The execution's end of the GPU channel.
+struct GpuPort {
+    requests: mpsc::Sender<GpuRequest>,
+    replies: mpsc::Receiver<GpuReply>,
+}
+
+impl GpuPort {
+    fn execute(&self, operation: GpuOperation, inputs: &[GpuTensor]) -> GpuReply {
+        let request = GpuRequest {
+            operation,
+            inputs: inputs.to_vec(),
+        };
+        self.requests.send(request).map_err(|_| backend_stopped())?;
+        self.replies
+            .recv()
+            .unwrap_or_else(|_| Err(backend_stopped()))
+    }
+}
+
+fn backend_stopped() -> GpuBackendError {
+    GpuBackendError::unavailable("the GPU backend stopped answering operations")
 }
 
 impl Value {
@@ -1478,6 +1597,9 @@ struct Parser {
     pos: usize,
     surface: Surface,
     loop_depth: usize,
+    /// Syntactic levels open now. Every recursive path through the parser
+    /// enters a counted level, so this bounds the parser's stack use.
+    nesting: usize,
 }
 
 impl Parser {
@@ -1487,7 +1609,27 @@ impl Parser {
             pos: 0,
             surface,
             loop_depth: 0,
+            nesting: 0,
         }
+    }
+
+    /// Parses one nested level. The error points at the token that would open
+    /// the level beyond the limit.
+    fn nested<T>(
+        &mut self,
+        parse: impl FnOnce(&mut Self) -> Result<T, RuntimeError>,
+    ) -> Result<T, RuntimeError> {
+        if self.nesting == MAX_PARSE_NESTING {
+            return Err(RuntimeError::new(
+                "parse_error",
+                format!("nesting exceeds {MAX_PARSE_NESTING} levels"),
+            )
+            .at(self.span()));
+        }
+        self.nesting += 1;
+        let parsed = parse(self);
+        self.nesting -= 1;
+        parsed
     }
 
     fn parse_program(mut self) -> Result<Program, RuntimeError> {
@@ -1554,13 +1696,15 @@ impl Parser {
 
     /// `{ statements }`.
     fn statement_block(&mut self) -> Result<Vec<Stmt>, RuntimeError> {
-        self.expect(&Token::LBrace)?;
-        let mut body = Vec::new();
-        while !matches!(self.peek(), Token::RBrace | Token::Eof) {
-            body.push(self.statement()?);
-        }
-        self.expect(&Token::RBrace)?;
-        Ok(body)
+        self.nested(|parser| {
+            parser.expect(&Token::LBrace)?;
+            let mut body = Vec::new();
+            while !matches!(parser.peek(), Token::RBrace | Token::Eof) {
+                body.push(parser.statement()?);
+            }
+            parser.expect(&Token::RBrace)?;
+            Ok(body)
+        })
     }
 
     /// The body of a `for` or `while` loop. break and continue inside it act on this loop.
@@ -1626,7 +1770,7 @@ impl Parser {
         let else_body = if matches!(self.peek(), Token::Else) {
             self.advance();
             if matches!(self.peek(), Token::If) {
-                vec![self.if_statement()?]
+                vec![self.nested(Self::if_statement)?]
             } else {
                 self.statement_block()?
             }
@@ -1681,7 +1825,7 @@ impl Parser {
     }
 
     fn expression(&mut self) -> Result<Expr, RuntimeError> {
-        self.logic_or()
+        self.nested(Self::logic_or)
     }
 
     fn logic_or(&mut self) -> Result<Expr, RuntimeError> {
@@ -1715,7 +1859,7 @@ impl Parser {
     fn logic_not(&mut self) -> Result<Expr, RuntimeError> {
         if matches!(self.peek(), Token::Not) {
             self.advance();
-            let expr = self.logic_not()?;
+            let expr = self.nested(Self::logic_not)?;
             return Ok(Expr::Unary {
                 op: UnaryOp::Not,
                 expr: Box::new(expr),
@@ -1876,7 +2020,7 @@ impl Parser {
         };
         if let Some(op) = op {
             self.advance();
-            let expr = self.unary()?;
+            let expr = self.nested(Self::unary)?;
             return Ok(Expr::Unary {
                 op,
                 expr: Box::new(expr),
@@ -2126,9 +2270,11 @@ struct Evaluator<'a> {
     functions: HashMap<String, Function>,
     scopes: Vec<HashMap<String, Value>>,
     call_depth: usize,
+    /// Expression and statement frames active now, counted across user calls.
+    evaluation_nesting: usize,
     materialized_value_bytes: u64,
     cancelled: Option<&'a AtomicBool>,
-    gpu_backend: Option<&'a mut dyn GpuBackend>,
+    gpu: Option<GpuPort>,
     artifacts: Option<&'a TensorArtifacts>,
     surface: Surface,
     checked_integer_arithmetic: bool,
@@ -2144,22 +2290,19 @@ impl<'a> Evaluator<'a> {
             functions: HashMap::new(),
             scopes: vec![HashMap::new()],
             call_depth: 0,
+            evaluation_nesting: 0,
             materialized_value_bytes: 0,
             cancelled: None,
-            gpu_backend: None,
+            gpu: None,
             artifacts: None,
             surface,
             checked_integer_arithmetic,
         }
     }
 
-    fn with_gpu(
-        limits: ExecutionLimits,
-        gpu_backend: &'a mut dyn GpuBackend,
-        cancelled: Option<&'a AtomicBool>,
-    ) -> Self {
+    fn with_gpu(limits: ExecutionLimits, gpu: GpuPort, cancelled: Option<&'a AtomicBool>) -> Self {
         Self {
-            gpu_backend: Some(gpu_backend),
+            gpu: Some(gpu),
             cancelled,
             ..Self::new(limits, Surface::HcodeGpu)
         }
@@ -2229,6 +2372,10 @@ impl<'a> Evaluator<'a> {
     }
 
     fn eval_stmt(&mut self, statement: &Stmt) -> Result<Control, RuntimeError> {
+        self.nested_evaluation(|evaluator| evaluator.eval_stmt_frame(statement))
+    }
+
+    fn eval_stmt_frame(&mut self, statement: &Stmt) -> Result<Control, RuntimeError> {
         self.charge(1)?;
         match statement {
             Stmt::Let(name, expr) => {
@@ -2353,7 +2500,29 @@ impl<'a> Evaluator<'a> {
         Ok(Control::Continue(last))
     }
 
+    /// Evaluates one expression or statement frame. Frames are counted, not
+    /// charged, so the count bounds stack use without changing any usage units.
+    fn nested_evaluation<T>(
+        &mut self,
+        evaluate: impl FnOnce(&mut Self) -> Result<T, RuntimeError>,
+    ) -> Result<T, RuntimeError> {
+        if self.evaluation_nesting == MAX_EVALUATION_NESTING {
+            return Err(RuntimeError::new(
+                "nesting_limit_exceeded",
+                format!("evaluation nesting exceeds {MAX_EVALUATION_NESTING} frames"),
+            ));
+        }
+        self.evaluation_nesting += 1;
+        let evaluated = evaluate(self);
+        self.evaluation_nesting -= 1;
+        evaluated
+    }
+
     fn eval_expr(&mut self, expr: &Expr) -> Result<Value, RuntimeError> {
+        self.nested_evaluation(|evaluator| evaluator.eval_expr_frame(expr))
+    }
+
+    fn eval_expr_frame(&mut self, expr: &Expr) -> Result<Value, RuntimeError> {
         self.charge(1)?;
         match expr {
             Expr::Value(value) => self.clone_value(value),
@@ -2757,13 +2926,13 @@ impl<'a> Evaluator<'a> {
 
     fn builtin_call(&mut self, name: &str, args: &[Expr]) -> Result<Option<Value>, RuntimeError> {
         match name {
-            "gpu_add_f32" if self.gpu_backend.is_some() => {
+            "gpu_add_f32" if self.gpu.is_some() => {
                 self.eval_gpu_builtin(GpuOperation::AddF32, args).map(Some)
             }
-            "gpu_scale_f32" if self.gpu_backend.is_some() => self
+            "gpu_scale_f32" if self.gpu.is_some() => self
                 .eval_gpu_builtin(GpuOperation::ScaleF32, args)
                 .map(Some),
-            "gpu_matmul_f32" if self.gpu_backend.is_some() => self
+            "gpu_matmul_f32" if self.gpu.is_some() => self
                 .eval_gpu_builtin(GpuOperation::MatmulF32, args)
                 .map(Some),
             // Keep the names unavailable to the default v0 evaluator.  This is
@@ -3566,14 +3735,13 @@ impl<'a> Evaluator<'a> {
                 RuntimeError::new("op_limit_exceeded", "GPU operation count overflow")
             })?;
         let output = {
-            let backend = self.gpu_backend.as_deref_mut().ok_or_else(|| {
+            let gpu = self.gpu.as_ref().ok_or_else(|| {
                 RuntimeError::new(
                     "gpu_backend_unavailable",
                     "GPU operations require an enabled GPU execution context",
                 )
             })?;
-            backend
-                .execute(operation, &tensors)
+            gpu.execute(operation, &tensors)
                 .map_err(|error| RuntimeError::new(error.code(), error.message()))?
         };
         let output_bytes = u64::try_from(output.bytes()).map_err(|_| {
@@ -4151,8 +4319,8 @@ impl Write for BoundedFmtWriter<'_> {
 #[cfg(test)]
 mod tests {
     use super::{
-        CpuGpuBackend, ExecutionLimits, ManagedExecutor, ManagedGpuExecutor, Value,
-        render_output_bounded,
+        CpuGpuBackend, ExecutionLimits, MAX_EVALUATION_NESTING, MAX_PARSE_NESTING, ManagedExecutor,
+        ManagedGpuExecutor, Value, render_output_bounded,
     };
 
     #[test]
@@ -5371,6 +5539,85 @@ mod tests {
             eval_gpu("return float(1);", "null")
                 .unwrap_err()
                 .starts_with("name_error")
+        );
+    }
+
+    /// `return` is one level, and each parenthesis adds one more.
+    #[test]
+    fn parser_nesting_stops_at_the_documented_depth() {
+        let parens =
+            |levels: usize| format!("return {}1{};", "(".repeat(levels), ")".repeat(levels));
+        assert_eq!(eval_hcode(&parens(MAX_PARSE_NESTING - 1)).unwrap(), "1");
+        assert_eq!(hcode_error_code(&parens(MAX_PARSE_NESTING)), "parse_error");
+        assert_eq!(hcode_error_code(&parens(100_000)), "parse_error");
+    }
+
+    #[test]
+    fn every_recursive_construct_counts_toward_the_parser_limit() {
+        let deep = MAX_PARSE_NESTING + 1;
+        let blocks = format!(
+            "{}return 1;{}",
+            "if true { ".repeat(deep),
+            " }".repeat(deep)
+        );
+        let negations = format!("return {}1;", "-".repeat(deep));
+        let logical_nots = format!("return {}true;", "not ".repeat(deep));
+        let else_ifs = format!(
+            "if false {{ return 0; }}{} else {{ return 1; }}",
+            " else if false { return 0; }".repeat(deep)
+        );
+        for source in [blocks, negations, logical_nots, else_ifs] {
+            assert_eq!(hcode_error_code(&source), "parse_error");
+        }
+    }
+
+    /// A chain of k additions keeps k + 2 frames active: the return statement,
+    /// the k sums, and the operands of the innermost sum.
+    #[test]
+    fn evaluation_nesting_stops_at_the_documented_depth() {
+        let chain = |terms: usize| format!("return 1{};", "+1".repeat(terms));
+        assert_eq!(
+            eval_hcode(&chain(MAX_EVALUATION_NESTING - 2)).unwrap(),
+            (MAX_EVALUATION_NESTING - 1).to_string()
+        );
+        assert_eq!(
+            hcode_error_code(&chain(MAX_EVALUATION_NESTING - 1)),
+            "nesting_limit_exceeded"
+        );
+        assert_eq!(hcode_error_code(&chain(20_000)), "nesting_limit_exceeded");
+    }
+
+    #[test]
+    fn nesting_across_calls_is_bounded_and_ordinary_recursion_still_runs() {
+        let recursion = "fn f(n) { return if n == 0 { 0 } else { 1 + f(n - 1) }; } return f(63);";
+        assert_eq!(eval_hcode(recursion).unwrap(), "63");
+
+        // Each call adds 22 frames here, so 63 calls exceed the limit.
+        let wide = format!(
+            "fn f(n) {{ return if n == 0 {{ 0 }} else {{ 1 + {}f(n - 1){} }}; }} return f(63);",
+            "(1 + ".repeat(20),
+            ")".repeat(20)
+        );
+        assert_eq!(hcode_error_code(&wide), "nesting_limit_exceeded");
+    }
+
+    #[test]
+    fn the_gpu_surface_shares_both_nesting_limits() {
+        let parens = format!(
+            "return {}1{};",
+            "(".repeat(MAX_PARSE_NESTING),
+            ")".repeat(MAX_PARSE_NESTING)
+        );
+        assert!(
+            eval_gpu(&parens, "null")
+                .unwrap_err()
+                .starts_with("parse_error")
+        );
+        let chain = format!("return 1{};", "+1".repeat(MAX_EVALUATION_NESTING));
+        assert!(
+            eval_gpu(&chain, "null")
+                .unwrap_err()
+                .starts_with("nesting_limit_exceeded")
         );
     }
 }

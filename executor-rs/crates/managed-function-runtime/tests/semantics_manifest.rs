@@ -1,7 +1,7 @@
 use managed_function_runtime::{
-    ExecutionLimits, ManagedExecutor, Status, V0_SEMANTICS_MANIFEST_JSON,
-    V0_SEMANTICS_MANIFEST_SHA256, V1_COST_MODEL_ID, V1_SEMANTICS_MANIFEST_JSON,
-    V1_SEMANTICS_MANIFEST_SHA256,
+    ExecutionLimits, MAX_EVALUATION_NESTING, MAX_PARSE_NESTING, ManagedExecutor, Status,
+    V0_SEMANTICS_MANIFEST_JSON, V0_SEMANTICS_MANIFEST_SHA256, V1_COST_MODEL_ID,
+    V1_SEMANTICS_MANIFEST_JSON, V1_SEMANTICS_MANIFEST_SHA256,
 };
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -214,6 +214,21 @@ fn managed_function_v1_manifest_is_canonical_and_hash_pinned() {
 }
 
 #[test]
+fn managed_function_v1_manifest_records_the_nesting_limits_the_runtime_enforces() {
+    let manifest: Value =
+        serde_json::from_str(V1_SEMANTICS_MANIFEST_JSON).expect("v1 manifest must be valid JSON");
+
+    assert_eq!(
+        manifest["nesting_limits"]["max_parse_nesting"],
+        MAX_PARSE_NESTING
+    );
+    assert_eq!(
+        manifest["nesting_limits"]["max_evaluation_nesting"],
+        MAX_EVALUATION_NESTING
+    );
+}
+
+#[test]
 fn managed_function_v1_manifest_matches_budget_profile_and_cost_vectors() {
     let manifest: Value = serde_json::from_str(V1_SEMANTICS_MANIFEST_JSON).unwrap();
     let limits = ExecutionLimits::for_managed_function_budget(1_000);
@@ -276,4 +291,4 @@ fn managed_function_v1_manifest_matches_budget_profile_and_cost_vectors() {
 }
 
 const EXPECTED_V1_MANIFEST_SHA256: &str =
-    "0c13a1da5fbbb94de2fbb5395ee807ab43e082b5c6d064deca7ece90700de822";
+    "12d0802b6ddd3b022be897b18a8b3037b0526ff52150ce005ad5a4b72bf45122";
