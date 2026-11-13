@@ -309,6 +309,7 @@ JWT secret 不可使用 `CHANGE_ME_IN_PRODUCTION`，service validation 也要求
 | `JWT_SECRET` | 平台 account token signing secret | Nodepool／Website／all；trim 後至少 32 bytes，不能 default／empty |
 | `ACCOUNT_DAILY_ALLOWANCE_CPT` | 每日免費額度，預設 `0`（關閉） | Nodepool；必須是非負整數，無效時視為關閉並記錄錯誤。只改變帳號餘額，不改變計價 |
 | `ACCOUNT_ALLOWANCE_POOL_FLOOR_CPT` | 系統池保留下限，預設 `100000000` | Nodepool；領取後系統池若會低於此值就拒絕，保護結算與歡迎額度；無效時使用預設值並記錄錯誤 |
+| `MAIL_TRANSPORT` | 寄信方式；未設定等同 `disabled` | Nodepool；可用值為 `file`（本機開發，寫入 `MAIL_OUTBOX_DIR`）、`resend`（需要 `RESEND_API_KEY`、`MAIL_FROM`、`PUBLIC_SITE_URL`）與 `disabled`。未設定時啟動會記錄警告；寄信關閉時，註冊與重寄會明確回報 email 驗證未開啟，新帳號無法驗證 email，也領不到歡迎 CPT |
 | `WORKER_EXECUTION_PRIVATE_KEY_PEM` | Nodepool Ed25519 signing key；default empty | Nodepool／all 必須提供可解析私鑰 |
 | `WORKER_EXECUTION_PUBLIC_KEY_PEM` | Worker Ed25519 verification key | Self-host 要與 Nodepool matching；可接受 literal `\n` normalization |
 | `NODEPOOL_GRPC_ADDR` | `0.0.0.0:50051` | Listen／舊 connect context；不要拿 wildcard 當 remote target |
@@ -819,6 +820,8 @@ Proto 保留歷史 `torrent` 與 package 欄位；active HTTP hcode 使用 sourc
 ### 9.4 PowerShell 提交示例
 
 執行前需確認 Master API 已啟動並完成 enrollment／Nodepool readiness、帳號已建立且餘額足夠，並有至少三個符合預設 managed policy 的 eligible Workers。
+
+Eligible Workers 不足時，任務會留在排隊中，任務列表的 `status_message` 會寫明還缺多少個不同擁有者的 Worker 以及目前可用的數量，例如 `Waiting for 3 Workers from different owners; 1 available now.`。Master UI 會以目前語言顯示同一句話。
 
 ```powershell
 $master = "http://127.0.0.1:8082"
