@@ -21,7 +21,7 @@ pub const V1_SEMANTICS_MANIFEST_JSON: &str = include_str!("../hcode-semantics.js
 /// SHA-256 of the canonical JSON bytes in [`V1_SEMANTICS_MANIFEST_JSON`],
 /// excluding the file's trailing newline.
 pub const V1_SEMANTICS_MANIFEST_SHA256: &str =
-    "12d0802b6ddd3b022be897b18a8b3037b0526ff52150ce005ad5a4b72bf45122";
+    "4740939e9ad6dbd2dd0de54c090e63776d114f192bcfd852f0bcd49df7335b5e";
 
 /// Versioned metering identity committed by the v1 semantics manifest.
 pub const V1_COST_MODEL_ID: &str = "hcode-execution-cpt-v1";
@@ -30,11 +30,17 @@ pub const V1_COST_MODEL_ID: &str = "hcode-execution-cpt-v1";
 pub const GPU_SEMANTICS_MANIFEST_JSON: &str = include_str!("../hcode-gpu-semantics.json");
 /// SHA-256 of the canonical GPU-v1 manifest excluding its trailing newline.
 pub const GPU_SEMANTICS_MANIFEST_SHA256: &str =
-    "fc13caef0f9b800ab8082a92d43c2a9021d8e06eac1095356189b8aea5927fd3";
+    "0116c7dda3062abeaa18c5f787897f9ef8a3cf680a19d9456ad22784ee1c6bc1";
 
 /// Deepest syntactic nesting the parser accepts. Each nested expression, block,
 /// unary or logical-not prefix, and else-if counts one level.
 pub const MAX_PARSE_NESTING: usize = 128;
+
+/// Deepest statement or expression tree the parser accepts, counted as the
+/// number of nodes on the longest path, leaves included. A return statement
+/// with a chain of `k` additions has `k + 2` nodes on its longest path. The
+/// check runs before execution, so a rejected program is not charged.
+pub const MAX_SYNTAX_HEIGHT: usize = 512;
 
 /// Deepest evaluation nesting: the expression and statement frames active at
 /// once, counted across user function calls. Frames are not charged, so
@@ -1592,6 +1598,139 @@ enum LogicalOp {
     Or,
 }
 
+/// A statement or expression waiting for its depth to be checked.
+#[derive(Clone, Copy)]
+enum SyntaxNode<'a> {
+    Statement(&'a Stmt),
+    Expression(&'a Expr),
+}
+
+impl Program {
+    /// Fails when a statement or expression tree has more than
+    /// [`MAX_SYNTAX_HEIGHT`] nodes on its longest path. A function body is
+    /// measured from its own statements, because its frames exist only while
+    /// the function runs. The walk keeps its own stack: a chain of operators
+    /// can be far deeper than the parser's recursion limit.
+    fn check_syntax_height(&self) -> Result<(), RuntimeError> {
+        let mut pending: Vec<(SyntaxNode<'_>, usize)> = self
+            .statements
+            .iter()
+            .map(|statement| (SyntaxNode::Statement(statement), 1))
+            .collect();
+        while let Some((node, depth)) = pending.pop() {
+            if depth > MAX_SYNTAX_HEIGHT {
+                return Err(RuntimeError::new(
+                    "parse_error",
+                    format!("syntax nesting exceeds {MAX_SYNTAX_HEIGHT} levels"),
+                ));
+            }
+            let child_depth = depth + 1;
+            match node {
+                SyntaxNode::Statement(statement) => match statement {
+                    Stmt::Let(_, expr)
+                    | Stmt::Return(expr)
+                    | Stmt::Print(expr)
+                    | Stmt::Expr(expr) => {
+                        pending.push((SyntaxNode::Expression(expr), child_depth));
+                    }
+                    Stmt::Fn(function) => {
+                        pending.extend(
+                            function
+                                .body
+                                .iter()
+                                .map(|statement| (SyntaxNode::Statement(statement), 1)),
+                        );
+                    }
+                    Stmt::For { iterable, body, .. } => {
+                        pending.push((SyntaxNode::Expression(iterable), child_depth));
+                        pending.extend(
+                            body.iter()
+                                .map(|statement| (SyntaxNode::Statement(statement), child_depth)),
+                        );
+                    }
+                    Stmt::While { condition, body } => {
+                        pending.push((SyntaxNode::Expression(condition), child_depth));
+                        pending.extend(
+                            body.iter()
+                                .map(|statement| (SyntaxNode::Statement(statement), child_depth)),
+                        );
+                    }
+                    Stmt::If {
+                        condition,
+                        then_body,
+                        else_body,
+                    } => {
+                        pending.push((SyntaxNode::Expression(condition), child_depth));
+                        pending.extend(
+                            then_body
+                                .iter()
+                                .chain(else_body)
+                                .map(|statement| (SyntaxNode::Statement(statement), child_depth)),
+                        );
+                    }
+                    Stmt::IndexAssign {
+                        target,
+                        index,
+                        value,
+                    } => {
+                        pending.extend(
+                            [target, index, value]
+                                .into_iter()
+                                .map(|expr| (SyntaxNode::Expression(expr), child_depth)),
+                        );
+                    }
+                    Stmt::Break | Stmt::Continue => {}
+                },
+                SyntaxNode::Expression(expression) => match expression {
+                    Expr::Value(_) | Expr::Variable(_) => {}
+                    Expr::If {
+                        condition,
+                        then_expr,
+                        else_expr,
+                    } => {
+                        pending.extend(
+                            [condition.as_ref(), then_expr.as_ref(), else_expr.as_ref()]
+                                .into_iter()
+                                .map(|expr| (SyntaxNode::Expression(expr), child_depth)),
+                        );
+                    }
+                    Expr::Call { args, .. } | Expr::List(args) => {
+                        pending.extend(
+                            args.iter()
+                                .map(|expr| (SyntaxNode::Expression(expr), child_depth)),
+                        );
+                    }
+                    Expr::Dict(pairs) => {
+                        pending.extend(
+                            pairs
+                                .iter()
+                                .map(|(_, expr)| (SyntaxNode::Expression(expr), child_depth)),
+                        );
+                    }
+                    Expr::Binary { left, right, .. } | Expr::Logical { left, right, .. } => {
+                        pending.extend(
+                            [left.as_ref(), right.as_ref()]
+                                .into_iter()
+                                .map(|expr| (SyntaxNode::Expression(expr), child_depth)),
+                        );
+                    }
+                    Expr::Unary { expr, .. } => {
+                        pending.push((SyntaxNode::Expression(expr), child_depth));
+                    }
+                    Expr::Index { target, index } => {
+                        pending.extend(
+                            [target.as_ref(), index.as_ref()]
+                                .into_iter()
+                                .map(|expr| (SyntaxNode::Expression(expr), child_depth)),
+                        );
+                    }
+                },
+            }
+        }
+        Ok(())
+    }
+}
+
 struct Parser {
     tokens: Vec<SpannedToken>,
     pos: usize,
@@ -1637,7 +1776,9 @@ impl Parser {
         while !matches!(self.peek(), Token::Eof) {
             statements.push(self.statement()?);
         }
-        Ok(Program { statements })
+        let program = Program { statements };
+        program.check_syntax_height()?;
+        Ok(program)
     }
 
     fn statement(&mut self) -> Result<Stmt, RuntimeError> {
@@ -4319,7 +4460,7 @@ impl Write for BoundedFmtWriter<'_> {
 #[cfg(test)]
 mod tests {
     use super::{
-        CpuGpuBackend, ExecutionLimits, MAX_EVALUATION_NESTING, MAX_PARSE_NESTING, ManagedExecutor,
+        CpuGpuBackend, ExecutionLimits, MAX_PARSE_NESTING, MAX_SYNTAX_HEIGHT, ManagedExecutor,
         ManagedGpuExecutor, Value, render_output_bounded,
     };
 
@@ -5571,20 +5712,44 @@ mod tests {
         }
     }
 
-    /// A chain of k additions keeps k + 2 frames active: the return statement,
-    /// the k sums, and the operands of the innermost sum.
+    /// A return statement with k additions has k + 2 nodes on its longest path,
+    /// so the largest chain the syntax check accepts has MAX_SYNTAX_HEIGHT - 2 sums.
     #[test]
-    fn evaluation_nesting_stops_at_the_documented_depth() {
+    fn syntax_height_stops_at_the_documented_depth() {
         let chain = |terms: usize| format!("return 1{};", "+1".repeat(terms));
         assert_eq!(
-            eval_hcode(&chain(MAX_EVALUATION_NESTING - 2)).unwrap(),
-            (MAX_EVALUATION_NESTING - 1).to_string()
+            eval_hcode(&chain(MAX_SYNTAX_HEIGHT - 2)).unwrap(),
+            (MAX_SYNTAX_HEIGHT - 1).to_string()
         );
         assert_eq!(
-            hcode_error_code(&chain(MAX_EVALUATION_NESTING - 1)),
-            "nesting_limit_exceeded"
+            hcode_error_code(&chain(MAX_SYNTAX_HEIGHT - 1)),
+            "parse_error"
         );
-        assert_eq!(hcode_error_code(&chain(20_000)), "nesting_limit_exceeded");
+        assert_eq!(hcode_error_code(&chain(20_000)), "parse_error");
+    }
+
+    #[test]
+    fn syntax_height_applies_to_untaken_branches_and_function_bodies() {
+        let chain = "+1".repeat(MAX_SYNTAX_HEIGHT);
+        let untaken = format!("if false {{ return 1{chain}; }} return 0;");
+        assert_eq!(hcode_error_code(&untaken), "parse_error");
+        let body = format!("fn f() {{ return 1{chain}; }} return 0;");
+        assert_eq!(hcode_error_code(&body), "parse_error");
+    }
+
+    /// The recursive call is the leftmost operand of a 100-term sum, so each
+    /// call keeps 102 frames active: the if expression, the sum, and the call.
+    /// Nine calls fit under the evaluation limit, eleven do not.
+    #[test]
+    fn evaluation_nesting_counts_frames_across_calls() {
+        let recursion = |depth: usize| {
+            format!(
+                "fn f(n) {{ return if n == 0 {{ 0 }} else {{ f(n - 1){} }}; }} return f({depth});",
+                "+1".repeat(100)
+            )
+        };
+        assert_eq!(eval_hcode(&recursion(9)).unwrap(), "900");
+        assert_eq!(hcode_error_code(&recursion(11)), "nesting_limit_exceeded");
     }
 
     #[test]
@@ -5613,9 +5778,12 @@ mod tests {
                 .unwrap_err()
                 .starts_with("parse_error")
         );
-        let chain = format!("return 1{};", "+1".repeat(MAX_EVALUATION_NESTING));
+        let recursion = format!(
+            "fn f(n) {{ return if n == 0 {{ 0 }} else {{ f(n - 1){} }}; }} return f(11);",
+            "+1".repeat(100)
+        );
         assert!(
-            eval_gpu(&chain, "null")
+            eval_gpu(&recursion, "null")
                 .unwrap_err()
                 .starts_with("nesting_limit_exceeded")
         );

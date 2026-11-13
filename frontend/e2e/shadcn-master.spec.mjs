@@ -48,7 +48,7 @@ function dryRunQuote() {
       required_max_cpt: 82,
     },
     error: null,
-    semantics_manifest_sha256: '12d0802b6ddd3b022be897b18a8b3037b0526ff52150ce005ad5a4b72bf45122',
+    semantics_manifest_sha256: '4740939e9ad6dbd2dd0de54c090e63776d114f192bcfd852f0bcd49df7335b5e',
   };
 }
 
@@ -64,7 +64,7 @@ function dryRunSyntaxError() {
     usage_units: null,
     quote: null,
     error: { code: 'parse_error', message: 'unexpected token', line: 2, column: 9, cause: 'program', usage_units: null },
-    semantics_manifest_sha256: '12d0802b6ddd3b022be897b18a8b3037b0526ff52150ce005ad5a4b72bf45122',
+    semantics_manifest_sha256: '4740939e9ad6dbd2dd0de54c090e63776d114f192bcfd852f0bcd49df7335b5e',
   };
 }
 

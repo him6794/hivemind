@@ -82,7 +82,7 @@ closed interpreter. Its runtime, backend, cost-model, and semantics identities
 are pinned by
 [`executor-rs/crates/managed-function-runtime/hcode-semantics.json`](../executor-rs/crates/managed-function-runtime/hcode-semantics.json)
 and digest
-`12d0802b6ddd3b022be897b18a8b3037b0526ff52150ce005ad5a4b72bf45122`.
+`4740939e9ad6dbd2dd0de54c090e63776d114f192bcfd852f0bcd49df7335b5e`.
 
 - Each managed task is assigned to three distinct Workers by default, with a
   two-replica quorum; at most seven replicas may be configured. A single Worker
@@ -150,6 +150,11 @@ Nesting limits:
 - source may nest at most 128 levels of expressions, blocks, unary or
   logical-not prefixes, and else-if branches; deeper source fails with
   `parse_error` before anything is charged
+- a statement or expression tree may have at most 512 nodes on its longest
+  path, leaves included (a return statement with 510 additions is the longest
+  chain that fits); a function body is measured from its own statements. A
+  deeper tree fails with `parse_error` before anything is charged, including
+  code that is never run
 - at most 1024 expression and statement frames may be active at once, counted
   across user function calls; exceeding that fails with
   `nesting_limit_exceeded`, after the work done up to that point is charged

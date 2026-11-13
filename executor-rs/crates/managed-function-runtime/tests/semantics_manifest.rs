@@ -1,6 +1,6 @@
 use managed_function_runtime::{
-    ExecutionLimits, MAX_EVALUATION_NESTING, MAX_PARSE_NESTING, ManagedExecutor, Status,
-    V0_SEMANTICS_MANIFEST_JSON, V0_SEMANTICS_MANIFEST_SHA256, V1_COST_MODEL_ID,
+    ExecutionLimits, MAX_EVALUATION_NESTING, MAX_PARSE_NESTING, MAX_SYNTAX_HEIGHT, ManagedExecutor,
+    Status, V0_SEMANTICS_MANIFEST_JSON, V0_SEMANTICS_MANIFEST_SHA256, V1_COST_MODEL_ID,
     V1_SEMANTICS_MANIFEST_JSON, V1_SEMANTICS_MANIFEST_SHA256,
 };
 use serde_json::Value;
@@ -226,6 +226,10 @@ fn managed_function_v1_manifest_records_the_nesting_limits_the_runtime_enforces(
         manifest["nesting_limits"]["max_evaluation_nesting"],
         MAX_EVALUATION_NESTING
     );
+    assert_eq!(
+        manifest["nesting_limits"]["max_syntax_height"],
+        MAX_SYNTAX_HEIGHT
+    );
 }
 
 #[test]
@@ -291,4 +295,4 @@ fn managed_function_v1_manifest_matches_budget_profile_and_cost_vectors() {
 }
 
 const EXPECTED_V1_MANIFEST_SHA256: &str =
-    "12d0802b6ddd3b022be897b18a8b3037b0526ff52150ce005ad5a4b72bf45122";
+    "4740939e9ad6dbd2dd0de54c090e63776d114f192bcfd852f0bcd49df7335b5e";

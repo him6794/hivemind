@@ -29,7 +29,7 @@ const quoteAnswer = {
     required_max_cpt: 82,
   },
   error: null,
-  semantics_manifest_sha256: '12d0802b6ddd3b022be897b18a8b3037b0526ff52150ce005ad5a4b72bf45122',
+  semantics_manifest_sha256: '4740939e9ad6dbd2dd0de54c090e63776d114f192bcfd852f0bcd49df7335b5e',
 };
 
 test('the request carries the source and the input the way a submit does', () => {
@@ -66,7 +66,7 @@ test('a finished run becomes a quote with the numbers the Master computed', () =
   assert.equal(view.reservedUsageCpt, 75);
   assert.equal(view.platformFeeCpt, 7);
   assert.equal(view.requiredMaxCpt, 82);
-  assert.equal(view.interpreter, '12d0802b6ddd');
+  assert.equal(view.interpreter, '4740939e9ad6');
   assert.equal(view.exceedsConsensusLimit, false);
 });
 
