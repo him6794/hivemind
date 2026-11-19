@@ -17,7 +17,6 @@ pub mod device_auth;
 pub mod hardware_probe;
 pub mod os_keyring;
 pub mod resource_policy;
-pub mod web_auth;
 
 use anyhow::Result;
 use attempt_stop_fence::AttemptStopFenceStore;
