@@ -2129,6 +2129,165 @@ async fn run_migrations_inner(pool: &PgPool) -> Result<()> {
     .execute(&mut *tx)
     .await?;
 
+
+    // LLM signed model catalog, worker model state, prepaid block quotas, inference ledger,
+    // private compute mesh device metadata, reusable artifacts, and DAG pipeline orchestration.
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS llm_model_catalogs (
+            generation BIGINT PRIMARY KEY,
+            catalog_json BYTEA NOT NULL,
+            signature_hex VARCHAR(128) NOT NULL,
+            published_by VARCHAR(255) NOT NULL,
+            published_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );",
+    )
+    .execute(&mut *tx)
+    .await?;
+
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS llm_worker_models (
+            worker_id VARCHAR(255) NOT NULL,
+            owner VARCHAR(255) NOT NULL,
+            model_id VARCHAR(128) NOT NULL,
+            state VARCHAR(32) NOT NULL DEFAULT 'loaded',
+            seeding_eligible BOOLEAN NOT NULL DEFAULT FALSE,
+            start_layer INTEGER NOT NULL DEFAULT 0,
+            end_layer INTEGER NOT NULL DEFAULT 0,
+            total_layers INTEGER NOT NULL DEFAULT 0,
+            rtt_ms DOUBLE PRECISION NOT NULL DEFAULT 50.0,
+            tokens_per_sec DOUBLE PRECISION NOT NULL DEFAULT 15.0,
+            hardware_type VARCHAR(16) NOT NULL DEFAULT 'cpu',
+            trust_tier VARCHAR(32) NOT NULL DEFAULT 'tier1_public',
+            lan_endpoint VARCHAR(128) NOT NULL DEFAULT '',
+            artifact_format VARCHAR(32) NOT NULL DEFAULT 'gguf',
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            PRIMARY KEY (worker_id, model_id)
+        );",
+    )
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS llm_worker_models_model_state_idx
+         ON llm_worker_models (model_id, state, updated_at DESC);",
+    )
+    .execute(&mut *tx)
+    .await?;
+
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS llm_block_quotas (
+            owner VARCHAR(255) NOT NULL,
+            model_id VARCHAR(128) NOT NULL,
+            input_available_tokens BIGINT NOT NULL DEFAULT 0 CHECK (input_available_tokens >= 0),
+            output_available_tokens BIGINT NOT NULL DEFAULT 0 CHECK (output_available_tokens >= 0),
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            PRIMARY KEY (owner, model_id)
+        );",
+    )
+    .execute(&mut *tx)
+    .await?;
+
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS llm_inference_requests (
+            request_id VARCHAR(128) PRIMARY KEY,
+            owner VARCHAR(255) NOT NULL,
+            model_id VARCHAR(128) NOT NULL,
+            worker_id VARCHAR(255) NOT NULL DEFAULT '',
+            worker_owner VARCHAR(255) NOT NULL DEFAULT '',
+            route_mode VARCHAR(32) NOT NULL DEFAULT 'auto',
+            trust_tier VARCHAR(32) NOT NULL DEFAULT 'tier1_public',
+            execution_mode VARCHAR(32) NOT NULL DEFAULT 'single',
+            reserved_input_tokens BIGINT NOT NULL,
+            reserved_output_tokens BIGINT NOT NULL,
+            input_blocks_charged BIGINT NOT NULL DEFAULT 0,
+            output_blocks_charged BIGINT NOT NULL DEFAULT 0,
+            charged_cpt BIGINT NOT NULL DEFAULT 0,
+            actual_input_tokens BIGINT NOT NULL DEFAULT 0,
+            actual_output_tokens BIGINT NOT NULL DEFAULT 0,
+            status VARCHAR(32) NOT NULL DEFAULT 'admitted',
+            status_message TEXT NOT NULL DEFAULT '',
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            settled_at TIMESTAMPTZ
+        );",
+    )
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS llm_inference_requests_owner_idx
+         ON llm_inference_requests (owner, created_at DESC);",
+    )
+    .execute(&mut *tx)
+    .await?;
+
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS worker_device_metadata (
+            worker_id VARCHAR(255) PRIMARY KEY,
+            owner VARCHAR(255) NOT NULL,
+            alias VARCHAR(128) NOT NULL DEFAULT '',
+            tags_json TEXT NOT NULL DEFAULT '[]',
+            device_role VARCHAR(32) NOT NULL DEFAULT 'worker',
+            trust_tier VARCHAR(32) NOT NULL DEFAULT 'tier1_public',
+            overflow_policy VARCHAR(40) NOT NULL DEFAULT 'prefer_private_then_public',
+            lan_endpoint VARCHAR(128) NOT NULL DEFAULT '',
+            paused BOOLEAN NOT NULL DEFAULT FALSE,
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );",
+    )
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS worker_device_metadata_owner_idx
+         ON worker_device_metadata (owner);",
+    )
+    .execute(&mut *tx)
+    .await?;
+
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS reusable_artifacts (
+            artifact_id VARCHAR(128) PRIMARY KEY,
+            owner VARCHAR(255) NOT NULL,
+            sha256 VARCHAR(64) NOT NULL,
+            size_bytes BIGINT NOT NULL,
+            media_type VARCHAR(128) NOT NULL DEFAULT 'application/octet-stream',
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );",
+    )
+    .execute(&mut *tx)
+    .await?;
+
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS dag_pipelines (
+            pipeline_id VARCHAR(128) PRIMARY KEY,
+            owner VARCHAR(255) NOT NULL,
+            name VARCHAR(128) NOT NULL DEFAULT '',
+            state VARCHAR(32) NOT NULL DEFAULT 'running',
+            budget_cpt BIGINT NOT NULL DEFAULT 0,
+            spent_cpt BIGINT NOT NULL DEFAULT 0,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );",
+    )
+    .execute(&mut *tx)
+    .await?;
+
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS dag_pipeline_nodes (
+            pipeline_id VARCHAR(128) NOT NULL REFERENCES dag_pipelines(pipeline_id) ON DELETE CASCADE,
+            node_id VARCHAR(128) NOT NULL,
+            node_kind VARCHAR(32) NOT NULL DEFAULT 'map',
+            depends_on_json TEXT NOT NULL DEFAULT '[]',
+            input_artifact_id VARCHAR(128),
+            output_artifact_id VARCHAR(128),
+            state VARCHAR(32) NOT NULL DEFAULT 'pending',
+            max_cpt BIGINT NOT NULL DEFAULT 0,
+            billed_cpt BIGINT NOT NULL DEFAULT 0,
+            checkpoint_json TEXT NOT NULL DEFAULT '{}',
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            PRIMARY KEY (pipeline_id, node_id)
+        );",
+    )
+    .execute(&mut *tx)
+    .await?;
+
     tracing::info!("Database migrations completed successfully");
     tx.commit().await?;
     Ok(())

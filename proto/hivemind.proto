@@ -1681,3 +1681,278 @@ service JobService {
     rpc ListJobItems(ListJobItemsRequest) returns (ListJobItemsResponse);
     rpc CancelJob(CancelJobRequest) returns (CancelJobResponse);
 }
+
+
+// =============================================================================
+// LLM Inference, Model Swarm Tracker, Private Compute Mesh & Public Status
+// =============================================================================
+
+message PublishModelCatalogRequest {
+    string token = 1;
+    bytes catalog_json = 2;
+    string signature_hex = 3;
+}
+
+message PublishModelCatalogResponse {
+    bool success = 1;
+    string status_message = 2;
+    uint64 generation = 3;
+    uint32 model_count = 4;
+}
+
+message GetModelCatalogRequest {
+    string token = 1;
+}
+
+message GetModelCatalogResponse {
+    bool success = 1;
+    string status_message = 2;
+    uint64 generation = 3;
+    bytes catalog_json = 4;
+    string signature_hex = 5;
+}
+
+message OnlineModelInfo {
+    string model_id = 1;
+    string display_name = 2;
+    string quantization = 3;
+    uint32 context_length = 4;
+    int64 input_cpt_per_million = 5;
+    int64 output_cpt_per_million = 6;
+    uint32 online_single_workers = 7;
+    uint32 distributed_layer_replicas = 8;
+    bool distributed_complete = 9;
+    repeated string available_hardware = 10;
+    repeated string available_formats = 11;
+}
+
+message ListOnlineModelsRequest {
+    string token = 1;
+    bool own_devices_only = 2;
+}
+
+message ListOnlineModelsResponse {
+    bool success = 1;
+    string status_message = 2;
+    repeated OnlineModelInfo models = 3;
+}
+
+message ReportWorkerModelStatusRequest {
+    string token = 1;
+    string worker_id = 2;
+    string model_id = 3;
+    // "downloading", "seeding", "loaded", "unloaded", "error"
+    string state = 4;
+    bool seeding_eligible = 5;
+    uint32 start_layer = 6;
+    uint32 end_layer = 7;
+    uint32 total_layers = 8;
+    double rtt_ms = 9;
+    double tokens_per_sec = 10;
+    // "cpu", "gpu", "npu"
+    string hardware_type = 11;
+    // "tier0_private", "tier1_public", "tier2_tee"
+    string trust_tier = 12;
+    string lan_endpoint = 13;
+    string artifact_format = 14;
+}
+
+message ReportWorkerModelStatusResponse {
+    bool success = 1;
+    string status_message = 2;
+}
+
+message LlmChatMessage {
+    string role = 1;
+    string content = 2;
+}
+
+message LlmRoutingOptions {
+    // "auto", "manual", "single", "distributed"
+    string route_mode = 1;
+    string target_worker_id = 2;
+    repeated string target_worker_ids = 3;
+    string device_tag = 4;
+    // "", "cpu", "gpu", "npu"
+    string hardware_type = 5;
+    bool own_devices_only = 6;
+    // "tier0_private", "tier1_public", "tier2_tee"
+    string trust_tier = 7;
+    // "prefer_private_then_public", "strict_private"
+    string overflow_policy = 8;
+}
+
+message LlmInferRequest {
+    string token = 1;
+    string request_id = 2;
+    string model_id = 3;
+    // Either messages (chat completions) or raw prompt (legacy completions)
+    repeated LlmChatMessage messages = 4;
+    string prompt = 5;
+    uint32 max_tokens = 6;
+    float temperature = 7;
+    float top_p = 8;
+    repeated string stop = 9;
+    bool stream = 10;
+    LlmRoutingOptions routing = 11;
+}
+
+message LlmInferResponse {
+    bool success = 1;
+    string status_message = 2;
+    string request_id = 3;
+    string model_id = 4;
+    string content = 5;
+    string finish_reason = 6;
+    uint32 prompt_tokens = 7;
+    uint32 completion_tokens = 8;
+    int64 charged_cpt = 9;
+    string worker_id = 10;
+    repeated string worker_chain = 11;
+    // "single" or "distributed"
+    string execution_mode = 12;
+    // "tier0_private", "tier1_public", "tier2_tee"
+    string trust_tier = 13;
+    // "private-tier0" or "public-unencrypted-to-worker" or "confidential-tee"
+    string data_privacy = 14;
+    bool lan_direct = 15;
+}
+
+message LlmInferChunk {
+    string request_id = 1;
+    string model_id = 2;
+    string delta_content = 3;
+    bool done = 4;
+    string finish_reason = 5;
+    uint32 prompt_tokens = 6;
+    uint32 completion_tokens = 7;
+    int64 charged_cpt = 8;
+    string worker_id = 9;
+    repeated string worker_chain = 10;
+    string execution_mode = 11;
+    string trust_tier = 12;
+    string data_privacy = 13;
+    bool lan_direct = 14;
+    string error_message = 15;
+}
+
+message AccountDeviceView {
+    string worker_id = 1;
+    string owner = 2;
+    string alias = 3;
+    repeated string tags = 4;
+    string role = 5;
+    string status = 6;
+    string trust_tier = 7;
+    string overflow_policy = 8;
+    string lan_endpoint = 9;
+    bool paused = 10;
+    string hardware_type = 11;
+    repeated string loaded_models = 12;
+}
+
+message ListAccountDevicesRequest {
+    string token = 1;
+}
+
+message ListAccountDevicesResponse {
+    bool success = 1;
+    string status_message = 2;
+    repeated AccountDeviceView devices = 3;
+}
+
+message UpdateDeviceMetadataRequest {
+    string token = 1;
+    string worker_id = 2;
+    string alias = 3;
+    repeated string tags = 4;
+    string role = 5;
+    string trust_tier = 6;
+    string overflow_policy = 7;
+    string lan_endpoint = 8;
+    bool paused = 9;
+    bool remove_device = 10;
+}
+
+message UpdateDeviceMetadataResponse {
+    bool success = 1;
+    string status_message = 2;
+    AccountDeviceView device = 3;
+}
+
+message GetPublicNetworkStatusRequest {}
+
+message PublicModelStatus {
+    string model_id = 1;
+    string display_name = 2;
+    uint32 online_workers = 3;
+    uint32 min_layer_replicas = 4;
+    bool layer_coverage_complete = 5;
+    double avg_ttft_ms = 6;
+}
+
+message GetPublicNetworkStatusResponse {
+    bool success = 1;
+    uint32 total_online_devices = 2;
+    uint32 private_pool_devices = 3;
+    uint32 public_pool_devices = 4;
+    double avg_latency_ms = 5;
+    double success_rate = 6;
+    repeated PublicModelStatus models = 7;
+    string updated_at = 8;
+}
+
+service LlmInferenceService {
+    rpc PublishModelCatalog(PublishModelCatalogRequest) returns (PublishModelCatalogResponse);
+    rpc GetModelCatalog(GetModelCatalogRequest) returns (GetModelCatalogResponse);
+    rpc ListOnlineModels(ListOnlineModelsRequest) returns (ListOnlineModelsResponse);
+    rpc ReportWorkerModelStatus(ReportWorkerModelStatusRequest) returns (ReportWorkerModelStatusResponse);
+    rpc LlmInfer(LlmInferRequest) returns (LlmInferResponse);
+    rpc LlmInferStream(LlmInferRequest) returns (stream LlmInferChunk);
+    rpc ListAccountDevices(ListAccountDevicesRequest) returns (ListAccountDevicesResponse);
+    rpc UpdateDeviceMetadata(UpdateDeviceMetadataRequest) returns (UpdateDeviceMetadataResponse);
+    rpc GetPublicNetworkStatus(GetPublicNetworkStatusRequest) returns (GetPublicNetworkStatusResponse);
+}
+
+message AnnounceModelPeerRequest {
+    string token = 1;
+    string worker_id = 2;
+    string infohash = 3;
+    string peer_addr = 4;
+    string lan_addr = 5;
+    uint64 bytes_left = 6;
+    bool stopped = 7;
+}
+
+message SwarmPeerInfo {
+    string worker_id = 1;
+    string peer_addr = 2;
+    string lan_addr = 3;
+    bool is_seed = 4;
+    bool same_owner_lan = 5;
+}
+
+message AnnounceModelPeerResponse {
+    bool success = 1;
+    string status_message = 2;
+    bool seeding_eligible = 3;
+    repeated SwarmPeerInfo peers = 4;
+}
+
+message GetModelPeersRequest {
+    string token = 1;
+    string worker_id = 2;
+    string infohash = 3;
+    uint32 limit = 4;
+}
+
+message GetModelPeersResponse {
+    bool success = 1;
+    string status_message = 2;
+    repeated SwarmPeerInfo peers = 3;
+}
+
+service ModelSwarmTrackerService {
+    rpc AnnounceModelPeer(AnnounceModelPeerRequest) returns (AnnounceModelPeerResponse);
+    rpc GetModelPeers(GetModelPeersRequest) returns (GetModelPeersResponse);
+}

@@ -8,7 +8,9 @@ license.workspace = true
 tokio.workspace = true
 prost.workspace = true
 tonic.workspace = true
+serde.workspace = true
 serde_json.workspace = true
+thiserror.workspace = true
 sha2.workspace = true
 bcrypt.workspace = true
 hex.workspace = true
@@ -28,6 +30,8 @@ hivemind-task-scheduler = { path = "../task-scheduler" }
 hivemind-vpn-service = { path = "../vpn-service" }
 hivemind-managed-consensus = { path = "../managed-consensus" }
 hivemind-client-core = { path = "../client-core" }
+hivemind-model-catalog = { path = "../model-catalog" }
+hivemind-model-swarm = { path = "../model-swarm" }
 general-compute-runtime = { path = "../../../executor-rs/crates/general-compute-runtime" }
 tokio-stream.workspace = true
 
