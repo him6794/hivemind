@@ -16,6 +16,13 @@ members = [
     "crates/client-runtime",
     "crates/client-core",
     "crates/vpn-service",
+    "crates/model-catalog",
+    "crates/model-swarm",
+    "crates/llm-runtime",
+    "crates/petals",
+    "crates/llm-verifier",
+    "crates/wasm-runtime",
+    "crates/hivemind-ffi",
     "crates/hivemind-bin",
 ]
 resolver = "2"
