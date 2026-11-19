@@ -67,7 +67,8 @@ pub fn calculate_layer_cpt_split(
     let mut allocated = 0i64;
     for (wid, owner, layers, steps) in contributions {
         let weight = u128::from(*layers) * u128::from(*steps);
-        let share = ((i128::from(distributable) * (weight as i128)) / (total_weight as i128)) as i64;
+        let share =
+            ((i128::from(distributable) * (weight as i128)) / (total_weight as i128)) as i64;
         allocated = allocated.saturating_add(share);
         shares.push(NodeCptShare {
             worker_id: wid.clone(),
@@ -121,7 +122,9 @@ pub enum PipelineError {
     Coverage(#[from] CoverageError),
     #[error("engine error: {0}")]
     Engine(#[from] EngineError),
-    #[error("unrecoverable failover at hop [{start_layer}..{end_layer}): no healthy replacement worker")]
+    #[error(
+        "unrecoverable failover at hop [{start_layer}..{end_layer}): no healthy replacement worker"
+    )]
     NoFailoverReplacement { start_layer: u32, end_layer: u32 },
     #[error("worker engine `{0}` is not connected")]
     WorkerNotConnected(String),
@@ -159,9 +162,8 @@ pub async fn run_distributed_generation(
         let embed: Vec<f32> = (0..hidden_dim)
             .map(|d| (((prev_token_id + step_idx + d) % 17) as f32) * 0.05 - 0.4)
             .collect();
-        let mut current_act =
-            CompressedActivation::encode(codec, vec![1, hidden_dim], &embed)
-                .map_err(EngineError::from)?;
+        let mut current_act = CompressedActivation::encode(codec, vec![1, hidden_dim], &embed)
+            .map_err(EngineError::from)?;
 
         for hop_idx in 0..chain.len() {
             let hop_input = current_act.clone();
@@ -193,11 +195,9 @@ pub async fn run_distributed_generation(
                                 start_layer: hop.start_layer,
                                 end_layer: hop.end_layer,
                             })?;
-                        let repl_engine = engines
-                            .get(&replacement.worker_id)
-                            .ok_or_else(|| {
-                                PipelineError::WorkerNotConnected(replacement.worker_id.clone())
-                            })?;
+                        let repl_engine = engines.get(&replacement.worker_id).ok_or_else(|| {
+                            PipelineError::WorkerNotConnected(replacement.worker_id.clone())
+                        })?;
                         // Reconstruct KV-cache on the replacement node from cached hidden states!
                         if !hop_input_history[hop_idx].is_empty() {
                             repl_engine

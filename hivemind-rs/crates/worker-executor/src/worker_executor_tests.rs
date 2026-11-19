@@ -685,7 +685,6 @@ async fn overlapping_attempts_keep_execution_and_cancellation_isolated() {
     assert_eq!(calls.load(Ordering::SeqCst), 2);
 }
 
-
 #[tokio::test]
 async fn concurrency_limit_caps_parallel_tasks_and_allows_joining_same_attempt() {
     let mut config = HivemindConfig::default();

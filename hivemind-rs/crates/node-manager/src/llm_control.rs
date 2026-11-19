@@ -11,7 +11,6 @@
 use crate::grpc::NodepoolState;
 use hivemind_model_catalog::{BlockQuota, Catalog, ModelEntry, QuotaError, TOKENS_PER_BLOCK};
 use hivemind_model_swarm::Registry as SwarmRegistry;
-use sha2::{Digest, Sha256};
 use hivemind_proto::llm_inference_service_server::LlmInferenceService;
 use hivemind_proto::model_swarm_tracker_service_server::ModelSwarmTrackerService;
 use hivemind_proto::{
@@ -25,6 +24,7 @@ use hivemind_proto::{
     UpdateDeviceMetadataResponse,
 };
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use sqlx::{PgPool, Row};
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
@@ -585,7 +585,6 @@ pub struct RoutingCriteria {
     pub requested_trust_tier: Option<TrustTier>,
     pub overflow_policy: OverflowPolicy,
 }
-
 
 /// Checks if two IPv4 `host:port` endpoints share the same private `/24` LAN subnet.
 #[must_use]
@@ -1847,22 +1846,39 @@ mod tests {
         //    second reuses remaining prepaid quota (0 CPT)!
         let (r1, r2) = tokio::join!(
             admit_llm_request_tx(
-                &pool, "pg-req-1", "pg_llm_alice", &model, 512, "w-bob-1", "pg_llm_bob",
-                "auto", TrustTier::Tier1Public, "single_worker",
+                &pool,
+                "pg-req-1",
+                "pg_llm_alice",
+                &model,
+                512,
+                "w-bob-1",
+                "pg_llm_bob",
+                "auto",
+                TrustTier::Tier1Public,
+                "single_worker",
             ),
             admit_llm_request_tx(
-                &pool, "pg-req-2", "pg_llm_alice", &model, 512, "w-bob-1", "pg_llm_bob",
-                "auto", TrustTier::Tier1Public, "single_worker",
+                &pool,
+                "pg-req-2",
+                "pg_llm_alice",
+                &model,
+                512,
+                "w-bob-1",
+                "pg_llm_bob",
+                "auto",
+                TrustTier::Tier1Public,
+                "single_worker",
             ),
         );
         let a1 = r1.expect("first concurrent admit");
         let a2 = r2.expect("second concurrent admit");
         assert_eq!(a1.charged_cpt + a2.charged_cpt, 100);
 
-        let alice_bal: i64 = sqlx::query_scalar("SELECT balance FROM users WHERE username = 'pg_llm_alice'")
-            .fetch_one(&pool)
-            .await
-            .unwrap();
+        let alice_bal: i64 =
+            sqlx::query_scalar("SELECT balance FROM users WHERE username = 'pg_llm_alice'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
         assert_eq!(alice_bal, 400);
 
         // 2. Normal settlement refunds unused reserved tokens and credits worker owner bob.
@@ -1879,10 +1895,11 @@ mod tests {
             Err(LlmBillingError::AlreadySettled(_, _))
         ));
 
-        let bob_bal: i64 = sqlx::query_scalar("SELECT balance FROM users WHERE username = 'pg_llm_bob'")
-            .fetch_one(&pool)
-            .await
-            .unwrap();
+        let bob_bal: i64 =
+            sqlx::query_scalar("SELECT balance FROM users WHERE username = 'pg_llm_bob'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
         assert_eq!(bob_bal, 112);
 
         // 3. 0-token failure refunds 100% of reservation!
@@ -1895,17 +1912,38 @@ mod tests {
 
         // 4. Overrun fault marks status='overrun_fault' and withholds refund.
         let a3 = admit_llm_request_tx(
-            &pool, "pg-req-3", "pg_llm_alice", &model, 64, "w-bob-1", "pg_llm_bob",
-            "auto", TrustTier::Tier1Public, "single_worker",
+            &pool,
+            "pg-req-3",
+            "pg_llm_alice",
+            &model,
+            64,
+            "w-bob-1",
+            "pg_llm_bob",
+            "auto",
+            TrustTier::Tier1Public,
+            "single_worker",
         )
         .await
         .expect("admit req 3");
-        let s3 = settle_llm_request_tx(&pool, "pg-req-3", a3.reserved_input_tokens + 10, 10, 0, None).await;
-        assert!(matches!(s3, Err(LlmBillingError::Quota(QuotaError::Overrun))));
-        let s3_status: String = sqlx::query_scalar("SELECT status FROM llm_inference_requests WHERE request_id = 'pg-req-3'")
-            .fetch_one(&pool)
-            .await
-            .unwrap();
+        let s3 = settle_llm_request_tx(
+            &pool,
+            "pg-req-3",
+            a3.reserved_input_tokens + 10,
+            10,
+            0,
+            None,
+        )
+        .await;
+        assert!(matches!(
+            s3,
+            Err(LlmBillingError::Quota(QuotaError::Overrun))
+        ));
+        let s3_status: String = sqlx::query_scalar(
+            "SELECT status FROM llm_inference_requests WHERE request_id = 'pg-req-3'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
         assert_eq!(s3_status, "overrun_fault");
 
         // Verify token conservation: 1M - 100 - a3.reserved_input_tokens input remaining!
@@ -1915,7 +1953,13 @@ mod tests {
         .fetch_one(&pool)
         .await
         .unwrap();
-        assert_eq!(in_avail as u64, TOKENS_PER_BLOCK - 100 - a3.reserved_input_tokens);
-        assert_eq!(out_avail as u64, TOKENS_PER_BLOCK - 50 - a3.reserved_output_tokens);
+        assert_eq!(
+            in_avail as u64,
+            TOKENS_PER_BLOCK - 100 - a3.reserved_input_tokens
+        );
+        assert_eq!(
+            out_avail as u64,
+            TOKENS_PER_BLOCK - 50 - a3.reserved_output_tokens
+        );
     }
 }

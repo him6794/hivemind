@@ -1,11 +1,11 @@
 pub mod account;
 pub mod allowance;
+pub mod dag_orchestrator;
 pub mod grpc;
 pub mod hcode_probes;
 pub mod hcode_reads;
 pub mod hcode_sources;
 pub mod heartbeat;
-pub mod dag_orchestrator;
 pub mod jobs;
 pub mod llm_control;
 pub mod outbound_session;

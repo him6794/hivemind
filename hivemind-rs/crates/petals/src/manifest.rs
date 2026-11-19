@@ -165,7 +165,9 @@ impl LayerShardManifest {
         }
         let usable = available_memory_bytes.saturating_mul(3) / 4;
         let layers = usable / self.bytes_per_layer;
-        u32::try_from(layers).unwrap_or(self.total_layers).min(self.total_layers)
+        u32::try_from(layers)
+            .unwrap_or(self.total_layers)
+            .min(self.total_layers)
     }
 
     /// Returns the shard specs needed for a device assigned `[start_layer..end_layer)`.

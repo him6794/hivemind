@@ -649,11 +649,12 @@ async fn run_service_inner(
                 db.pool.clone(),
             ),
         );
-        let swarm_tracker_svc = hivemind_proto::model_swarm_tracker_service_server::ModelSwarmTrackerServiceServer::new(
-            hivemind_node_manager::llm_control::GrpcModelSwarmTrackerService::new(
-                np_state.clone(),
-            ),
-        );
+        let swarm_tracker_svc =
+            hivemind_proto::model_swarm_tracker_service_server::ModelSwarmTrackerServiceServer::new(
+                hivemind_node_manager::llm_control::GrpcModelSwarmTrackerService::new(
+                    np_state.clone(),
+                ),
+            );
         let job_svc = JobServiceServer::new(hivemind_node_manager::jobs::GrpcJobService::new(
             np_state.clone(),
         ))

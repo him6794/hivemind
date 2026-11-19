@@ -2129,7 +2129,6 @@ async fn run_migrations_inner(pool: &PgPool) -> Result<()> {
     .execute(&mut *tx)
     .await?;
 
-
     // LLM signed model catalog, worker model state, prepaid block quotas, inference ledger,
     // private compute mesh device metadata, reusable artifacts, and DAG pipeline orchestration.
     sqlx::query(

@@ -1227,7 +1227,10 @@ mod tests {
             let mut req_buf = vec![0u8; 4096];
             let read = socket.read(&mut req_buf).await.expect("read");
             let req_text = String::from_utf8_lossy(&req_buf[..read]);
-            assert!(req_text.to_ascii_lowercase().contains(&format!("authorization: bearer {}", key_check.to_ascii_lowercase())));
+            assert!(req_text.to_ascii_lowercase().contains(&format!(
+                "authorization: bearer {}",
+                key_check.to_ascii_lowercase()
+            )));
             assert!(req_text.contains("\"stream\":true"));
 
             let sse_body = concat!(

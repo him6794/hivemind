@@ -151,7 +151,10 @@ pub fn evaluate_sharing_decision(
         SharingSchedule::IdleOnly { min_idle_secs } => {
             if sample.idle_secs < min_idle_secs {
                 return SharingDecision::Pause {
-                    reason: format!("user_active_idle_{}s_lt_{}s", sample.idle_secs, min_idle_secs),
+                    reason: format!(
+                        "user_active_idle_{}s_lt_{}s",
+                        sample.idle_secs, min_idle_secs
+                    ),
                 };
             }
         }
@@ -304,7 +307,10 @@ mod tests {
         warm.gpu_temp_c = Some(80.0);
         assert!(matches!(
             evaluate_sharing_decision(&policy, &warm),
-            SharingDecision::Throttle { effective_cpu_percent: 35, .. }
+            SharingDecision::Throttle {
+                effective_cpu_percent: 35,
+                ..
+            }
         ));
 
         let mut hot = nominal_sample();
@@ -362,7 +368,8 @@ mod tests {
             },
         ];
 
-        let auto = select_models_to_host(&ModelHostingPolicy::AutoRecommended, &catalog, 8000, 7000);
+        let auto =
+            select_models_to_host(&ModelHostingPolicy::AutoRecommended, &catalog, 8000, 7000);
         assert_eq!(auto, vec!["qwen-7b".to_string(), "qwen-3b".to_string()]);
 
         let manual = select_models_to_host(

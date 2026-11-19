@@ -162,7 +162,10 @@ mod tests {
                 refresh_token: Some("ref-1".to_string()),
             })
             .unwrap();
-        assert_eq!(token, Some(("jwt-ok".to_string(), Some("ref-1".to_string()))));
+        assert_eq!(
+            token,
+            Some(("jwt-ok".to_string(), Some("ref-1".to_string())))
+        );
     }
 
     #[test]

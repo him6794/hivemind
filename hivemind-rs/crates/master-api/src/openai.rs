@@ -13,8 +13,7 @@ use axum::{
     Json,
 };
 use hivemind_proto::{
-    LlmChatMessage, LlmInferChunk, LlmInferRequest, LlmRoutingOptions,
-    UpdateDeviceMetadataRequest,
+    LlmChatMessage, LlmInferChunk, LlmInferRequest, LlmRoutingOptions, UpdateDeviceMetadataRequest,
 };
 use serde::{Deserialize, Serialize};
 use std::convert::Infallible;
@@ -419,11 +418,17 @@ pub async fn chat_completions(
                                             "code": "upstream_error",
                                         }
                                     });
-                                    let _ = tx.send(Ok(Event::default().data(err_json.to_string()))).await;
+                                    let _ = tx
+                                        .send(Ok(Event::default().data(err_json.to_string())))
+                                        .await;
                                     break;
                                 }
                                 let json = format_chat_sse_chunk(&chunk, created);
-                                if tx.send(Ok(Event::default().data(json.to_string()))).await.is_err() {
+                                if tx
+                                    .send(Ok(Event::default().data(json.to_string())))
+                                    .await
+                                    .is_err()
+                                {
                                     break;
                                 }
                                 if chunk.done {
@@ -439,7 +444,9 @@ pub async fn chat_completions(
                                         "code": "grpc_stream_error",
                                     }
                                 });
-                                let _ = tx.send(Ok(Event::default().data(err_json.to_string()))).await;
+                                let _ = tx
+                                    .send(Ok(Event::default().data(err_json.to_string())))
+                                    .await;
                                 break;
                             }
                         }
@@ -449,10 +456,8 @@ pub async fn chat_completions(
                 let mut resp = Sse::new(sse_stream)
                     .keep_alive(KeepAlive::default())
                     .into_response();
-                resp.headers_mut().insert(
-                    header::CACHE_CONTROL,
-                    HeaderValue::from_static("no-cache"),
-                );
+                resp.headers_mut()
+                    .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
                 attach_disclosure_headers(
                     resp.headers_mut(),
                     privacy,
@@ -563,7 +568,11 @@ pub async fn legacy_completions(
                         match item {
                             Ok(chunk) => {
                                 let json = format_legacy_sse_chunk(&chunk, created);
-                                if tx.send(Ok(Event::default().data(json.to_string()))).await.is_err() {
+                                if tx
+                                    .send(Ok(Event::default().data(json.to_string())))
+                                    .await
+                                    .is_err()
+                                {
                                     break;
                                 }
                                 if chunk.done {
@@ -846,7 +855,10 @@ mod tests {
             task_submit_limiter: Arc::new(tokio::sync::Mutex::new(TaskSubmitRateLimiter::new())),
         };
         let app = axum::Router::new()
-            .route("/v1/chat/completions", axum::routing::post(chat_completions))
+            .route(
+                "/v1/chat/completions",
+                axum::routing::post(chat_completions),
+            )
             .with_state(state);
 
         let req = Request::builder()

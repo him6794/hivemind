@@ -124,7 +124,9 @@ impl CompressedActivation {
                 }
                 Ok(self
                     .data
-                    .as_chunks::<4>().0.iter()
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
                     .map(|c| f32::from_le_bytes(*c))
                     .collect())
             }
@@ -137,7 +139,9 @@ impl CompressedActivation {
                 }
                 Ok(self
                     .data
-                    .as_chunks::<2>().0.iter()
+                    .as_chunks::<2>()
+                    .0
+                    .iter()
                     .map(|c| bf16_to_f32(u16::from_le_bytes(*c)))
                     .collect())
             }
@@ -150,7 +154,9 @@ impl CompressedActivation {
                 }
                 Ok(self
                     .data
-                    .as_chunks::<2>().0.iter()
+                    .as_chunks::<2>()
+                    .0
+                    .iter()
                     .map(|c| f16_to_f32(u16::from_le_bytes(*c)))
                     .collect())
             }

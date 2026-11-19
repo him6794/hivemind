@@ -78,7 +78,11 @@ impl HardwareInventory {
                 NpuVendor::None => {}
             }
         }
-        if self.gpus.iter().any(|g| g.backend != GpuBackendKind::CpuOnly) {
+        if self
+            .gpus
+            .iter()
+            .any(|g| g.backend != GpuBackendKind::CpuOnly)
+        {
             push_unique(&mut formats, "gguf");
             push_unique(&mut formats, "onnx");
         } else {
@@ -96,7 +100,10 @@ impl HardwareInventory {
 
     #[must_use]
     pub fn has_dedicated_accelerator(&self) -> bool {
-        self.gpus.iter().any(|g| g.backend != GpuBackendKind::CpuOnly) || !self.npus.is_empty()
+        self.gpus
+            .iter()
+            .any(|g| g.backend != GpuBackendKind::CpuOnly)
+            || !self.npus.is_empty()
     }
 }
 

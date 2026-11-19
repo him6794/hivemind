@@ -1,22 +1,22 @@
 pub mod attempt_stop_fence;
 pub mod benchmark;
+pub mod cas_gc;
 pub mod chunk_transport;
 pub mod control_api;
+pub mod device_auth;
 pub mod executor;
 pub mod grpc_server;
+pub mod hardware_probe;
 pub mod hcode_p2p;
 pub mod idle;
 pub mod maintenance;
 pub mod nodepool_client;
+pub mod os_keyring;
 pub mod resource_monitor;
+pub mod resource_policy;
 pub mod runtime_admission;
 pub mod sandbox;
 pub mod sharing;
-pub mod cas_gc;
-pub mod device_auth;
-pub mod hardware_probe;
-pub mod os_keyring;
-pub mod resource_policy;
 
 use anyhow::Result;
 use attempt_stop_fence::AttemptStopFenceStore;
@@ -50,7 +50,9 @@ pub struct ConcurrencyLimitReached {
 }
 
 #[derive(Debug, thiserror::Error)]
-#[error("Worker has insufficient {resource}: required {required_mb} MiB, available {available_mb} MiB")]
+#[error(
+    "Worker has insufficient {resource}: required {required_mb} MiB, available {available_mb} MiB"
+)]
 pub struct InsufficientMemoryOrVram {
     pub resource: &'static str,
     pub required_mb: u64,
@@ -391,7 +393,9 @@ impl WorkerExecutor {
         let (result_tx, result_rx) = watch::channel(None);
         let active_task_key = ActiveTaskKey::new(&task.task_id, attempt_id);
 
-        let required_ram_mb = u64::try_from(task.req_memory_gb).unwrap_or(0).saturating_mul(1024);
+        let required_ram_mb = u64::try_from(task.req_memory_gb)
+            .unwrap_or(0)
+            .saturating_mul(1024);
         let required_vram_mb = u64::try_from(task.req_gpu_memory_gb)
             .unwrap_or(0)
             .saturating_mul(1024);

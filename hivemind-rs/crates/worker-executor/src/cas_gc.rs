@@ -186,6 +186,10 @@ mod tests {
         assert!(cas.get_verified(&d1).unwrap().is_some());
         assert!(cas.get_verified(&d2).unwrap().is_none());
         assert!(cas.get_verified(&d3).unwrap().is_none());
-        assert!(dir.path().join("quarantine").join(format!("{d3}.corrupt")).exists());
+        assert!(dir
+            .path()
+            .join("quarantine")
+            .join(format!("{d3}.corrupt"))
+            .exists());
     }
 }

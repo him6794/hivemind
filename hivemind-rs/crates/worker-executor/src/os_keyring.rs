@@ -176,7 +176,9 @@ impl CredentialStore for EncryptedFileCredentialStore {
         let ciphertext = hex::decode(&entry.ciphertext_hex).map_err(|e| e.to_string())?;
         let expected_mac = self.compute_mac(&key, &nonce, &ciphertext);
         if expected_mac != entry.mac_hex {
-            return Err("credential vault MAC mismatch (tampered or wrong machine key)".to_string());
+            return Err(
+                "credential vault MAC mismatch (tampered or wrong machine key)".to_string(),
+            );
         }
         let plain = self.xor_stream(&nonce, &ciphertext);
         String::from_utf8(plain)
@@ -202,10 +204,10 @@ impl CredentialStore for InMemoryCredentialStore {
     }
 
     fn store_secret(&self, service: &str, account: &str, secret: &str) -> Result<(), String> {
-        self.entries
-            .lock()
-            .unwrap()
-            .insert((service.to_string(), account.to_string()), secret.to_string());
+        self.entries.lock().unwrap().insert(
+            (service.to_string(), account.to_string()),
+            secret.to_string(),
+        );
         Ok(())
     }
 
@@ -238,7 +240,9 @@ mod tests {
         let store = EncryptedFileCredentialStore::new(&path, "host-machine-fingerprint-1");
 
         let secret = "hmk_super_secret_worker_token_999";
-        store.store_secret("hivemind-worker", "alice", secret).unwrap();
+        store
+            .store_secret("hivemind-worker", "alice", secret)
+            .unwrap();
 
         // Raw file must NOT contain the plaintext secret.
         let raw = std::fs::read_to_string(&path).unwrap();
@@ -246,7 +250,10 @@ mod tests {
 
         // Round-trip decryption succeeds with same machine key.
         assert_eq!(
-            store.load_secret("hivemind-worker", "alice").unwrap().as_deref(),
+            store
+                .load_secret("hivemind-worker", "alice")
+                .unwrap()
+                .as_deref(),
             Some(secret)
         );
 

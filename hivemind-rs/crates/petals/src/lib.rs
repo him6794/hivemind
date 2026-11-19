@@ -59,15 +59,30 @@ mod e2e_tests {
         let mut baseline_engines: HashMap<String, Arc<dyn PartialLayerEngine>> = HashMap::new();
         baseline_engines.insert(
             "w1".into(),
-            Arc::new(ReferencePartialWorker::new("w1", 0, 4, KvCacheQuotaConfig::default())),
+            Arc::new(ReferencePartialWorker::new(
+                "w1",
+                0,
+                4,
+                KvCacheQuotaConfig::default(),
+            )),
         );
         baseline_engines.insert(
             "w2".into(),
-            Arc::new(ReferencePartialWorker::new("w2", 4, 8, KvCacheQuotaConfig::default())),
+            Arc::new(ReferencePartialWorker::new(
+                "w2",
+                4,
+                8,
+                KvCacheQuotaConfig::default(),
+            )),
         );
         baseline_engines.insert(
             "w3".into(),
-            Arc::new(ReferencePartialWorker::new("w3", 8, 12, KvCacheQuotaConfig::default())),
+            Arc::new(ReferencePartialWorker::new(
+                "w3",
+                8,
+                12,
+                KvCacheQuotaConfig::default(),
+            )),
         );
 
         let baseline = run_distributed_generation(
@@ -106,7 +121,12 @@ mod e2e_tests {
         let mut failover_engines: HashMap<String, Arc<dyn PartialLayerEngine>> = HashMap::new();
         failover_engines.insert(
             "w1".into(),
-            Arc::new(ReferencePartialWorker::new("w1", 0, 4, KvCacheQuotaConfig::default())),
+            Arc::new(ReferencePartialWorker::new(
+                "w1",
+                0,
+                4,
+                KvCacheQuotaConfig::default(),
+            )),
         );
         failover_engines.insert("w2".into(), w2_flaky);
         failover_engines.insert(
@@ -120,7 +140,12 @@ mod e2e_tests {
         );
         failover_engines.insert(
             "w3".into(),
-            Arc::new(ReferencePartialWorker::new("w3", 8, 12, KvCacheQuotaConfig::default())),
+            Arc::new(ReferencePartialWorker::new(
+                "w3",
+                8,
+                12,
+                KvCacheQuotaConfig::default(),
+            )),
         );
 
         let (tx, mut rx) = mpsc::channel(16);
@@ -185,7 +210,12 @@ mod e2e_tests {
         let mut engines: HashMap<String, Arc<dyn PartialLayerEngine>> = HashMap::new();
         engines.insert(
             "home-pc".into(),
-            Arc::new(ReferencePartialWorker::new("home-pc", 0, 5, KvCacheQuotaConfig::default())),
+            Arc::new(ReferencePartialWorker::new(
+                "home-pc",
+                0,
+                5,
+                KvCacheQuotaConfig::default(),
+            )),
         );
         engines.insert(
             "home-tablet".into(),

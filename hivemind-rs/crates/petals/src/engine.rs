@@ -66,9 +66,7 @@ pub trait PartialLayerEngine: Send + Sync {
         end_layer: u32,
         history: Vec<CompressedActivation>,
         output_codec: ActivationCodec,
-    ) -> std::pin::Pin<
-        Box<dyn std::future::Future<Output = Result<u32, EngineError>> + Send + '_>,
-    >;
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<u32, EngineError>> + Send + '_>>;
 }
 
 /// Deterministic stateful partial-layer reference worker used for unit and
@@ -112,7 +110,10 @@ impl ReferencePartialWorker {
         *self.offline.lock().unwrap() = offline;
     }
 
-    fn execute_layers_sync(&self, req: ForwardStepRequest) -> Result<ForwardStepResponse, EngineError> {
+    fn execute_layers_sync(
+        &self,
+        req: ForwardStepRequest,
+    ) -> Result<ForwardStepResponse, EngineError> {
         if *self.offline.lock().unwrap() {
             return Err(EngineError::NodeFailed(self.worker_id.clone()));
         }
@@ -217,9 +218,8 @@ impl PartialLayerEngine for ReferencePartialWorker {
         end_layer: u32,
         history: Vec<CompressedActivation>,
         output_codec: ActivationCodec,
-    ) -> std::pin::Pin<
-        Box<dyn std::future::Future<Output = Result<u32, EngineError>> + Send + '_>,
-    > {
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<u32, EngineError>> + Send + '_>>
+    {
         let res = (|| {
             let mut last_kv = 0u32;
             for (step_idx, act) in history.into_iter().enumerate() {
