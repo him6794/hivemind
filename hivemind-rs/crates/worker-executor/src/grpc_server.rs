@@ -1615,6 +1615,12 @@ impl WorkerNodeService for GrpcWorkerNodeService {
             Err(error) if error.is::<crate::SharingUnavailable>() => {
                 Err(Status::unavailable(error.to_string()))
             }
+            Err(error)
+                if error.is::<crate::ConcurrencyLimitReached>()
+                    || error.is::<crate::InsufficientMemoryOrVram>() =>
+            {
+                Err(Status::resource_exhausted(error.to_string()))
+            }
             Err(_error) => {
                 if is_managed_gpu {
                     Err(Status::internal(

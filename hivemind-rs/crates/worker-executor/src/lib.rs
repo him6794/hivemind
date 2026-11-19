@@ -12,6 +12,7 @@ pub mod resource_monitor;
 pub mod runtime_admission;
 pub mod sandbox;
 pub mod sharing;
+pub mod web_auth;
 
 use anyhow::Result;
 use attempt_stop_fence::AttemptStopFenceStore;
@@ -36,6 +37,21 @@ pub enum StopTaskOutcome {
 #[derive(Debug, thiserror::Error)]
 #[error("Worker is not accepting new tasks under its sharing settings")]
 pub(crate) struct SharingUnavailable;
+
+#[derive(Debug, thiserror::Error)]
+#[error("Worker reached its maximum concurrent task limit ({limit})")]
+pub struct ConcurrencyLimitReached {
+    pub limit: usize,
+    pub active: usize,
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("Worker has insufficient {resource}: required {required_mb} MiB, available {available_mb} MiB")]
+pub struct InsufficientMemoryOrVram {
+    pub resource: &'static str,
+    pub required_mb: u64,
+    pub available_mb: u64,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct ActiveTaskKey {
@@ -114,6 +130,7 @@ impl std::fmt::Debug for HcodeArtifactAccess {
 
 pub struct WorkerExecutor {
     active_tasks: ActiveTaskMap,
+    max_concurrent_tasks: usize,
     stop_fences: AttemptStopFenceStore,
     latest_resource_sample: Arc<std::sync::RwLock<Option<ResourceSample>>>,
     resource_refresh_lock: Arc<Mutex<()>>,
@@ -130,6 +147,7 @@ impl WorkerExecutor {
     }
 
     pub fn try_new(config: HivemindConfig) -> Result<Self> {
+        let max_concurrent_tasks = config.executor.max_concurrent_tasks.max(1);
         let runner_config = config.clone();
         #[cfg(test)]
         let stop_fences = AttemptStopFenceStore::in_memory();
@@ -197,6 +215,7 @@ impl WorkerExecutor {
         Ok(Self {
             benchmark,
             sharing,
+            max_concurrent_tasks,
             active_tasks: Arc::new(Mutex::new(ActiveTaskRegistry {
                 running: HashMap::new(),
                 stopped: stop_fences.fences(),
@@ -239,13 +258,13 @@ impl WorkerExecutor {
     }
 
     #[cfg(test)]
-    fn new_with_task_runner<F, Fut>(_config: HivemindConfig, task_runner: F) -> Self
+    fn new_with_task_runner<F, Fut>(config: HivemindConfig, task_runner: F) -> Self
     where
         F: Fn(Task, watch::Receiver<bool>) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = Result<TaskResult>> + Send + 'static,
     {
         Self::new_with_task_runner_and_stop_fences(
-            _config,
+            config,
             task_runner,
             AttemptStopFenceStore::in_memory(),
         )
@@ -253,7 +272,7 @@ impl WorkerExecutor {
 
     #[cfg(test)]
     fn new_with_task_runner_and_stop_fences<F, Fut>(
-        _config: HivemindConfig,
+        config: HivemindConfig,
         task_runner: F,
         stop_fences: AttemptStopFenceStore,
     ) -> Self
@@ -261,10 +280,12 @@ impl WorkerExecutor {
         F: Fn(Task, watch::Receiver<bool>) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = Result<TaskResult>> + Send + 'static,
     {
+        let max_concurrent_tasks = config.executor.max_concurrent_tasks.max(1);
         Self {
             benchmark: benchmark::BenchmarkCoordinator::new(None).expect("test benchmark state"),
-            sharing: sharing::SharingController::new(_config.worker_sharing, None)
+            sharing: sharing::SharingController::new(config.worker_sharing, None)
                 .expect("test sharing settings"),
+            max_concurrent_tasks,
             active_tasks: Arc::new(Mutex::new(ActiveTaskRegistry {
                 running: HashMap::new(),
                 stopped: stop_fences.fences(),
@@ -281,6 +302,35 @@ impl WorkerExecutor {
             runtime_admission: runtime_admission::WorkerRuntimeAdmission::default(),
         }
     }
+
+    /// Configured maximum number of concurrent tasks this Worker will run.
+    #[must_use]
+    pub fn max_concurrent_tasks(&self) -> usize {
+        self.max_concurrent_tasks
+    }
+
+    /// Current number of active in-flight tasks on this Worker.
+    #[must_use]
+    pub fn active_task_count(&self) -> usize {
+        self.active_tasks
+            .lock()
+            .map(|guard| guard.running.len())
+            .unwrap_or(0)
+    }
+
+    /// Checks whether the host has enough available RAM and VRAM for a workload.
+    pub fn check_memory_admission(
+        &self,
+        required_ram_mb: u64,
+        required_vram_mb: u64,
+    ) -> std::result::Result<(), InsufficientMemoryOrVram> {
+        if required_ram_mb == 0 && required_vram_mb == 0 {
+            return Ok(());
+        }
+        let resources = self.get_system_resources();
+        check_resources_against(&resources, required_ram_mb, required_vram_mb)
+    }
+
     pub async fn execute_task(&self, task: &Task) -> Result<TaskResult> {
         self.execute_task_with_attempt(task, "").await
     }
@@ -336,6 +386,34 @@ impl WorkerExecutor {
         let (cancellation_tx, cancellation_rx) = watch::channel(false);
         let (result_tx, result_rx) = watch::channel(None);
         let active_task_key = ActiveTaskKey::new(&task.task_id, attempt_id);
+
+        let required_ram_mb = u64::try_from(task.req_memory_gb).unwrap_or(0).saturating_mul(1024);
+        let required_vram_mb = u64::try_from(task.req_gpu_memory_gb)
+            .unwrap_or(0)
+            .saturating_mul(1024);
+        // Perform memory/VRAM admission before taking the active_tasks lock so we
+        // never hold the mutex while refreshing system resource gauges.
+        let should_check_memory = {
+            let now = chrono::Utc::now().timestamp();
+            let guard = self.active_tasks.lock().ok();
+            let already_running = guard
+                .as_ref()
+                .is_some_and(|tasks| tasks.running.contains_key(&active_task_key));
+            let already_stopped = guard.as_ref().is_some_and(|tasks| {
+                tasks
+                    .stopped
+                    .get(&active_task_key)
+                    .is_some_and(|expires_at| attempt_stop_fence::is_active(*expires_at, now))
+            });
+            !already_running
+                && !already_stopped
+                && self.sharing_status().accepts_tasks
+                && (required_ram_mb > 0 || required_vram_mb > 0)
+        };
+        if should_check_memory {
+            self.check_memory_admission(required_ram_mb, required_vram_mb)?;
+        }
+
         let existing_result_rx = {
             let mut active_tasks = self
                 .active_tasks
@@ -356,6 +434,13 @@ impl WorkerExecutor {
                 // still join above, and a later mode change never cancels them.
                 if !self.sharing_status().accepts_tasks {
                     return Err(SharingUnavailable.into());
+                }
+                if active_tasks.running.len() >= self.max_concurrent_tasks {
+                    return Err(ConcurrencyLimitReached {
+                        limit: self.max_concurrent_tasks,
+                        active: active_tasks.running.len(),
+                    }
+                    .into());
                 }
                 active_tasks.running.insert(
                     active_task_key.clone(),
@@ -540,6 +625,17 @@ impl WorkerExecutor {
             .clone()
     }
 
+    #[cfg(test)]
+    pub(crate) fn set_resource_sample_for_test(&self, resources: SystemResources) {
+        *self
+            .latest_resource_sample
+            .write()
+            .unwrap_or_else(|error| error.into_inner()) = Some(ResourceSample {
+            resources,
+            sampled_at: chrono::Utc::now(),
+        });
+    }
+
     pub fn get_resource_spec(&self) -> hivemind_models::ResourceSpec {
         resource_monitor::to_resource_spec(&self.get_system_resources())
     }
@@ -572,6 +668,50 @@ impl WorkerExecutor {
     pub fn runtime_admission(&self) -> runtime_admission::WorkerRuntimeAdmission {
         self.runtime_admission.clone()
     }
+}
+
+/// Evaluates whether `resources` can satisfy a RAM + VRAM requirement.
+pub fn check_resources_against(
+    resources: &SystemResources,
+    required_ram_mb: u64,
+    required_vram_mb: u64,
+) -> std::result::Result<(), InsufficientMemoryOrVram> {
+    if required_ram_mb > 0 {
+        let available_ram_mb = if resources.memory_supported {
+            u64::try_from(resources.available_memory_gb)
+                .unwrap_or(0)
+                .saturating_mul(1024)
+        } else {
+            0
+        };
+        if available_ram_mb < required_ram_mb {
+            return Err(InsufficientMemoryOrVram {
+                resource: "RAM",
+                required_mb: required_ram_mb,
+                available_mb: available_ram_mb,
+            });
+        }
+    }
+    if required_vram_mb > 0 {
+        let max_gpu_vram_mb = if resources.vram_available_supported {
+            resources
+                .gpu_infos
+                .iter()
+                .map(|gpu| u64::try_from(gpu.vram_available_mb).unwrap_or(0))
+                .max()
+                .unwrap_or(0)
+        } else {
+            0
+        };
+        if max_gpu_vram_mb < required_vram_mb {
+            return Err(InsufficientMemoryOrVram {
+                resource: "VRAM",
+                required_mb: required_vram_mb,
+                available_mb: max_gpu_vram_mb,
+            });
+        }
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]

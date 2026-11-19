@@ -685,6 +685,206 @@ async fn overlapping_attempts_keep_execution_and_cancellation_isolated() {
     assert_eq!(calls.load(Ordering::SeqCst), 2);
 }
 
+
+#[tokio::test]
+async fn concurrency_limit_caps_parallel_tasks_and_allows_joining_same_attempt() {
+    let mut config = HivemindConfig::default();
+    config.executor.max_concurrent_tasks = 2;
+
+    let started = Arc::new(AtomicUsize::new(0));
+    let two_started = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+
+    let executor = Arc::new(WorkerExecutor::new_with_task_runner(config, {
+        let started = started.clone();
+        let two_started = two_started.clone();
+        let release = release.clone();
+        move |task, _cancellation| {
+            let started = started.clone();
+            let two_started = two_started.clone();
+            let release = release.clone();
+            async move {
+                if started.fetch_add(1, Ordering::SeqCst) + 1 >= 2 {
+                    two_started.notify_waiters();
+                }
+                release.notified().await;
+                Ok(TaskResult {
+                    task_id: task.task_id,
+                    success: true,
+                    output: Some("ok".into()),
+                    error: None,
+                    exit_code: 0,
+                    cpu_time_ms: None,
+                    wall_time_ms: None,
+                    peak_memory_mb: None,
+                    managed_executed_ops: 0,
+                    managed_output_bytes: 0,
+                    managed_receipt_json: None,
+                    general_compute_result_json: None,
+                    managed_gpu_result_json: None,
+                })
+            }
+        }
+    }));
+
+    assert_eq!(executor.max_concurrent_tasks(), 2);
+    executor.set_resource_sample_for_test(synthetic_resources(32, 0));
+
+    let t1 = test_task("conc-1");
+    let t2 = test_task("conc-2");
+    let t3 = test_task("conc-3");
+
+    let h1 = {
+        let exec = executor.clone();
+        let task = t1.clone();
+        tokio::spawn(async move { exec.execute_task_with_attempt(&task, "a1").await })
+    };
+    let h2 = {
+        let exec = executor.clone();
+        let task = t2.clone();
+        tokio::spawn(async move { exec.execute_task_with_attempt(&task, "a1").await })
+    };
+
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while started.load(Ordering::SeqCst) < 2 {
+            two_started.notified().await;
+        }
+    })
+    .await
+    .expect("two tasks should start concurrently");
+    assert_eq!(executor.active_task_count(), 2);
+
+    // A 3rd distinct task must be rejected with ConcurrencyLimitReached.
+    let err = executor
+        .execute_task_with_attempt(&t3, "a1")
+        .await
+        .expect_err("third concurrent task must be rejected");
+    let limit_err = err
+        .downcast_ref::<ConcurrencyLimitReached>()
+        .expect("error must be ConcurrencyLimitReached");
+    assert_eq!(limit_err.limit, 2);
+    assert_eq!(limit_err.active, 2);
+
+    // Joining an already-running attempt must NOT consume an extra slot.
+    let join_h1 = {
+        let exec = executor.clone();
+        let task = t1.clone();
+        tokio::spawn(async move { exec.execute_task_with_attempt(&task, "a1").await })
+    };
+
+    release.notify_waiters();
+    assert!(h1.await.unwrap().unwrap().success);
+    assert!(h2.await.unwrap().unwrap().success);
+    assert!(join_h1.await.unwrap().unwrap().success);
+    assert_eq!(started.load(Ordering::SeqCst), 2);
+    assert_eq!(executor.active_task_count(), 0);
+
+    // Once slots free up, the 3rd task executes cleanly.
+    let h3 = {
+        let exec = executor.clone();
+        tokio::spawn(async move { exec.execute_task_with_attempt(&t3, "a1").await })
+    };
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    release.notify_waiters();
+    assert!(h3.await.unwrap().unwrap().success);
+}
+
+#[tokio::test]
+async fn memory_and_vram_admission_rejects_oversized_tasks_and_admits_fitting_ones() {
+    let executor = WorkerExecutor::new_with_task_runner(
+        HivemindConfig::default(),
+        |task, _cancellation| async move {
+            Ok(TaskResult {
+                task_id: task.task_id,
+                success: true,
+                output: Some("ok".into()),
+                error: None,
+                exit_code: 0,
+                cpu_time_ms: None,
+                wall_time_ms: None,
+                peak_memory_mb: None,
+                managed_executed_ops: 0,
+                managed_output_bytes: 0,
+                managed_receipt_json: None,
+                general_compute_result_json: None,
+                managed_gpu_result_json: None,
+            })
+        },
+    );
+
+    // Host reports 8 GiB available RAM and 6 GiB available VRAM.
+    executor.set_resource_sample_for_test(synthetic_resources(8, 6 * 1024));
+
+    let mut too_much_ram = test_task("mem-too-big");
+    too_much_ram.req_memory_gb = 16;
+    let ram_err = executor
+        .execute_task(&too_much_ram)
+        .await
+        .expect_err("task exceeding RAM must be rejected");
+    let ram_info = ram_err
+        .downcast_ref::<InsufficientMemoryOrVram>()
+        .expect("error must be InsufficientMemoryOrVram");
+    assert_eq!(ram_info.resource, "RAM");
+    assert_eq!(ram_info.required_mb, 16 * 1024);
+    assert_eq!(ram_info.available_mb, 8 * 1024);
+
+    let mut too_much_vram = test_task("vram-too-big");
+    too_much_vram.req_memory_gb = 4;
+    too_much_vram.req_gpu_memory_gb = 8;
+    let vram_err = executor
+        .execute_task(&too_much_vram)
+        .await
+        .expect_err("task exceeding VRAM must be rejected");
+    let vram_info = vram_err
+        .downcast_ref::<InsufficientMemoryOrVram>()
+        .expect("error must be InsufficientMemoryOrVram");
+    assert_eq!(vram_info.resource, "VRAM");
+    assert_eq!(vram_info.required_mb, 8 * 1024);
+    assert_eq!(vram_info.available_mb, 6 * 1024);
+
+    let mut fits = test_task("fits-ok");
+    fits.req_memory_gb = 4;
+    fits.req_gpu_memory_gb = 6;
+    let result = executor
+        .execute_task(&fits)
+        .await
+        .expect("task within RAM and VRAM limits should execute");
+    assert!(result.success);
+}
+
+fn synthetic_resources(available_memory_gb: i32, vram_available_mb: i64) -> SystemResources {
+    let gpu_infos = if vram_available_mb > 0 {
+        vec![GpuInfo {
+            index: 0,
+            name: "Test GPU".into(),
+            vram_total_mb: vram_available_mb + 1024,
+            vram_used_mb: 1024,
+            vram_available_mb,
+            gpu_utilization_percent: 10.0,
+        }]
+    } else {
+        Vec::new()
+    };
+    SystemResources {
+        cpu_cores: 8,
+        total_memory_gb: available_memory_gb.max(1) + 4,
+        available_memory_gb,
+        cpu_usage_percent: 5.0,
+        cpu_usage_supported: true,
+        memory_usage_percent: 20.0,
+        memory_supported: true,
+        gpu_count: i32::try_from(gpu_infos.len()).unwrap_or(0),
+        gpu_infos,
+        gpu_inventory_supported: vram_available_mb > 0,
+        gpu_utilization_supported: vram_available_mb > 0,
+        vram_total_supported: vram_available_mb > 0,
+        vram_available_supported: vram_available_mb > 0,
+        storage_supported: true,
+        storage_total_gb: 500,
+        storage_available_gb: 250,
+    }
+}
+
 fn test_task(task_id: &str) -> Task {
     let now = Utc::now();
     Task {
