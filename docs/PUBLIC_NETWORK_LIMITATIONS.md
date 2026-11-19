@@ -1,14 +1,19 @@
 # Public Network Limitations
 
-Version: `10d3c92e67034cfda345fb889029069dd40e0b4a` · 2026-10-05
+Version: `2026-11-19`
 
 See the [project manual](HIVEMIND_MANUAL.zh-TW.md) for configuration and the source index.
 
 ## First public version scope
 
-The first public version covers managed `hcode` CPU execution, quorum consensus,
-and Nodepool settlement. It excludes general-compute routes (OCI, GPU, and
-ONNX), Linux, macOS, and Android client packages, and the signed update channel.
+The core managed compute path covers managed `hcode` CPU execution, quorum consensus,
+and Nodepool settlement. Additional modules for OpenAI-compatible LLM inference
+(`model-catalog`, `model-swarm`, `llm-runtime`, `petals`, `llm-verifier`), bounded
+WebAssembly (`wasm-runtime`), multi-format model selection, and cross-platform C ABI
+(`hivemind-ffi`) are implemented in-tree with automated unit and database tests,
+while production public-internet multi-host rollouts, signed desktop/mobile installers,
+physical NPU driver certification, and the signed auto-update channel remain gated on
+real deployment validation.
 Lazy dispatch (`MANAGED_CONSENSUS_INITIAL_REPLICAS`) and hedging
 (`MANAGED_CONSENSUS_HEDGE_AFTER_SECS`) are off by default. The drain window
 (`MANAGED_CONSENSUS_DRAIN_SECS`) defaults to 5 seconds.
@@ -25,10 +30,38 @@ pilot deployments; general-compute beta admission has separate policy gates.
 Authentication does not attest hardware resources or establish provider
 independence. The trust model is defined in [AGENT.md](../AGENT.md).
 
-## Managed execution
+## LLM inference, privacy tiers, and distributed execution
+
+- **Tier 0 (Private Own-Device Mesh)**: Prompts and tasks are routed strictly to
+  devices owned by the requesting account (`StrictPrivate` / `X-Hivemind-Own-Devices-Only`).
+  Same-LAN private peers are preferred before WAN overlay hops.
+- **Tier 1 (Public Mutual-Aid Pool)**: Prompts sent to third-party public Workers are
+  **visible in plaintext to the executing Worker node**. Master UI displays an explicit
+  privacy warning and every OpenAI HTTP response emits `X-Hivemind-Data-Privacy: public-unencrypted-to-worker`.
+  Do not send regulated secrets or confidential personal data to Tier 1 public Workers.
+- **Tier 2 (Confidential Computing / TEE)**: Control-plane traits and routing tiers are
+  reserved (`tier2_tee`), but hardware remote attestation (NVIDIA CC / AMD SEV / Intel TDX)
+  is not active in the public pool until verified TEE hardware nodes are deployed.
+- **LLM runtime isolation**: `hivemind-llm-runtime` enforces Linux rootless OCI sandboxing
+  (namespaces, cgroup v2, seccomp, read-only root, deny-all network) when `RequiredOci` is
+  configured on Linux, and fails closed on non-Linux hosts. Native Windows does not claim
+  Linux rootless OCI isolation for `llama-server`.
+- **LLM quality verification**: Deterministic `hcode` and bounded `wasm-runtime` tasks can
+  use exact output consensus, whereas floating-point LLM inference varies slightly across
+  GPU/CPU backends. `hivemind-llm-verifier` provides teacher-forcing logprob/top-k spot
+  checks and node reputation quarantine, which detect gross tampering or model substitution
+  rather than providing cryptographic proof of honest execution.
+- **Distributed inference (`hivemind-petals`)**: Layer-sharded multi-hop execution, activation
+  compression, and KV-cache replay failover are verified in-process via async multi-node tests;
+  public-internet latency and stability depend on participating WAN links.
+
+## Managed execution & WebAssembly
 
 - New CPU managed work uses `hcode`, a closed Rust-owned interpreter
   with no file, network, import, subprocess, DLL, or arbitrary native API access.
+- `hivemind-wasm-runtime` provides a pure-Rust bounded WebAssembly / WASI-subset sandbox
+  enforcing fuel budgets, linear memory page caps, wall-clock timeouts, output byte caps,
+  and an explicit import allowlist (rejecting filesystem and network syscalls at load time).
 - `managed-function-v0` is retained for historical reads. New v0 submissions are
   rejected and unfinished historical work is retired.
 - Default enforced consensus dispatches three Workers from distinct owners. It
@@ -88,7 +121,7 @@ The current service contract does not include:
 - guaranteed operator diversity based on Worker count;
 - dispute resolution, public SLAs, or audited large-scale capacity and latency;
 - hostile-host hardening for every backend and operating system;
-- universal macOS/Android packages or an operational production signed-update channel.
+- signed/notarized macOS/iOS/Android app-store packages or an operational production signed-update channel.
 
 ## Rollout validation
 
