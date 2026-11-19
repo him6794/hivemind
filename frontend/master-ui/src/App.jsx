@@ -12,8 +12,11 @@ import {
   RefreshCw,
   Send,
   Sun,
+  MessageSquare,
   Workflow,
 } from 'lucide-react';
+import { LlmChatPanel } from './LlmChatPanel.jsx';
+import { PipelinesPanel } from './PipelinesPanel.jsx';
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from '@/components/ui/alert-dialog';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -1106,6 +1109,8 @@ export default function MasterApp() {
             <TabsList className="workspace-tabs-list" aria-label={t("Master workspace")}>
               <TabsTrigger value="tasks"><FileText aria-hidden="true" />{t("Tasks")}</TabsTrigger>
               <TabsTrigger value="submit"><Send aria-hidden="true" />{t("Submit")}</TabsTrigger>
+              <TabsTrigger value="llm"><MessageSquare aria-hidden="true" />{t("LLM Chat")}</TabsTrigger>
+              <TabsTrigger value="pipelines"><Workflow aria-hidden="true" />{t("Pipelines")}</TabsTrigger>
             </TabsList>
 
             <TabsContent value="tasks" className="workspace-panel animate-in fade-in-0 slide-in-from-bottom-1 duration-200">
@@ -1415,6 +1420,14 @@ export default function MasterApp() {
                   </form>
                 </CardContent>
               </Card>
+            </TabsContent>
+
+            <TabsContent value="llm" className="workspace-panel animate-in fade-in-0 slide-in-from-bottom-1 duration-200">
+              <LlmChatPanel token={token} apiBaseOrigin={window.location.origin} />
+            </TabsContent>
+
+            <TabsContent value="pipelines" className="workspace-panel animate-in fade-in-0 slide-in-from-bottom-1 duration-200">
+              <PipelinesPanel />
             </TabsContent>
           </Tabs>
         ) : null}
