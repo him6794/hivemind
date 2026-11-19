@@ -18,7 +18,8 @@ pub fn create_router(state: AppState) -> Router {
     let public = Router::new()
         .route("/health", get(super::handlers::health_check))
         .route("/api/register", post(super::handlers::register))
-        .route("/api/login", post(super::handlers::login));
+        .route("/api/login", post(super::handlers::login))
+        .route("/api/network/status", get(super::openai::get_public_network_status));
 
     let protected = Router::new()
         .route("/api/vpn/bootstrap", post(super::handlers::bootstrap_vpn))
@@ -144,6 +145,11 @@ pub fn create_router(state: AppState) -> Router {
             get(super::handlers::download_task_artifact),
         )
         .route("/api/tasks/:task_id/stop", post(super::handlers::stop_task))
+        .route("/v1/models", get(super::openai::list_models))
+        .route("/v1/chat/completions", post(super::openai::chat_completions))
+        .route("/v1/completions", post(super::openai::legacy_completions))
+        .route("/api/devices", get(super::openai::list_account_devices))
+        .route("/api/devices/:worker_id", put(super::openai::update_device_metadata))
         .layer(middleware::from_fn_with_state(
             state.clone(),
             mw::auth_middleware,
@@ -165,7 +171,18 @@ pub fn build_cors_layer(allowed_origins: &[String]) -> CorsLayer {
     CorsLayer::new()
         .allow_origin(AllowOrigin::list(origins))
         .allow_methods([Method::GET, Method::POST, Method::PUT, Method::OPTIONS])
-        .allow_headers([header::AUTHORIZATION, header::CONTENT_TYPE])
+        .allow_headers([
+            header::AUTHORIZATION,
+            header::CONTENT_TYPE,
+            header::HeaderName::from_static("x-hivemind-route-mode"),
+            header::HeaderName::from_static("x-hivemind-target-worker"),
+            header::HeaderName::from_static("x-hivemind-target-workers"),
+            header::HeaderName::from_static("x-hivemind-device-tag"),
+            header::HeaderName::from_static("x-hivemind-hardware"),
+            header::HeaderName::from_static("x-hivemind-own-devices-only"),
+            header::HeaderName::from_static("x-hivemind-trust-tier"),
+            header::HeaderName::from_static("x-hivemind-overflow-policy"),
+        ])
 }
 
 #[cfg(test)]

@@ -1,6 +1,7 @@
 #![allow(clippy::result_large_err)]
 
 use hivemind_proto::job_service_client::JobServiceClient;
+use hivemind_proto::llm_inference_service_client::LlmInferenceServiceClient;
 use hivemind_proto::{
     general_compute_artifact_service_client::GeneralComputeArtifactServiceClient,
     master_node_service_client::MasterNodeServiceClient,
@@ -44,6 +45,7 @@ struct ConnectedClients {
     node_mgr: NodeManagerServiceClient<Channel>,
     artifact: GeneralComputeArtifactServiceClient<Channel>,
     job: JobServiceClient<Channel>,
+    llm: LlmInferenceServiceClient<Channel>,
 }
 
 /// The resource and budget fields of a job, as the client sends them.
@@ -127,6 +129,7 @@ impl GrpcClient {
             job: JobServiceClient::new(channel.clone())
                 .max_decoding_message_size(max_msg)
                 .max_encoding_message_size(max_msg),
+            llm: LlmInferenceServiceClient::new(channel.clone()),
             artifact: GeneralComputeArtifactServiceClient::new(channel)
                 .max_decoding_message_size(
                     hivemind_proto::GENERAL_COMPUTE_CHUNK_RPC_MESSAGE_MAX_BYTES,
@@ -992,6 +995,99 @@ impl GrpcClient {
             clients
                 .node_mgr
                 .remove_worker(Request::new(RemoveWorkerRequest { worker_id, token }))
+                .await
+                .map(|r| r.into_inner())
+        })
+        .await
+    }
+
+    pub async fn list_online_models(
+        &mut self,
+        token: &str,
+        own_devices_only: bool,
+    ) -> Result<hivemind_proto::ListOnlineModelsResponse, tonic::Status> {
+        let token = token.to_string();
+        self.with_clients(|mut clients| async move {
+            clients
+                .llm
+                .list_online_models(Request::new(hivemind_proto::ListOnlineModelsRequest {
+                    token,
+                    own_devices_only,
+                }))
+                .await
+                .map(|r| r.into_inner())
+        })
+        .await
+    }
+
+    pub async fn llm_infer(
+        &mut self,
+        req: hivemind_proto::LlmInferRequest,
+    ) -> Result<hivemind_proto::LlmInferResponse, tonic::Status> {
+        self.with_clients(|mut clients| async move {
+            clients
+                .llm
+                .llm_infer(Request::new(req))
+                .await
+                .map(|r| r.into_inner())
+        })
+        .await
+    }
+
+    pub async fn llm_infer_stream(
+        &mut self,
+        req: hivemind_proto::LlmInferRequest,
+    ) -> Result<tonic::Streaming<hivemind_proto::LlmInferChunk>, tonic::Status> {
+        self.with_clients(|mut clients| async move {
+            clients
+                .llm
+                .llm_infer_stream(Request::new(req))
+                .await
+                .map(|r| r.into_inner())
+        })
+        .await
+    }
+
+    pub async fn list_account_devices(
+        &mut self,
+        token: &str,
+    ) -> Result<hivemind_proto::ListAccountDevicesResponse, tonic::Status> {
+        let token = token.to_string();
+        self.with_clients(|mut clients| async move {
+            clients
+                .llm
+                .list_account_devices(Request::new(hivemind_proto::ListAccountDevicesRequest {
+                    token,
+                }))
+                .await
+                .map(|r| r.into_inner())
+        })
+        .await
+    }
+
+    pub async fn update_device_metadata(
+        &mut self,
+        req: hivemind_proto::UpdateDeviceMetadataRequest,
+    ) -> Result<hivemind_proto::UpdateDeviceMetadataResponse, tonic::Status> {
+        self.with_clients(|mut clients| async move {
+            clients
+                .llm
+                .update_device_metadata(Request::new(req))
+                .await
+                .map(|r| r.into_inner())
+        })
+        .await
+    }
+
+    pub async fn get_public_network_status(
+        &mut self,
+    ) -> Result<hivemind_proto::GetPublicNetworkStatusResponse, tonic::Status> {
+        self.with_clients(|mut clients| async move {
+            clients
+                .llm
+                .get_public_network_status(Request::new(
+                    hivemind_proto::GetPublicNetworkStatusRequest {},
+                ))
                 .await
                 .map(|r| r.into_inner())
         })
