@@ -26,6 +26,8 @@ thiserror.workspace = true
 anyhow.workspace = true
 sysinfo.workspace = true
 sha2.workspace = true
+hex.workspace = true
+rand.workspace = true
 pollster = "0.4"
 wgpu = { version = "=30.0.1", default-features = false, features = ["std", "parking_lot", "wgsl", "dx12", "vulkan"] }
 hivemind-proto = { path = "../proto" }

@@ -12,6 +12,11 @@ pub mod resource_monitor;
 pub mod runtime_admission;
 pub mod sandbox;
 pub mod sharing;
+pub mod cas_gc;
+pub mod device_auth;
+pub mod hardware_probe;
+pub mod os_keyring;
+pub mod resource_policy;
 pub mod web_auth;
 
 use anyhow::Result;
