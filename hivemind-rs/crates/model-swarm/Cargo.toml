@@ -1,0 +1,15 @@
+[package]
+name = "hivemind-model-swarm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+hex.workspace = true
+rand.workspace = true
+sha1.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
