@@ -1,0 +1,15 @@
+[package]
+name = "hivemind-llm-verifier"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Non-deterministic LLM quality verification, node reputation, signed upload receipts, and anti-sybil economics"
+
+[dependencies]
+chrono.workspace = true
+ed25519-dalek.workspace = true
+hex.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
