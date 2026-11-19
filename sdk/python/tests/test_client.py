@@ -265,5 +265,39 @@ class SdkTests(unittest.TestCase):
         self.assertEqual(rows[0]["billed_cpt"], "8")
 
 
+
+    def test_llm_chat_wasm_and_dag_pipeline_methods(self):
+        self.master.answer("GET", "/v1/models", 200, {"object": "list", "data": [{"id": "qwen2.5-7b-q4"}]})
+        models = self.client.list_models()
+        self.assertEqual(models[0]["id"], "qwen2.5-7b-q4")
+
+        self.master.answer(
+            "POST",
+            "/v1/chat/completions",
+            200,
+            {"id": "chatcmpl-1", "choices": [{"message": {"role": "assistant", "content": "ok"}}]},
+        )
+        reply = self.client.chat_completions(
+            "qwen2.5-7b-q4",
+            [{"role": "user", "content": "hello"}],
+            max_tokens=64,
+            routing={"mode": "manual", "own_devices_only": True, "trust_tier": "tier0_private"},
+        )
+        self.assertEqual(reply["id"], "chatcmpl-1")
+        req = self.master.requests[-1]
+        self.assertEqual(req["headers"]["X-Hivemind-Route-Mode"], "manual")
+        self.assertEqual(req["headers"]["X-Hivemind-Own-Devices-Only"], "true")
+        self.assertEqual(req["headers"]["X-Hivemind-Trust-Tier"], "tier0_private")
+
+        self.master.answer("POST", "/api/tasks", 201, {"success": True, "task_id": "wasm-job-1"})
+        wasm = self.client.submit_wasm_task("wasm-job-1", "AGFzbQEAAAA=", max_fuel=1000)
+        self.assertEqual(wasm["task_id"], "wasm-job-1")
+        self.assertEqual(self.master.requests[-1]["body"]["runtime"], "wasm-wasi-v1")
+
+        self.master.answer("POST", "/api/pipelines", 201, {"success": True, "pipeline_id": "dag-42"})
+        dag = self.client.create_dag_pipeline("demo", [{"id": "a", "depends_on": []}], budget_cpt=100)
+        self.assertEqual(dag["pipeline_id"], "dag-42")
+
+
 if __name__ == "__main__":
     unittest.main()

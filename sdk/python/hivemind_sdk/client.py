@@ -85,11 +85,14 @@ class Client:
         path: str,
         body: Any = None,
         query: Optional[Mapping[str, Any]] = None,
+        extra_headers: Optional[Mapping[str, str]] = None,
     ) -> Any:
         url = self._base + path
         if query:
             url += "?" + urllib.parse.urlencode(query)
         headers = {"Authorization": f"Bearer {self._token}", "Accept": "application/json"}
+        if extra_headers:
+            headers.update(extra_headers)
         data = None
         if body is not None:
             data = json.dumps(body).encode("utf-8")
@@ -100,7 +103,13 @@ class Client:
                 return _decode(response.read())
         except urllib.error.HTTPError as error:
             payload = _decode(error.read())
-            message = payload.get("message") if isinstance(payload, dict) else None
+            message = None
+            if isinstance(payload, dict):
+                err_obj = payload.get("error")
+                if isinstance(err_obj, dict):
+                    message = err_obj.get("message")
+                if not message:
+                    message = payload.get("message")
             raise HivemindError(error.code, str(message or error.reason or "request failed")) from None
         except OSError as error:
             raise HivemindError(0, f"could not reach {self._base}: {error.__class__.__name__}") from None
@@ -267,6 +276,163 @@ class Client:
     def revoke_token(self, token_id: str) -> Dict[str, Any]:
         """Revokes one token. It stops working at once."""
         return self._request("DELETE", f"/api/tokens/{_path_id(token_id)}")
+
+
+
+    # Unified OpenAI-compatible LLM inference endpoints
+
+    @staticmethod
+    def _routing_headers(routing: Optional[Mapping[str, Any]]) -> Dict[str, str]:
+        if not routing:
+            return {}
+        headers: Dict[str, str] = {}
+        mapping = {
+            "mode": "X-Hivemind-Route-Mode",
+            "target_worker": "X-Hivemind-Target-Worker",
+            "device_tag": "X-Hivemind-Device-Tag",
+            "hardware": "X-Hivemind-Hardware",
+            "trust_tier": "X-Hivemind-Trust-Tier",
+            "overflow_policy": "X-Hivemind-Overflow-Policy",
+        }
+        for key, header in mapping.items():
+            if routing.get(key) is not None:
+                headers[header] = str(routing[key])
+        if "own_devices_only" in routing and routing["own_devices_only"] is not None:
+            headers["X-Hivemind-Own-Devices-Only"] = "true" if routing["own_devices_only"] else "false"
+        if routing.get("target_workers"):
+            headers["X-Hivemind-Target-Workers"] = ",".join(str(w) for w in routing["target_workers"])
+        return headers
+
+    def list_models(self) -> List[Dict[str, Any]]:
+        """Lists online models exposed through the OpenAI-compatible `/v1/models` endpoint."""
+        return list(self._request("GET", "/v1/models").get("data", []))
+
+    def chat_completions(
+        self,
+        model: str,
+        messages: Sequence[Mapping[str, Any]],
+        *,
+        max_tokens: Optional[int] = None,
+        temperature: Optional[float] = None,
+        top_p: Optional[float] = None,
+        stop: Optional[Sequence[str]] = None,
+        routing: Optional[Mapping[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Calls `POST /v1/chat/completions` in non-streaming mode."""
+        body: Dict[str, Any] = {"model": model, "messages": list(messages), "stream": False}
+        if max_tokens is not None:
+            body["max_tokens"] = max_tokens
+        if temperature is not None:
+            body["temperature"] = temperature
+        if top_p is not None:
+            body["top_p"] = top_p
+        if stop is not None:
+            body["stop"] = list(stop)
+        return self._request(
+            "POST",
+            "/v1/chat/completions",
+            body,
+            extra_headers=self._routing_headers(routing),
+        )
+
+    def stream_chat_completions(
+        self,
+        model: str,
+        messages: Sequence[Mapping[str, Any]],
+        *,
+        max_tokens: Optional[int] = None,
+        temperature: Optional[float] = None,
+        routing: Optional[Mapping[str, Any]] = None,
+    ) -> Iterator[Dict[str, Any]]:
+        """Streams SSE chunks from `POST /v1/chat/completions` with `stream=true`."""
+        body: Dict[str, Any] = {"model": model, "messages": list(messages), "stream": True}
+        if max_tokens is not None:
+            body["max_tokens"] = max_tokens
+        if temperature is not None:
+            body["temperature"] = temperature
+        headers = {
+            "Authorization": f"Bearer {self._token}",
+            "Accept": "text/event-stream",
+            "Content-Type": "application/json",
+        }
+        headers.update(self._routing_headers(routing))
+        request = urllib.request.Request(
+            self._base + "/v1/chat/completions",
+            data=json.dumps(body).encode("utf-8"),
+            method="POST",
+            headers=headers,
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=self._timeout) as response:
+                for raw_line in response:
+                    line = raw_line.decode("utf-8", errors="replace").strip()
+                    if not line.startswith("data:"):
+                        continue
+                    payload = line[5:].strip()
+                    if payload == "[DONE]":
+                        return
+                    if payload:
+                        yield json.loads(payload)
+        except urllib.error.HTTPError as error:
+            payload = _decode(error.read())
+            err_msg = (payload.get("error") or {}).get("message") if isinstance(payload, dict) else None
+            raise HivemindError(error.code, str(err_msg or payload.get("message") or error.reason)) from None
+        except OSError as error:
+            raise HivemindError(0, f"could not reach {self._base}: {error.__class__.__name__}") from None
+
+    # WASM/WASI tasks & DAG pipelines
+
+    def submit_wasm_task(
+        self,
+        task_id: str,
+        wasm_base64: str,
+        *,
+        entrypoint: str = "_start",
+        input_json: str = "{}",
+        max_fuel: int = 10_000_000,
+        max_memory_pages: int = 256,
+        max_cpt: int = 50,
+    ) -> Dict[str, Any]:
+        """Submits a bounded WASM/WASI general-compute task."""
+        body = {
+            "task_id": task_id,
+            "runtime": "wasm-wasi-v1",
+            "task_source": wasm_base64,
+            "torrent": json.dumps({
+                "entrypoint": entrypoint,
+                "input": input_json,
+                "max_fuel": max_fuel,
+                "max_memory_pages": max_memory_pages,
+            }),
+            "max_cpt": max_cpt,
+        }
+        return self._request("POST", "/api/tasks", body)
+
+    def create_dag_pipeline(
+        self,
+        name: str,
+        nodes: Sequence[Mapping[str, Any]],
+        *,
+        budget_cpt: int,
+    ) -> Dict[str, Any]:
+        """Creates a server-side DAG workflow with map/reduce dependencies and a total CPT budget."""
+        return self._request(
+            "POST",
+            "/api/pipelines",
+            {"name": name, "budget_cpt": budget_cpt, "nodes": list(nodes)},
+        )
+
+    def get_dag_pipeline(self, pipeline_id: str) -> Dict[str, Any]:
+        return self._request("GET", f"/api/pipelines/{_path_id(pipeline_id)}")
+
+    def cancel_dag_pipeline(self, pipeline_id: str) -> Dict[str, Any]:
+        return self._request("POST", f"/api/pipelines/{_path_id(pipeline_id)}/cancel")
+
+    def list_devices(self) -> List[Dict[str, Any]]:
+        return list(self._request("GET", "/api/devices").get("devices", []))
+
+    def network_status(self) -> Dict[str, Any]:
+        return self._request("GET", "/api/network/status")
 
 
 def _path_id(value: str) -> str:

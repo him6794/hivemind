@@ -1,0 +1,17 @@
+{
+  "name": "@hivemind/sdk",
+  "version": "0.1.0",
+  "description": "Zero-dependency JavaScript/TypeScript SDK for Hivemind unified LLM inference, WASM tasks, and DAG pipelines",
+  "type": "module",
+  "main": "./index.mjs",
+  "types": "./index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./index.mjs",
+      "types": "./index.d.ts"
+    }
+  },
+  "scripts": {
+    "test": "node --test test/*.test.mjs"
+  }
+}
