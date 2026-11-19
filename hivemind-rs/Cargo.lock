@@ -2156,6 +2156,45 @@ dependencies = [
 ]
 
 [[package]]
+name = "hivemind-ffi"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "hivemind-llm-runtime"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "hex",
+ "hivemind-model-catalog",
+ "hivemind-model-swarm",
+ "rand 0.8.7",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tokio",
+]
+
+[[package]]
+name = "hivemind-llm-verifier"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "ed25519-dalek",
+ "hex",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror 1.0.69",
+]
+
+[[package]]
 name = "hivemind-managed-consensus"
 version = "0.1.0"
 dependencies = [
@@ -2191,11 +2230,36 @@ dependencies = [
  "sha2 0.10.9",
  "sqlx",
  "tokio",
+ "tokio-stream",
  "tonic",
  "tower",
  "tower-http 0.5.2",
  "tracing",
  "uuid",
+]
+
+[[package]]
+name = "hivemind-model-catalog"
+version = "0.1.0"
+dependencies = [
+ "ed25519-dalek",
+ "hex",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror 1.0.69",
+]
+
+[[package]]
+name = "hivemind-model-swarm"
+version = "0.1.0"
+dependencies = [
+ "hex",
+ "rand 0.8.7",
+ "sha1 0.10.6",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tokio",
 ]
 
 [[package]]
@@ -2225,6 +2289,8 @@ dependencies = [
  "hivemind-config",
  "hivemind-database",
  "hivemind-managed-consensus",
+ "hivemind-model-catalog",
+ "hivemind-model-swarm",
  "hivemind-models",
  "hivemind-proto",
  "hivemind-task-scheduler",
@@ -2232,12 +2298,29 @@ dependencies = [
  "prost",
  "rand 0.8.7",
  "reqwest 0.12.28",
+ "serde",
  "serde_json",
  "sha2 0.10.9",
  "sqlx",
+ "thiserror 1.0.69",
  "tokio",
  "tokio-stream",
  "tonic",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "hivemind-petals"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "hex",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror 1.0.69",
+ "tokio",
  "tracing",
  "uuid",
 ]
@@ -2312,6 +2395,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "hivemind-wasm-runtime"
+version = "0.1.0"
+dependencies = [
+ "hex",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror 1.0.69",
+]
+
+[[package]]
 name = "hivemind-website-api"
 version = "0.1.0"
 dependencies = [
@@ -2336,6 +2430,7 @@ dependencies = [
  "axum 0.7.9",
  "chrono",
  "general-compute-runtime",
+ "hex",
  "hivemind-auth",
  "hivemind-client-runtime",
  "hivemind-config",
@@ -2347,6 +2442,7 @@ dependencies = [
  "managed-function-runtime",
  "pollster",
  "prost",
+ "rand 0.8.7",
  "serde",
  "serde_json",
  "sha2 0.10.9",
