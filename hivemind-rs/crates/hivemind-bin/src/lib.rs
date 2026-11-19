@@ -643,6 +643,17 @@ async fn run_service_inner(
         .max_decoding_message_size(hivemind_node_manager::hcode_probes::HCODE_PROBE_RPC_MAX_BYTES)
         .max_encoding_message_size(hivemind_node_manager::hcode_probes::HCODE_PROBE_RPC_MAX_BYTES);
         let vpn_svc = VpnServiceServer::new(GrpcVpnService::new(vpn));
+        let llm_svc = hivemind_proto::llm_inference_service_server::LlmInferenceServiceServer::new(
+            hivemind_node_manager::llm_control::GrpcLlmInferenceService::new(
+                np_state.clone(),
+                db.pool.clone(),
+            ),
+        );
+        let swarm_tracker_svc = hivemind_proto::model_swarm_tracker_service_server::ModelSwarmTrackerServiceServer::new(
+            hivemind_node_manager::llm_control::GrpcModelSwarmTrackerService::new(
+                np_state.clone(),
+            ),
+        );
         let job_svc = JobServiceServer::new(hivemind_node_manager::jobs::GrpcJobService::new(
             np_state.clone(),
         ))
@@ -670,6 +681,8 @@ async fn run_service_inner(
                 .add_service(session_svc)
                 .add_service(vpn_svc)
                 .add_service(job_svc)
+                .add_service(llm_svc)
+                .add_service(swarm_tracker_svc)
                 .serve(np_addr.parse().unwrap())
                 .await
             {
